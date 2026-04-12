@@ -239,6 +239,20 @@ if __name__ == "__main__":
     model_name = args.model_name
     init_nodes_num = args.init_nodes_num
     is_local_network = args.is_local_network
+
+    if model_name is None or init_nodes_num is None:
+        saved_runtime = scheduler_manage.load_runtime_config()
+        if saved_runtime is not None:
+            model_name = saved_runtime.get("model_name")
+            init_nodes_num = saved_runtime.get("init_nodes_num")
+            is_local_network = saved_runtime.get("is_local_network", is_local_network)
+            logger.info(
+                "Restored persisted scheduler config: model_name=%s init_nodes_num=%s is_local_network=%s",
+                model_name,
+                init_nodes_num,
+                is_local_network,
+            )
+
     if model_name is not None and init_nodes_num is not None:
         scheduler_manage.run(model_name, init_nodes_num, is_local_network)
 

@@ -1,5 +1,7 @@
+import json
 import threading
 import time
+from pathlib import Path
 from typing import List
 
 from lattica import Lattica
@@ -14,6 +16,8 @@ from scheduling.node import RequestSignal
 from scheduling.scheduler import Scheduler
 
 logger = get_logger(__name__)
+
+SCHEDULER_STATE_PATH = Path("/tmp/parallax_scheduler_state.json")
 
 
 class SchedulerManage:
@@ -54,6 +58,23 @@ class SchedulerManage:
         self.stubs = {}
         self.is_local_network = False
 
+    def persist_runtime_config(self, model_name, init_nodes_num, is_local_network) -> None:
+        data = {
+            "model_name": model_name,
+            "init_nodes_num": init_nodes_num,
+            "is_local_network": is_local_network,
+        }
+        SCHEDULER_STATE_PATH.write_text(json.dumps(data))
+
+    def load_runtime_config(self):
+        if not SCHEDULER_STATE_PATH.exists():
+            return None
+        try:
+            return json.loads(SCHEDULER_STATE_PATH.read_text())
+        except Exception as e:
+            logger.warning(f"Failed to load persisted scheduler config: {e}")
+            return None
+
     def run(self, model_name, init_nodes_num, is_local_network=True):
         """
         Start the scheduler and the P2P service for RPC handling.
@@ -69,6 +90,7 @@ class SchedulerManage:
             self.initial_peers = PUBLIC_INITIAL_PEERS
             self.relay_servers = PUBLIC_RELAY_SERVERS
 
+        self.persist_runtime_config(model_name, init_nodes_num, is_local_network)
         self._start_scheduler(model_name, init_nodes_num)
         self._start_lattica()
         self.completion_handler = TransformerConnectionHandler(
