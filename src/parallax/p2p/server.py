@@ -505,7 +505,9 @@ class GradientServer:
                 self.scheduler_stub = RPCConnectionHandler(self.lattica, None, None).get_stub(
                     self.scheduler_peer_id
                 )
+                logger.info("Building node info before scheduler join (peer_id=%s)", self.scheduler_peer_id)
                 node_info = self.get_node_info()
+                logger.info("Built node info before scheduler join: empty=%s", node_info == {})
                 if node_info == {}:
                     logger.error("Failed to get node info, try again after 10 seconds")
                     self.lattica.close()
@@ -516,8 +518,11 @@ class GradientServer:
                 if self.manual_layer_assignment:
                     node_info["manual_layer_assignment"] = True
 
+                logger.info("Calling scheduler node_join for node %s", node_info.get("node_id"))
                 response = self.scheduler_stub.node_join(node_info)
+                logger.info("Waiting for scheduler node_join result (timeout=300s)")
                 response = response.result(timeout=300)
+                logger.info("Received scheduler node_join result")
                 if response == {}:
                     logger.error("Failed to join scheduler")
                     exit(1)
@@ -872,12 +877,19 @@ class GradientServer:
         return self.status.value
 
     def get_node_info(self, is_update: bool = False):
+        logger.info("Collecting node info (is_update=%s)", is_update)
         # update rtt to nodes
         if time.time() - self.rtt_last_update > self.rtt_update_interval:
             self.rtts = {}
             all_peers = []
-            for _ in range(1 if is_update else 10):
+            for attempt in range(1 if is_update else 10):
                 all_peers = self.lattica.get_all_peers()
+                logger.info(
+                    "Node info peer discovery attempt %d: peers=%s scheduler_present=%s",
+                    attempt + 1,
+                    all_peers,
+                    self.scheduler_peer_id in all_peers,
+                )
                 if len(all_peers) > 0 and self.scheduler_peer_id in all_peers:
                     break
                 logger.warning(
@@ -893,9 +905,16 @@ class GradientServer:
 
             for peer_id in all_peers:
                 rtt = None
-                for _ in range(1 if is_update else 30):
+                logger.info("Measuring RTT to peer %s", peer_id)
+                for attempt in range(1 if is_update else 30):
                     try:
                         rtt = self.lattica.get_peer_rtt(peer_id) * 1000
+                        logger.info(
+                            "RTT to peer %s resolved on attempt %d: %.3f ms",
+                            peer_id,
+                            attempt + 1,
+                            rtt,
+                        )
                     except Exception as e:
                         logger.warning(f"Failed to get rtt to {peer_id}: {e}")
                     if rtt is not None:
@@ -903,6 +922,8 @@ class GradientServer:
                     logger.warning(f"Failed to get rtt to {peer_id}, waiting for 1 second.")
                     time.sleep(1)
 
+                if rtt is None:
+                    logger.warning("Using fallback RTT=100ms for peer %s", peer_id)
                 self.rtts[peer_id] = rtt if rtt is not None else 100
             self.rtt_last_update = time.time()
 
@@ -920,6 +941,15 @@ class GradientServer:
             "is_active": self._get_status() == ServerState.READY.value,
             "last_refit_time": self.last_refit_time,
         }
+
+        logger.info(
+            "Prepared node info: node_id=%s peers=%d rtts=%s status=%s is_active=%s",
+            info.get("node_id"),
+            len(self.rtts),
+            self.rtts,
+            info.get("status"),
+            info.get("is_active"),
+        )
 
         # For manual layer assignment, always include start_layer and end_layer
         if self.manual_layer_assignment:
