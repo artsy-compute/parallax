@@ -494,57 +494,65 @@ class GradientServer:
         return True
 
     def run(self):
-        if self.build_lattica():
-            logger.info("Lattica built successfully")
-        else:
-            logger.error("Failed to build lattica")
-            exit(1)
-
-        if self.scheduler_addr is not None:  # central scheduler mode
-            try:
-                self.scheduler_stub = RPCConnectionHandler(self.lattica, None, None).get_stub(
-                    self.scheduler_peer_id
-                )
-                logger.info("Building node info before scheduler join (peer_id=%s)", self.scheduler_peer_id)
-                node_info = self.get_node_info()
-                logger.info("Built node info before scheduler join: empty=%s", node_info == {})
-                if node_info == {}:
-                    logger.error("Failed to get node info, try again after 10 seconds")
-                    self.lattica.close()
-                    self.lattica = None
-                    time.sleep(10)
-                    return self.run()
-
-                if self.manual_layer_assignment:
-                    node_info["manual_layer_assignment"] = True
-
-                logger.info("Calling scheduler node_join for node %s", node_info.get("node_id"))
-                response = self.scheduler_stub.node_join(node_info)
-                logger.info("Waiting for scheduler node_join result (timeout=300s)")
-                response = response.result(timeout=300)
-                logger.info("Received scheduler node_join result")
-                if response == {}:
-                    logger.error("Failed to join scheduler")
-                    exit(1)
-
-                logger.info(f"Join scheduler response: {response}")
-
-                if not self.manual_layer_assignment:
-                    self.block_start_index = response.get("start_layer")
-                    self.block_end_index = response.get("end_layer")
-                self.model_name = response.get("model_name")
-                self.tp_size = response.get("tp_size")
-                self.enable_weight_refit = response.get("enable_weight_refit")
-                self.weight_refit_mode = response.get("weight_refit_mode")
-
-                # Sync to shared state if available
-                self._sync_to_shared_state()
-
-            except Exception as e:
-                logger.exception(f"Error in join scheduler: {e}")
+        while True:
+            if self.build_lattica():
+                logger.info("Lattica built successfully")
+            else:
+                logger.error("Failed to build lattica")
                 exit(1)
-        else:  # no scheduler mode
-            self.start_routing_table_updater()  # thread
+
+            if self.scheduler_addr is not None:  # central scheduler mode
+                try:
+                    self.scheduler_stub = RPCConnectionHandler(self.lattica, None, None).get_stub(
+                        self.scheduler_peer_id
+                    )
+                    logger.info(
+                        "Building node info before scheduler join (peer_id=%s)",
+                        self.scheduler_peer_id,
+                    )
+                    node_info = self.get_node_info()
+                    logger.info("Built node info before scheduler join: empty=%s", node_info == {})
+                    if node_info == {}:
+                        logger.error("Failed to get node info, try again after 10 seconds")
+                        if self.lattica is not None:
+                            self.lattica.close()
+                        self.lattica = None
+                        self.scheduler_stub = None
+                        time.sleep(10)
+                        continue
+
+                    if self.manual_layer_assignment:
+                        node_info["manual_layer_assignment"] = True
+
+                    logger.info("Calling scheduler node_join for node %s", node_info.get("node_id"))
+                    response = self.scheduler_stub.node_join(node_info)
+                    logger.info("Waiting for scheduler node_join result (timeout=300s)")
+                    response = response.result(timeout=300)
+                    logger.info("Received scheduler node_join result")
+                    if response == {}:
+                        logger.error("Failed to join scheduler")
+                        exit(1)
+
+                    logger.info(f"Join scheduler response: {response}")
+
+                    if not self.manual_layer_assignment:
+                        self.block_start_index = response.get("start_layer")
+                        self.block_end_index = response.get("end_layer")
+                    self.model_name = response.get("model_name")
+                    self.tp_size = response.get("tp_size")
+                    self.enable_weight_refit = response.get("enable_weight_refit")
+                    self.weight_refit_mode = response.get("weight_refit_mode")
+
+                    # Sync to shared state if available
+                    self._sync_to_shared_state()
+                    break
+
+                except Exception as e:
+                    logger.exception(f"Error in join scheduler: {e}")
+                    exit(1)
+            else:  # no scheduler mode
+                self.start_routing_table_updater()  # thread
+                break
 
         self.connection_handler = TransformerConnectionHandler(
             lattica=self.lattica,
