@@ -19,7 +19,11 @@ class SharedState:
     Automatically handles conversion from dict to SharedState.
     """
 
-    def __init__(self, manager_dict: Optional[Union[Dict[str, Any], "SharedState"]] = None):
+    def __init__(
+        self,
+        manager_dict: Optional[Union[Dict[str, Any], "SharedState"]] = None,
+        manager: Optional[multiprocessing.managers.SyncManager] = None,
+    ):
         """Initialize SharedState with a Manager().dict(), dict, SharedState, or None.
 
         Args:
@@ -28,11 +32,14 @@ class SharedState:
                          If dict, wraps it (assumes it's a Manager().dict()).
                          If SharedState, uses its underlying dict.
         """
+        self._manager = manager
         if manager_dict is None:
-            manager = multiprocessing.Manager()
-            self._dict = manager.dict()
+            self._manager = multiprocessing.Manager()
+            self._dict = self._manager.dict()
         elif isinstance(manager_dict, SharedState):
             self._dict = manager_dict._dict
+            if self._manager is None:
+                self._manager = getattr(manager_dict, "_manager", None)
         else:
             self._dict = manager_dict
 
@@ -69,6 +76,15 @@ class SharedState:
     def dict(self) -> Dict[str, Any]:
         """Get the underlying Manager().dict() for multiprocessing serialization."""
         return self._dict
+
+    def shutdown(self) -> None:
+        """Shutdown the underlying multiprocessing manager if owned by this instance."""
+        if self._manager is None:
+            return
+        try:
+            self._manager.shutdown()
+        finally:
+            self._manager = None
 
     def get_metrics(self) -> Dict[str, Any]:
         """Get a shallow copy of current metrics suitable for JSON serialization."""
@@ -159,4 +175,4 @@ class SharedState:
         shared_dict["metrics"]["layer_latency_ms"] = None
         shared_dict["metrics"]["_last_update_ts"] = 0.0
 
-        return cls(shared_dict)
+        return cls(shared_dict, manager=manager)

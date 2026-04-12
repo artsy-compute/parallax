@@ -93,6 +93,11 @@ if __name__ == "__main__":
     shared_state = SharedState.create()
     shared_state.set_status(ServerState.JOINING.value)
 
+    conn_main = None
+    conn_refit = None
+    conn_tp_0 = []
+    conn_tp_i = []
+
     try:
         args = parse_args()
         set_log_level(args.log_level)
@@ -323,5 +328,18 @@ if __name__ == "__main__":
         # Shutdown http server
         if http_server_process is not None:
             stop_http_server(http_server_process)
+
+        for conn in [conn_main, conn_refit, *conn_tp_0, *conn_tp_i]:
+            if conn is None:
+                continue
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        try:
+            shared_state.shutdown()
+        except Exception:
+            pass
 
         logger.debug("All processes shut down.")
