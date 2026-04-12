@@ -24,6 +24,7 @@ from parallax.utils.utils import (
     combine_padding_and_causal_masks,
     create_causal_mask,
     get_device_dtype,
+    get_mlx_device_info,
     get_layer_types,
     pad_inputs,
 )
@@ -103,9 +104,11 @@ class MLXExecutor(BaseExecutor):
         )
 
         try:
-            mx.set_wired_limit(mx.metal.device_info()["max_recommended_working_set_size"])
+            device_info = get_mlx_device_info()
+            mx.set_wired_limit(device_info["max_recommended_working_set_size"])
         except Exception:
-            logger.warning(f"Using mlx without metal backend.")
+            logger.warning("Using mlx without metal backend.")
+            device_info = None
 
         self.shard_loader = MLXModelLoader(
             model_repo,
@@ -181,6 +184,21 @@ class MLXExecutor(BaseExecutor):
                 f"Automatically adjusting to supported block size: {nearest_block_size}"
             )
             kv_block_size = nearest_block_size
+
+        if kv_cache_memory_fraction > 0.6:
+            logger.warning(
+                "MLX kv_cache_memory_fraction=%.2f is aggressive and may trigger Metal OOM on larger models",
+                kv_cache_memory_fraction,
+            )
+        if device_info is not None:
+            total_mem_gb = device_info["max_recommended_working_set_size"] / 1024**3
+            active_mem_gb = mx.get_active_memory() / 1024**3
+            logger.info(
+                "MLX memory before KV cache allocation: active=%.2f GB total=%.2f GB requested_kv_fraction=%.2f",
+                active_mem_gb,
+                total_mem_gb,
+                kv_cache_memory_fraction,
+            )
 
         logger.debug(
             "Initializing CacheManager (mlx) with block_size=%d, layers=%d",

@@ -24,14 +24,22 @@ def is_mps_available():
     return torch.mps.is_available()
 
 
+def get_mlx_device_info():
+    """Return MLX device info across old and new MLX APIs."""
+    try:
+        if hasattr(mx, "device_info"):
+            return mx.device_info()
+        return mx.metal.device_info()
+    except (RuntimeError, AttributeError, ImportError) as exc:
+        raise RuntimeError("MLX device info is unavailable") from exc
+
+
 def is_metal_available():
     """Check if MLX Metal backend is available"""
     try:
-        import mlx.core as mx
-
-        mx.metal.device_info()
+        get_mlx_device_info()
         return True
-    except (RuntimeError, AttributeError, ImportError):
+    except RuntimeError:
         return False
 
 

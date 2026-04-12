@@ -8,6 +8,7 @@ from parallax.server.cache.base import BaseCache
 from parallax.server.cache.dsa_cache import DeepSeekSparseCache
 from parallax.server.cache.kv_cache import KVCachePacked
 from parallax.server.cache.linear_cache import LinearCache
+from parallax.utils.utils import get_mlx_device_info
 from parallax_utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -213,11 +214,21 @@ class CacheManager:
         return total_bytes
 
     def _calculate_num_blocks(self, cache_memory_fraction: float, dtype: mx.Dtype) -> int:
-        device_info = mx.metal.device_info()
-        total_mem = device_info["max_recommended_working_set_size"]
-        current_mem = mx.get_active_memory()
-        free_mem = total_mem - current_mem
-        available_for_cache = free_mem * cache_memory_fraction
+        device_info = get_mlx_device_info()
+        total_mem = int(device_info["max_recommended_working_set_size"])
+        current_mem = int(mx.get_active_memory())
+        free_mem = max(0, total_mem - current_mem)
+        reserve_headroom = max(int(total_mem * 0.12), 3 * 1024**3)
+        max_cache_budget = max(0, free_mem - reserve_headroom)
+        requested_cache_budget = int(free_mem * cache_memory_fraction)
+        available_for_cache = min(requested_cache_budget, max_cache_budget)
+
+        if requested_cache_budget > available_for_cache:
+            logger.warning(
+                "Clamping MLX KV cache budget from %.2f GB to %.2f GB to preserve runtime headroom",
+                requested_cache_budget / 1024**3,
+                available_for_cache / 1024**3,
+            )
 
         dtype_size = 2 if dtype in [mx.float16, mx.bfloat16] else 4
 
@@ -227,8 +238,11 @@ class CacheManager:
         # Remaining memory for KV cache
         available_for_kv = available_for_cache - linear_cache_bytes
         if available_for_kv <= 0:
-            logger.warning("Linear cache uses all available memory. No room for KV cache blocks.")
-            return 0
+            raise MemoryError(
+                "Insufficient MLX memory headroom for KV cache after model load. "
+                "Reduce --kv-cache-memory-fraction, --max-sequence-length, or --max-batch-size, "
+                "or use a smaller model/shard."
+            )
 
         # Calculate bytes per block for ONE attention layer
         one_layer_block_bytes = (
@@ -249,12 +263,16 @@ class CacheManager:
         num_gpu_blocks = int(available_for_kv // total_block_bytes)
 
         if num_gpu_blocks <= 0:
-            logger.warning("Not enough memory for KV cache. Defaulting to 16 blocks.")
-            num_gpu_blocks = 16
+            raise MemoryError(
+                "Insufficient MLX memory for even a single KV cache block. "
+                "Reduce --kv-cache-memory-fraction, --max-sequence-length, or --max-batch-size, "
+                "or use a smaller model/shard."
+            )
 
         logger.info(
             f"KV cache will use {num_gpu_blocks * total_block_bytes / 1024**3:.2f} GB "
-            f"for {num_attention_layers} layers ({num_gpu_blocks} blocks)"
+            f"for {num_attention_layers} layers ({num_gpu_blocks} blocks); "
+            f"free={free_mem / 1024**3:.2f} GB reserve={reserve_headroom / 1024**3:.2f} GB"
         )
 
         return num_gpu_blocks
