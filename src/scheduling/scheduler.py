@@ -398,6 +398,16 @@ class Scheduler:
         )
         return req.request_id, path, latency
 
+    def _format_node_context_snapshot(self) -> str:
+        parts = []
+        for node in self.node_manager.nodes:
+            approx_ctx = node.approx_remaining_context
+            approx_ctx_str = "unknown" if approx_ctx is None else f"{approx_ctx} tok"
+            parts.append(
+                f"{node.node_id[:12]} status={'active' if node.is_active else 'waiting'} approx_remaining_context={approx_ctx_str}"
+            )
+        return "\n".join(parts) if parts else "(no nodes)"
+
     def emit_alloc_log_snapshot(self, *, reason: Optional[str] = None) -> str:
         """Update `self.alloc_log_snapshot` and emit it.
 
@@ -410,12 +420,22 @@ class Scheduler:
             snapshot = f"(failed to build allocation snapshot: {exc})"
             logger.warning("Allocation snapshot build error: %s", exc)
 
+        context_snapshot = self._format_node_context_snapshot()
         self.alloc_log_snapshot = snapshot
 
         if reason:
-            logger.info("Allocation snapshot (%s)\n%s", reason, snapshot)
+            logger.info(
+                "Allocation snapshot (%s)\n%s\nApproximate remaining context by node\n%s",
+                reason,
+                snapshot,
+                context_snapshot,
+            )
         else:
-            logger.debug("Allocation snapshot\n%s", snapshot)
+            logger.debug(
+                "Allocation snapshot\n%s\nApproximate remaining context by node\n%s",
+                snapshot,
+                context_snapshot,
+            )
         return snapshot
 
     def run(self, *, poll_interval: float = 0.05, allocation_log_interval: float = 5.0) -> None:
