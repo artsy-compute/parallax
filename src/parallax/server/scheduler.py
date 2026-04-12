@@ -48,6 +48,7 @@ class Scheduler:
         cache_manager: Optional[CacheManager] = None,
         request_timeout_s: Optional[int] = 600,
         shared_state: Optional[SharedState] = None,
+        max_sequence_length: Optional[int] = None,
         **kwargs,
     ):
         """
@@ -79,6 +80,7 @@ class Scheduler:
 
         self.cache_manager = cache_manager
         self.shared_state = shared_state
+        self.max_sequence_length = max_sequence_length
         # Default timeout for requests if not set on request object
         self.request_timeout_s = request_timeout_s
 
@@ -360,9 +362,31 @@ class Scheduler:
             r.last_updated_time = time.time()
 
         if batch:
-            logger.debug(
-                "Form batch selected=%s inflight_tokens=%d",
-                [f"{r.request_id}:{r.status}, ready:{r.ready_for_next_step}" for r in batch],
+            batch_summary = []
+            for r in batch:
+                total_length = getattr(r, "total_length", None)
+                output_length = getattr(r, "output_length", 0)
+                approx_remaining_context = None
+                if self.max_sequence_length is not None and total_length is not None:
+                    approx_remaining_context = max(0, self.max_sequence_length - total_length)
+                remaining_generation_budget = None
+                max_total_length = getattr(r, "max_total_length", None)
+                if max_total_length is not None and total_length is not None:
+                    remaining_generation_budget = max(0, max_total_length - total_length)
+                batch_summary.append(
+                    {
+                        "rid": r.request_id,
+                        "status": getattr(r.status, "value", str(r.status)),
+                        "prompt_len": getattr(r, "prompt_len", None),
+                        "output_len": output_length,
+                        "total_len": total_length,
+                        "approx_remaining_context": approx_remaining_context,
+                        "remaining_generation_budget": remaining_generation_budget,
+                    }
+                )
+            logger.info(
+                "Form batch inflight_tokens=%d approximate_context=%s",
                 inflight_tokens,
+                batch_summary,
             )
         return batch

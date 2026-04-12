@@ -170,6 +170,7 @@ class BaseExecutor:
             cache_manager=self.cache_manager if self.device == "mlx" else None,
             request_timeout_s=request_timeout_s,
             shared_state=self.shared_state,
+            max_sequence_length=max_sequence_length,
         )
         logger.debug(
             f"Scheduler initialized (max_batch_size={max_batch_size}, max_tokens={max_num_tokens_per_batch}, wait_ms={scheduler_wait_ms})"
