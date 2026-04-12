@@ -20,6 +20,9 @@ const debugLog = async (...args: any[]) => {
   }
 };
 
+const createConversationId = () =>
+  globalThis.crypto?.randomUUID?.() || `conv-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
 export type ChatMessageRole = 'user' | 'assistant';
 
 export type ChatMessageStatus = 'waiting' | 'thinking' | 'generating' | 'done' | 'error';
@@ -82,6 +85,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
   });
 
   const [messages, setMessages] = useState<readonly ChatMessage[]>([]);
+  const [conversationId, setConversationId] = useState<string>(() => createConversationId());
 
   const sse = useConst(() =>
     createSSE({
@@ -258,6 +262,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
 
     sse.connect(
       modelName,
+      conversationId,
       nextMessages.map(({ id, role, content }) => ({ id, role, content })),
     );
   });
@@ -277,6 +282,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
       return;
     }
     setMessages([]);
+    setConversationId(createConversationId());
   });
 
   const actions = useConst<ChatActions>({
@@ -335,7 +341,7 @@ const createSSE = (options: SSEOptions) => {
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   let abortController: AbortController | undefined;
 
-  const connect = (model: string, messages: readonly RequestMessage[]) => {
+  const connect = (model: string, conversationId: string, messages: readonly RequestMessage[]) => {
     abortController = new AbortController();
     const url = `${API_BASE_URL}/v1/chat/completions`;
 
@@ -346,6 +352,7 @@ const createSSE = (options: SSEOptions) => {
       body: JSON.stringify({
         stream: true,
         model,
+        conversation_id: conversationId,
         messages,
         max_tokens: 2048,
         sampling_params: {

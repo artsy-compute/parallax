@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 from typing import Dict
 
@@ -6,6 +7,7 @@ import aiohttp
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.concurrency import iterate_in_threadpool
 
+from backend.server.chat_memory import ChatMemoryService
 from backend.server.constants import NODE_STATUS_AVAILABLE
 from parallax_utils.logging_config import get_logger
 from parallax_utils.request_metrics import get_request_metrics
@@ -32,6 +34,7 @@ class RequestHandler:
     def __init__(self):
         self.scheduler_manage = None
         self.stubs = {}
+        self.chat_memory = ChatMemoryService()
 
     def set_scheduler_manage(self, scheduler_manage):
         self.scheduler_manage = scheduler_manage
@@ -41,9 +44,47 @@ class RequestHandler:
             self.stubs[node_id] = self.scheduler_manage.completion_handler.get_stub(node_id)
         return self.stubs[node_id]
 
+    def _extract_stream_delta_text(self, chunk: bytes) -> str:
+        try:
+            decoded = chunk.decode('utf-8')
+        except Exception:
+            return ''
+        pieces = []
+        for line in decoded.splitlines():
+            if not line.startswith('data: '):
+                continue
+            payload = line[6:].strip()
+            if not payload or payload == '[DONE]':
+                continue
+            try:
+                data = json.loads(payload)
+            except Exception:
+                continue
+            for choice in data.get('choices', []) or []:
+                delta = choice.get('delta') or {}
+                content = delta.get('content')
+                if isinstance(content, str) and content:
+                    pieces.append(content)
+        return ''.join(pieces)
+
+    def _extract_nonstream_content(self, content: str) -> str:
+        try:
+            payload = json.loads(content)
+        except Exception:
+            return ''
+        choices = payload.get('choices') or []
+        if not choices:
+            return ''
+        message = choices[0].get('message') or {}
+        result = message.get('content')
+        return result if isinstance(result, str) else ''
+
     async def _forward_request(self, request_data: Dict, request_id: str, received_ts: int):
+        request_data, conversation_id = self.chat_memory.prepare_request(request_data)
         start_time = time.time()
-        logger.debug(f"Forwarding request {request_id}; stream={request_data.get('stream', False)}")
+        logger.debug(
+            f"Forwarding request {request_id}; stream={request_data.get('stream', False)} conversation_id={conversation_id}"
+        )
         if (
             self.scheduler_manage is None
             or not self.scheduler_manage.get_schedule_status() == NODE_STATUS_AVAILABLE
@@ -109,6 +150,7 @@ class RequestHandler:
                         first_token_time = None
                         last_chunk = None
                         last_token_time = None
+                        assistant_chunks = []
                         try:
                             iterator = iterate_in_threadpool(response)
                             async for chunk in iterator:
@@ -119,8 +161,16 @@ class RequestHandler:
                                     "data: [DONE]"
                                 ):
                                     last_chunk = chunk
+                                    delta_text = self._extract_stream_delta_text(chunk)
+                                    if delta_text:
+                                        assistant_chunks.append(delta_text)
                                 yield chunk
                         finally:
+                            assistant_text = ''.join(assistant_chunks)
+                            if assistant_text:
+                                self.chat_memory.save_assistant_message(
+                                    conversation_id, assistant_text, str(request_id)
+                                )
                             if last_chunk is not None:
                                 tps, ttft, input_tokens, output_tokens = get_request_metrics(
                                     last_chunk, start_time, first_token_time, last_token_time
@@ -150,6 +200,11 @@ class RequestHandler:
                 else:
                     response = stub.chat_completion(request_data)
                     content = (await anext(iterate_in_threadpool(response))).decode()
+                    assistant_text = self._extract_nonstream_content(content)
+                    if assistant_text:
+                        self.chat_memory.save_assistant_message(
+                            conversation_id, assistant_text, str(request_id)
+                        )
                     logger.debug(f"Non-stream response completed for {request_id}")
                     return Response(content=content, media_type="application/json")
             except Exception as e:
