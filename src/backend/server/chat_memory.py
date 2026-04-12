@@ -228,6 +228,82 @@ class ChatMemoryService:
             current_chars += len(snippet) + 1
         return snippets
 
+    def list_conversations(self, limit: int = 50) -> List[Dict]:
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                """
+                SELECT c.conversation_id, c.summary_text, c.created_at, c.updated_at,
+                       COUNT(m.id) AS message_count,
+                       COALESCE(
+                         (
+                           SELECT content FROM messages m2
+                           WHERE m2.conversation_id = c.conversation_id
+                           ORDER BY m2.created_at DESC, m2.id DESC
+                           LIMIT 1
+                         ),
+                         ''
+                       ) AS last_message
+                FROM conversations c
+                LEFT JOIN messages m ON m.conversation_id = c.conversation_id
+                GROUP BY c.conversation_id, c.summary_text, c.created_at, c.updated_at
+                ORDER BY c.updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = list(cur.fetchall())
+        conversations = []
+        for row in rows:
+            last_message = self._compact_text(row['last_message'] or '', 120)
+            title = last_message or f"Conversation {row['conversation_id'][:8]}"
+            conversations.append(
+                {
+                    'conversation_id': row['conversation_id'],
+                    'title': title,
+                    'summary': self._compact_text(row['summary_text'] or '', 180),
+                    'message_count': int(row['message_count'] or 0),
+                    'created_at': float(row['created_at']),
+                    'updated_at': float(row['updated_at']),
+                    'last_message': last_message,
+                }
+            )
+        return conversations
+
+    def get_conversation(self, conversation_id: str) -> Dict:
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                'SELECT conversation_id, summary_text, created_at, updated_at FROM conversations WHERE conversation_id=?',
+                (conversation_id,),
+            )
+            conversation = cur.fetchone()
+            if conversation is None:
+                return {'conversation_id': conversation_id, 'messages': [], 'summary_text': ''}
+            cur = conn.execute(
+                """
+                SELECT client_message_id, role, content, created_at
+                FROM messages
+                WHERE conversation_id=?
+                ORDER BY created_at ASC, id ASC
+                """,
+                (conversation_id,),
+            )
+            rows = list(cur.fetchall())
+        return {
+            'conversation_id': conversation['conversation_id'],
+            'summary_text': conversation['summary_text'] or '',
+            'created_at': float(conversation['created_at']),
+            'updated_at': float(conversation['updated_at']),
+            'messages': [
+                {
+                    'id': row['client_message_id'],
+                    'role': row['role'],
+                    'content': row['content'],
+                    'created_at': float(row['created_at']),
+                }
+                for row in rows
+            ],
+        }
+
     def prepare_request(self, request_data: Dict) -> Tuple[Dict, Optional[str]]:
         conversation_id = request_data.get('conversation_id')
         messages = request_data.get('messages') or []

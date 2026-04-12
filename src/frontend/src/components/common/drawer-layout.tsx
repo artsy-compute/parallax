@@ -22,7 +22,7 @@ import {
   IconPlus,
   IconTopologyStar3,
 } from '@tabler/icons-react';
-import { JoinCommand, ModelSelect, NodeList } from '../inputs';
+import { ConversationHistory, JoinCommand, ModelSelect, NodeList } from '../inputs';
 
 const DrawerLayoutRoot = styled(Stack)(({ theme }) => {
   const { spacing } = theme;
@@ -329,23 +329,23 @@ export const DrawerLayout: FC<PropsWithChildren> = ({ children }) => {
           }
         </Stack>
         {sidebarExpanded && (
-          <Stack>
-            <Stack direction='row' sx={{ gap: 1, color: 'text.primary' }}>
-              {/* <IconCluster /> */}
-              <Typography variant='body1' sx={{ mt: '1.5px', color: '#A7A7A7FF', fontWeight: 600 }}>
-                Cluster topology
-              </Typography>
+          <Stack sx={{ minHeight: 0, flex: 1, gap: 2.5 }}>
+            <ConversationHistory />
+            <Stack sx={{ gap: 1.25 }}>
+              <Stack direction='row' sx={{ gap: 1, color: 'text.primary' }}>
+                <Typography variant='body1' sx={{ mt: '1.5px', color: '#A7A7A7FF', fontWeight: 600 }}>
+                  Cluster topology
+                </Typography>
+              </Stack>
+              <NodeList variant='menu' sx={{ maxHeight: '16rem' }} />
+              <Button
+                color='info'
+                startIcon={<IconPlus />}
+                onClick={openJoinCommand}
+              >
+                Add Nodes
+              </Button>
             </Stack>
-            <NodeList variant='menu' sx={{ py: '2rem' }} />
-            <Button
-              color='info'
-              startIcon={<IconPlus />}
-              onClick={openJoinCommand}
-              // onClick={openRebalancing}
-              // onClick={openWaiting}
-            >
-              Add Nodes
-            </Button>
           </Stack>
         )}
       </DrawerLayoutSide>

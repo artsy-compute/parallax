@@ -6,3 +6,5 @@ export * from './node-list';
 
 export * from './chat-input';
 export * from './chat-messages';
+
+export * from './conversation-history';

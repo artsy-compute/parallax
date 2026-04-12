@@ -188,6 +188,28 @@ async def openai_v1_chat_completions(raw_request: Request):
     return await request_handler.v1_chat_completions(request_data, request_id, received_ts)
 
 
+@app.get("/chat/history")
+async def chat_history_list(limit: int = 50):
+    return JSONResponse(
+        content={
+            "type": "chat_history_list",
+            "data": request_handler.chat_memory.list_conversations(limit=limit),
+        },
+        status_code=200,
+    )
+
+
+@app.get("/chat/history/{conversation_id}")
+async def chat_history_detail(conversation_id: str):
+    return JSONResponse(
+        content={
+            "type": "chat_history_detail",
+            "data": request_handler.chat_memory.get_conversation(conversation_id),
+        },
+        status_code=200,
+    )
+
+
 # Disable caching for index.html
 @app.get("/")
 async def serve_index():

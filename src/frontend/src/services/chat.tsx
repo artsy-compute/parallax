@@ -2,6 +2,7 @@
 import {
   createContext,
   useContext,
+  useEffect,
   useMemo,
   useState,
   type Dispatch,
@@ -9,7 +10,7 @@ import {
   type PropsWithChildren,
   type SetStateAction,
 } from 'react';
-import { API_BASE_URL } from './api';
+import { API_BASE_URL, getChatHistoryDetail, getChatHistoryList, type ChatHistorySummary } from './api';
 import { useConst, useRefCallback } from '../hooks';
 import { useCluster } from './cluster';
 import { parseGenerationGpt, parseGenerationQwen } from './chat-helper';
@@ -19,6 +20,8 @@ const debugLog = async (...args: any[]) => {
     console.log('%c chat.tsx ', 'color: white; background: orange;', ...args);
   }
 };
+
+const STORAGE_KEY = 'parallax.chat.conversation_id';
 
 const createConversationId = () =>
   globalThis.crypto?.randomUUID?.() || `conv-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -55,6 +58,9 @@ export interface ChatStates {
   readonly input: string;
   readonly status: ChatStatus;
   readonly messages: readonly ChatMessage[];
+  readonly conversationId: string;
+  readonly history: readonly ChatHistorySummary[];
+  readonly historyLoading: boolean;
 }
 
 export interface ChatActions {
@@ -62,6 +68,9 @@ export interface ChatActions {
   readonly generate: (message?: ChatMessage) => void;
   readonly stop: () => void;
   readonly clear: () => void;
+  readonly refreshHistory: () => Promise<void>;
+  readonly loadConversation: (conversationId: string) => Promise<void>;
+  readonly startNewConversation: () => void;
 }
 
 export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
@@ -85,7 +94,72 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
   });
 
   const [messages, setMessages] = useState<readonly ChatMessage[]>([]);
-  const [conversationId, setConversationId] = useState<string>(() => createConversationId());
+  const [conversationId, setConversationId] = useState<string>(() => {
+    const stored = globalThis.localStorage?.getItem(STORAGE_KEY);
+    return stored || createConversationId();
+  });
+  const [history, setHistory] = useState<readonly ChatHistorySummary[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
+  useEffect(() => {
+    globalThis.localStorage?.setItem(STORAGE_KEY, conversationId);
+  }, [conversationId]);
+
+  const refreshHistory = useRefCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      const next = await getChatHistoryList();
+      setHistory(next);
+    } catch (error) {
+      console.error('getChatHistoryList error', error);
+    } finally {
+      setHistoryLoading(false);
+    }
+  });
+
+  const loadConversation = useRefCallback(async (nextConversationId: string) => {
+    if (!nextConversationId) {
+      return;
+    }
+    setHistoryLoading(true);
+    try {
+      const detail = await getChatHistoryDetail(nextConversationId);
+      setConversationId(detail.conversation_id || nextConversationId);
+      setMessages(
+        detail.messages.map((message) => ({
+          id: message.id,
+          role: message.role,
+          status: 'done' as const,
+          content: message.content,
+          raw: message.content,
+          createdAt: message.created_at,
+        })),
+      );
+      setStatus('closed');
+    } catch (error) {
+      console.error('getChatHistoryDetail error', error);
+    } finally {
+      setHistoryLoading(false);
+    }
+  });
+
+  useEffect(() => {
+    refreshHistory();
+  }, []);
+
+  useEffect(() => {
+    if (!history.length) {
+      return;
+    }
+    const exists = history.some((item) => item.conversation_id === conversationId);
+    if (!exists) {
+      return;
+    }
+    if (messages.length > 0) {
+      return;
+    }
+    loadConversation(conversationId);
+  }, [history, conversationId]);
 
   const sse = useConst(() =>
     createSSE({
@@ -112,6 +186,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
           ];
         });
         setStatus('closed');
+        refreshHistory();
       },
       onError: (error) => {
         debugLog('SSE ERROR', error);
@@ -134,6 +209,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
         });
         debugLog('SSE ERROR', error);
         setStatus('error');
+        refreshHistory();
       },
       onMessage: (message) => {
         // debugLog('onMessage', message);
@@ -259,6 +335,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
       debugLog('generate', 'new', nextMessages);
     }
     setMessages(nextMessages);
+    refreshHistory();
 
     sse.connect(
       modelName,
@@ -275,6 +352,14 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     sse.disconnect();
   });
 
+  const startNewConversation = useRefCallback<ChatActions['startNewConversation']>(() => {
+    stop();
+    setMessages([]);
+    setStatus('closed');
+    setConversationId(createConversationId());
+    refreshHistory();
+  });
+
   const clear = useRefCallback<ChatActions['clear']>(() => {
     debugLog('clear', 'status', status);
     stop();
@@ -283,6 +368,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     }
     setMessages([]);
     setConversationId(createConversationId());
+    refreshHistory();
   });
 
   const actions = useConst<ChatActions>({
@@ -290,6 +376,9 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     generate,
     stop,
     clear,
+    refreshHistory,
+    loadConversation,
+    startNewConversation,
   });
 
   const value = useMemo<readonly [ChatStates, ChatActions]>(
@@ -298,10 +387,13 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
         input,
         status,
         messages,
+        conversationId,
+        history,
+        historyLoading,
       },
       actions,
     ],
-    [input, status, messages, actions],
+    [input, status, messages, conversationId, history, historyLoading, actions],
   );
 
   return <context.Provider value={value}>{children}</context.Provider>;
