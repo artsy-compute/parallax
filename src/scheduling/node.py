@@ -123,6 +123,9 @@ class RooflinePerformanceModel:
         Returns:
             Total latency (ms) combining decoder layers and optional endpoints.
         """
+        if num_current_layers <= 0:
+            return float("inf")
+
         decoder_layer_compute_latency = self.get_compute_roofline_latency_ms(
             self.model_info.decoder_layer_flops(
                 batch_size=self.batch_size,

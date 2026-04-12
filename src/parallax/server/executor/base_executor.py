@@ -525,9 +525,11 @@ class BaseExecutor:
                         prepared_inputs = prepared_inputs_dict[batch_type]
 
                         start_time = time.time()
+                        logger.info(f"Starting {batch_type} batch with {len(prepared_inputs['requests'])} requests on layers [{self.start_layer}, {self.end_layer})")
                         output = self.process_batch(
                             prepared_inputs, return_decoded_tokens=self.is_last_peer
                         )
+                        logger.info(f"Finished {batch_type} batch with {len(prepared_inputs['requests'])} requests in {(time.time() - start_time) * 1000:.3f} ms")
                         # Update metrics with per-layer latency sample (throttled by decode steps)
                         if batch_type == "decode_batch":
                             try:
