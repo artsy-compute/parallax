@@ -197,6 +197,7 @@ class Node:
     # Will be updated by node broadcasting
     # otherwise, use roofline performance model to estimate
     avg_layer_latency_ms: Optional[float] = None
+    approx_remaining_context: Optional[int] = None
     load_compensator: float = 0.05
 
     rtt_to_nodes: Optional[Dict[str, float]] = None

@@ -99,6 +99,7 @@ class SharedState:
         *,
         current_requests: Optional[int] = None,
         layer_latency_ms_sample: Optional[float] = None,
+        approx_remaining_context: Optional[int] = None,
         ewma_alpha: float = 0.2,
     ) -> None:
         """Update metrics with optional fields and EWMA smoothing for latency.
@@ -106,6 +107,7 @@ class SharedState:
         Args:
             current_requests: Number of in-flight requests on this node.
             layer_latency_ms_sample: A new sample of per-layer latency in ms.
+            approx_remaining_context: Approximate remaining context budget in tokens.
             ewma_alpha: Smoothing factor in [0, 1] for latency EWMA.
         """
         metrics_dict = self._dict.get("metrics")
@@ -123,6 +125,8 @@ class SharedState:
                 metrics_dict["layer_latency_ms"] = float(
                     (1.0 - ewma_alpha) * float(prev) + ewma_alpha * float(layer_latency_ms_sample)
                 )
+        if approx_remaining_context is not None:
+            metrics_dict["approx_remaining_context"] = int(approx_remaining_context)
         metrics_dict["_last_update_ts"] = time.time()
 
     def get_model_info(self) -> Dict[str, Any]:
@@ -173,6 +177,7 @@ class SharedState:
         shared_dict["metrics"] = manager.dict()
         shared_dict["metrics"]["current_requests"] = 0
         shared_dict["metrics"]["layer_latency_ms"] = None
+        shared_dict["metrics"]["approx_remaining_context"] = None
         shared_dict["metrics"]["_last_update_ts"] = 0.0
 
         return cls(shared_dict, manager=manager)

@@ -363,12 +363,14 @@ class Scheduler:
 
         if batch:
             batch_summary = []
+            approx_remaining_context_values = []
             for r in batch:
                 total_length = getattr(r, "total_length", None)
                 output_length = getattr(r, "output_length", 0)
                 approx_remaining_context = None
                 if self.max_sequence_length is not None and total_length is not None:
                     approx_remaining_context = max(0, self.max_sequence_length - total_length)
+                    approx_remaining_context_values.append(approx_remaining_context)
                 remaining_generation_budget = None
                 max_total_length = getattr(r, "max_total_length", None)
                 if max_total_length is not None and total_length is not None:
@@ -389,4 +391,11 @@ class Scheduler:
                 inflight_tokens,
                 batch_summary,
             )
+            if self.shared_state is not None and approx_remaining_context_values:
+                try:
+                    self.shared_state.update_metrics(
+                        approx_remaining_context=min(approx_remaining_context_values)
+                    )
+                except Exception:
+                    pass
         return batch

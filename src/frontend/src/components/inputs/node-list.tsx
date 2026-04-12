@@ -145,7 +145,7 @@ const Dash: FC<{ animate?: boolean }> = ({ animate }) => {
 };
 
 const Node: FC<{ variant: NodeListVariant; node?: NodeInfo }> = ({ variant, node }) => {
-  const { id, status, gpuNumber, gpuName, gpuMemory } = node || { status: 'waiting' };
+  const { id, status, gpuNumber, gpuName, gpuMemory, approxRemainingContext } = node || { status: 'waiting' };
   const { palette } = useTheme();
   const { main, lighter } =
     status === 'waiting' ?
@@ -194,9 +194,11 @@ const Node: FC<{ variant: NodeListVariant; node?: NodeInfo }> = ({ variant, node
                   .filter(Boolean)
                   .join(' ')}
               </Typography>
-              {/* <Typography variant='caption' color='text.disabled'>
-                Rancho Cordova, United States
-              </Typography> */}
+              {typeof approxRemainingContext === 'number' && (
+                <Typography variant='caption' color='text.disabled'>
+                  Approx. context left: {approxRemainingContext} tok
+                </Typography>
+              )}
             </>
           )) || (
             <>

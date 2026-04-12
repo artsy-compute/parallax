@@ -101,7 +101,7 @@ class Scheduler:
         # Event queues for main loop orchestration (thread-safe)
         self._pending_joins: "queue.Queue[Node]" = queue.Queue()
         self._pending_leaves: "queue.Queue[str]" = queue.Queue()
-        self._pending_node_updates: "queue.Queue[Tuple[str, Optional[int], Optional[float], Optional[Dict[str, float]], Optional[bool], Optional[bool]]]" = (queue.Queue())
+        self._pending_node_updates: "queue.Queue[Tuple[str, Optional[int], Optional[float], Optional[int], Optional[Dict[str, float]], Optional[bool], Optional[bool]]]" = (queue.Queue())
 
         # Concurrency controls
         self._stop_event: threading.Event = threading.Event()
@@ -214,6 +214,7 @@ class Scheduler:
         *,
         current_requests: Optional[int] = None,
         layer_latency_ms: Optional[float] = None,
+        approx_remaining_context: Optional[int] = None,
         new_rtt_to_nodes: Optional[Dict[str, float]] = None,
         is_active: Optional[bool] = None,
         last_refit_time: Optional[float] = 0.0,
@@ -223,6 +224,8 @@ class Scheduler:
             node.current_requests = current_requests
         if layer_latency_ms is not None:
             node.set_layer_latency_ms(layer_latency_ms)
+        if approx_remaining_context is not None:
+            node.approx_remaining_context = approx_remaining_context
         if new_rtt_to_nodes is not None:
             node.rtt_to_nodes = new_rtt_to_nodes
         if is_active is not None:
@@ -249,6 +252,7 @@ class Scheduler:
         *,
         current_requests: Optional[int] = None,
         layer_latency_ms: Optional[float] = None,
+        approx_remaining_context: Optional[int] = None,
         new_rtt_to_nodes: Optional[Dict[str, float]] = None,
         is_active: Optional[bool] = None,
         last_refit_time: Optional[float] = 0.0,
@@ -259,6 +263,7 @@ class Scheduler:
                 node_id,
                 current_requests,
                 layer_latency_ms,
+                approx_remaining_context,
                 new_rtt_to_nodes,
                 is_active,
                 last_refit_time,
@@ -519,7 +524,7 @@ class Scheduler:
         """Apply pending node stats updates from the queue."""
         while True:
             try:
-                node_id, cur, lat, rtts, is_active, last_refit_time = (
+                node_id, cur, lat, approx_ctx, rtts, is_active, last_refit_time = (
                     self._pending_node_updates.get_nowait()
                 )
             except queue.Empty:
@@ -532,6 +537,7 @@ class Scheduler:
                 node,
                 current_requests=cur,
                 layer_latency_ms=lat,
+                approx_remaining_context=approx_ctx,
                 new_rtt_to_nodes=rtts,
                 is_active=is_active,
                 last_refit_time=last_refit_time,

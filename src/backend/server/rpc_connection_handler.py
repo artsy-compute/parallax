@@ -96,6 +96,7 @@ class RPCConnectionHandler(ConnectionHandler):
                 node.node_id,
                 current_requests=node.current_requests,
                 layer_latency_ms=node.layer_latency_ms,
+                approx_remaining_context=node.approx_remaining_context,
                 new_rtt_to_nodes=node.rtt_to_nodes,
                 is_active=node.is_active,
                 last_refit_time=node.last_refit_time,
@@ -205,6 +206,8 @@ class RPCConnectionHandler(ConnectionHandler):
             node.current_requests = node_json.get("current_requests")
         if node_json.get("layer_latency_ms", None) is not None:
             node.avg_layer_latency_ms = node_json.get("layer_latency_ms")
+        if node_json.get("approx_remaining_context", None) is not None:
+            node.approx_remaining_context = node_json.get("approx_remaining_context")
         if node_json.get("rtt_to_nodes", None) is not None:
             node.rtt_to_nodes = node_json.get("rtt_to_nodes")
         return node

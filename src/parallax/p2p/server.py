@@ -976,6 +976,8 @@ class GradientServer:
             info["current_requests"] = metrics.get("current_requests", 0)
             if metrics.get("layer_latency_ms") is not None:
                 info["layer_latency_ms"] = metrics.get("layer_latency_ms")
+            if metrics.get("approx_remaining_context") is not None:
+                info["approx_remaining_context"] = metrics.get("approx_remaining_context")
             # In update mode, always include current allocation
             if not self.manual_layer_assignment:
                 info["start_layer"] = self.block_start_index

@@ -165,6 +165,7 @@ class SchedulerManage:
             "gpu_num": node.hardware.num_gpus,
             "gpu_name": node.hardware.gpu_name,
             "gpu_memory": node.hardware.memory_gb,
+            "approx_remaining_context": node.approx_remaining_context,
         }
 
     def _start_scheduler(self, model_name, init_nodes_num):

@@ -74,6 +74,7 @@ export interface NodeInfo {
   readonly gpuNumber: number;
   readonly gpuName: string;
   readonly gpuMemory: number;
+  readonly approxRemainingContext?: number;
 }
 
 // Configs
@@ -202,12 +203,13 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
         setNodeInfoList((prev) => {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           let next = (node_list as any[]).map<NodeInfo>(
-            ({ node_id, status, gpu_num, gpu_name, gpu_memory }: any) => ({
+            ({ node_id, status, gpu_num, gpu_name, gpu_memory, approx_remaining_context }: any) => ({
               id: node_id,
               status,
               gpuNumber: gpu_num || 1,
               gpuName: gpu_name || '',
               gpuMemory: gpu_memory || 0,
+              approxRemainingContext: approx_remaining_context,
             }),
           );
 
