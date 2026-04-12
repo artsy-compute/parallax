@@ -784,35 +784,34 @@ class GradientServer:
                                         f"Heartbeat: Node {self.lattica.peer_id()}... "
                                         f"Model: {model_name}, Layers: [{start_layer}, {end_layer})"
                                     )
-                                    # Check if layer allocation changed
-                                    if (
+                                    allocation_changed = (
                                         start_layer != self.block_start_index
                                         or end_layer != self.block_end_index
                                         or model_name != self.model_name
-                                    ):
+                                    )
+                                    if allocation_changed:
                                         logger.warning(
                                             f"Layer allocation changed! "
                                             f"Current: [{self.block_start_index}, {self.block_end_index}) -> "
                                             f"New: [{start_layer}, {end_layer}) "
                                             f"Model: {self.model_name} -> {model_name}"
                                         )
-                                        # Update layer allocation
                                         self.block_start_index = start_layer
                                         self.block_end_index = end_layer
                                         if model_name:
                                             self.model_name = model_name
-                                        # Set flag to trigger executor reload
                                         self._layer_allocation_changed = True
-                                        # Set status to INITIALIZING to prevent scheduler from sending requests
-                                        # during rebalancing
                                         self.status = ServerState.INITIALIZING
-
-                                        # Sync to shared state if available
                                         self._sync_to_shared_state()
-
                                         logger.info(
                                             "Layer allocation updated. Executor will reload on next check. "
                                             "Status set to INITIALIZING to prevent new requests."
+                                        )
+                                    elif self.status != ServerState.READY:
+                                        self.status = ServerState.READY
+                                        self._sync_to_shared_state()
+                                        logger.info(
+                                            "Heartbeat: Scheduler confirmed existing allocation; node status restored to READY."
                                         )
                                 else:
                                     logger.debug(
@@ -820,18 +819,31 @@ class GradientServer:
                                         f"end_layer={end_layer}, response={response}"
                                     )
                             else:
+                                had_previous_allocation = (
+                                    self.block_start_index is not None
+                                    and self.block_end_index is not None
+                                    and self.model_name is not None
+                                )
                                 logger.warning(
                                     f"Heartbeat: No layer allocation received yet, response: {response}"
                                 )
-                                self.status = ServerState.JOINING
-                                self.model_name = None
+                                self.status = (
+                                    ServerState.INITIALIZING if had_previous_allocation else ServerState.JOINING
+                                )
                                 if self._shared_state is not None:
                                     self._shared_state.set_status(self.status.value)
                                     self._shared_state.update_metrics(current_requests=0)
-                                    self._shared_state.set("model_name", None)
-                                logger.debug(
-                                    "Status set to JOINING and model_name to None because no valid layer allocation received yet."
-                                )
+                                if had_previous_allocation:
+                                    logger.info(
+                                        "Heartbeat: Scheduler recovery in progress; retaining previous allocation [%s, %s) for model %s",
+                                        self.block_start_index,
+                                        self.block_end_index,
+                                        self.model_name,
+                                    )
+                                else:
+                                    logger.debug(
+                                        "Status set to JOINING because no valid layer allocation has been received yet."
+                                    )
                             if refit_message and isinstance(refit_message, dict):
                                 if self.enable_weight_refit:
                                     logger.info(f"Server begin weight refit process.")

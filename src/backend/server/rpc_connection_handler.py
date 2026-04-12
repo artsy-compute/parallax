@@ -80,15 +80,13 @@ class RPCConnectionHandler(ConnectionHandler):
             node = self.build_node(message)
             # Check if node exists in scheduler
             if self.scheduler.get_node(node.node_id) is None:
-                # Node not found, automatically join it (e.g., after model switch)
+                # Node not found, automatically join it (e.g., after scheduler restart)
                 logger.info(
-                    f"Node {node.node_id} not found in scheduler, auto-joining via node_update"
+                    "Node %s not found in scheduler, auto-joining via node_update and waiting for allocation rebuild",
+                    node.node_id,
                 )
                 self.scheduler.enqueue_join(node)
-                # Wait a bit for join to be processed
-                time.sleep(0.1)
-                # Return layer allocation after join
-                layer_allocation = self.wait_layer_allocation(node.node_id, wait_seconds=5)
+                layer_allocation = self.wait_layer_allocation(node.node_id, wait_seconds=30)
                 return layer_allocation, {}
 
             # Node exists, update its info
@@ -101,8 +99,15 @@ class RPCConnectionHandler(ConnectionHandler):
                 is_active=node.is_active,
                 last_refit_time=node.last_refit_time,
             )
-            # Return current layer allocation to node
+            # Return current layer allocation to node. If scheduler is still rebuilding after restart,
+            # wait briefly so heartbeats can converge into a full pipeline before responding with {}.
             layer_allocation = self.get_layer_allocation(node.node_id)
+            if not layer_allocation and not self.scheduler._bootstrapped_event.is_set():
+                logger.info(
+                    "Node %s is joined but has no allocation yet; waiting for bootstrap recovery",
+                    node.node_id,
+                )
+                layer_allocation = self.wait_layer_allocation(node.node_id, wait_seconds=15)
             refit_request = {}
             if self.scheduler.refit_request:
                 if node.node_id not in self.scheduler.refit_set and node.is_active:
