@@ -70,6 +70,7 @@ export type NodeStatus = 'waiting' | 'available' | 'failed';
 
 export interface NodeInfo {
   readonly id: string;
+  readonly hostname: string;
   readonly status: NodeStatus;
   readonly gpuNumber: number;
   readonly gpuName: string;
@@ -203,8 +204,17 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
         setNodeInfoList((prev) => {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           let next = (node_list as any[]).map<NodeInfo>(
-            ({ node_id, status, gpu_num, gpu_name, gpu_memory, approx_remaining_context }: any) => ({
+            ({
+              node_id,
+              hostname,
+              status,
+              gpu_num,
+              gpu_name,
+              gpu_memory,
+              approx_remaining_context,
+            }: any) => ({
               id: node_id,
+              hostname: hostname || '',
               status,
               gpuNumber: gpu_num || 1,
               gpuName: gpu_name || '',

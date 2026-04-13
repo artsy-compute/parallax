@@ -145,7 +145,7 @@ const Dash: FC<{ animate?: boolean }> = ({ animate }) => {
 };
 
 const Node: FC<{ variant: NodeListVariant; node?: NodeInfo }> = ({ variant, node }) => {
-  const { id, status, gpuNumber, gpuName, gpuMemory, approxRemainingContext } = node || { status: 'waiting' };
+  const { id, hostname, status, gpuNumber, gpuName, gpuMemory, approxRemainingContext } = node || { status: 'waiting' };
   const { palette } = useTheme();
   const { main, lighter } =
     status === 'waiting' ?
@@ -194,6 +194,11 @@ const Node: FC<{ variant: NodeListVariant; node?: NodeInfo }> = ({ variant, node
                   .filter(Boolean)
                   .join(' ')}
               </Typography>
+              {hostname && (
+                <Typography variant='caption' color='text.secondary'>
+                  Host: {hostname}
+                </Typography>
+              )}
               {typeof approxRemainingContext === 'number' && (
                 <Typography variant='caption' color='text.disabled'>
                   Approx. context left: {approxRemainingContext} tok

@@ -219,6 +219,7 @@ class RPCConnectionHandler(ConnectionHandler):
 
     def build_hardware(self, hardware_json):
         node_id = hardware_json.get("node_id")
+        hostname = hardware_json.get("hostname", "")
         num_gpus = hardware_json.get("num_gpus")
         tflops_fp16 = hardware_json.get("tflops_fp16")
         gpu_name = hardware_json.get("gpu_name")
@@ -233,4 +234,5 @@ class RPCConnectionHandler(ConnectionHandler):
             memory_gb=memory_gb,
             memory_bandwidth_gbps=memory_bandwidth_gbps,
             device=device,
+            hostname=hostname,
         )

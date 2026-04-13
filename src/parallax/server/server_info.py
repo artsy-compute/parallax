@@ -5,6 +5,7 @@ We haven't used other info, will wait until DHT implemented.
 """
 
 import platform
+import socket
 import subprocess
 from dataclasses import asdict, dataclass
 from typing import Any, ClassVar, Dict, Optional
@@ -176,12 +177,14 @@ def detect_node_hardware(node_id: Optional[str]) -> Dict[str, Any]:
     - memory_gb: Device memory in GB (VRAM for CUDA, total RAM for Apple)
     - memory_bandwidth_gbps: Estimated memory bandwidth in GB/s
     """
+    hostname = socket.gethostname()
     try:
         hw = HardwareInfo.detect()
     except NotImplementedError:
         # Fallback to a conservative default
         return {
             "node_id": node_id,
+            "hostname": hostname,
             "num_gpus": 1,
             "tflops_fp16": 50.0,
             "gpu_name": "Unknown",
@@ -193,6 +196,7 @@ def detect_node_hardware(node_id: Optional[str]) -> Dict[str, Any]:
     if isinstance(hw, NvidiaHardwareInfo):
         return {
             "node_id": node_id,
+            "hostname": hostname,
             "num_gpus": hw.num_gpus,
             "tflops_fp16": hw.tflops_fp16,
             "gpu_name": hw.chip,
@@ -205,6 +209,7 @@ def detect_node_hardware(node_id: Optional[str]) -> Dict[str, Any]:
         est_bandwidth = 100.0
         return {
             "node_id": node_id,
+            "hostname": hostname,
             "num_gpus": hw.num_gpus,
             "tflops_fp16": hw.tflops_fp16,
             "gpu_name": hw.chip,
@@ -215,6 +220,7 @@ def detect_node_hardware(node_id: Optional[str]) -> Dict[str, Any]:
     # Generic fallback
     return {
         "node_id": node_id,
+        "hostname": hostname,
         "num_gpus": hw.num_gpus,
         "tflops_fp16": hw.tflops_fp16,
         "gpu_name": "Unknown",

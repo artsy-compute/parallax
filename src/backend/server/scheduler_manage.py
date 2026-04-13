@@ -183,6 +183,7 @@ class SchedulerManage:
     def build_node_info(self, node):
         return {
             "node_id": node.node_id,
+            "hostname": node.hardware.hostname,
             "status": NODE_STATUS_AVAILABLE if node.is_active else NODE_STATUS_WAITING,
             "gpu_num": node.hardware.num_gpus,
             "gpu_name": node.hardware.gpu_name,

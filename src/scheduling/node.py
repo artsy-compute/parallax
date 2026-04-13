@@ -37,6 +37,7 @@ class NodeHardwareInfo:
     memory_gb: float
     memory_bandwidth_gbps: float
     device: str
+    hostname: str = ""
 
 
 @dataclass
