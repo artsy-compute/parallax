@@ -327,6 +327,19 @@ class ChatMemoryService:
             ],
         }
 
+    def delete_conversation(self, conversation_id: str) -> bool:
+        if not conversation_id:
+            return False
+        with self._lock, self._connect() as conn:
+            cur = conn.execute('SELECT 1 FROM conversations WHERE conversation_id=?', (conversation_id,))
+            exists = cur.fetchone() is not None
+            if not exists:
+                return False
+            conn.execute('DELETE FROM messages WHERE conversation_id=?', (conversation_id,))
+            conn.execute('DELETE FROM conversations WHERE conversation_id=?', (conversation_id,))
+            conn.commit()
+        return True
+
     def prepare_request(self, request_data: Dict) -> Tuple[Dict, Optional[str]]:
         conversation_id = request_data.get('conversation_id')
         messages = request_data.get('messages') or []

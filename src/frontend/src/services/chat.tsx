@@ -10,7 +10,7 @@ import {
   type PropsWithChildren,
   type SetStateAction,
 } from 'react';
-import { API_BASE_URL, getChatHistoryDetail, getChatHistoryList, type ChatHistorySummary } from './api';
+import { API_BASE_URL, deleteChatHistoryConversation, getChatHistoryDetail, getChatHistoryList, type ChatHistorySummary } from './api';
 import { useConst, useRefCallback } from '../hooks';
 import { useCluster } from './cluster';
 import { parseGenerationGpt, parseGenerationQwen } from './chat-helper';
@@ -78,6 +78,7 @@ export interface ChatActions {
   readonly clear: () => void;
   readonly refreshHistory: () => Promise<void>;
   readonly loadConversation: (conversationId: string) => Promise<void>;
+  readonly deleteConversation: (conversationId: string) => Promise<void>;
   readonly startNewConversation: () => void;
   readonly focusInput: () => void;
   readonly registerInputFocus: (focusFn: (() => void) | null) => void;
@@ -405,6 +406,23 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     sse.disconnect();
   });
 
+  const deleteConversation = useRefCallback<ChatActions['deleteConversation']>(async (targetConversationId) => {
+    if (!targetConversationId) {
+      return;
+    }
+    if (status === 'opened' || status === 'generating') {
+      stop();
+    }
+    await deleteChatHistoryConversation(targetConversationId);
+    if (targetConversationId === conversationId) {
+      setInputTruncationNotice(null);
+      setMessages([]);
+      setStatus('closed');
+      setConversationId(createConversationId());
+    }
+    await refreshHistory();
+  });
+
   const startNewConversation = useRefCallback<ChatActions['startNewConversation']>(() => {
     stop();
     setInputTruncationNotice(null);
@@ -436,6 +454,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     clear,
     refreshHistory,
     loadConversation,
+    deleteConversation,
     startNewConversation,
     focusInput,
     registerInputFocus,

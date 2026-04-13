@@ -87,3 +87,14 @@ export const getChatHistoryDetail = async (
   }
   return message.data;
 };
+
+export const deleteChatHistoryConversation = async (
+  conversationId: string,
+): Promise<{ deleted: boolean; conversation_id: string }> => {
+  const response = await fetch(`${API_BASE_URL}/chat/history/${conversationId}`, { method: 'DELETE' });
+  const message = await response.json();
+  if (message.type !== 'chat_history_delete') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  return message.data;
+};

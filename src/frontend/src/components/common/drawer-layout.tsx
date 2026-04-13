@@ -337,13 +337,13 @@ export const DrawerLayout: FC<PropsWithChildren> = ({ children }) => {
         {sidebarExpanded && (
           <Stack sx={{ minHeight: 0, flex: 1, gap: 2, overflow: 'hidden' }}>
             <ConversationHistory />
-            <Box sx={{ flex: 1 }} />
             <Button
               color='inherit'
               variant='text'
               startIcon={<IconSettings size={18} />}
               onClick={() => setClusterSettingsOpen(true)}
               sx={{
+                mt: 'auto',
                 justifyContent: 'flex-start',
                 color: 'text.secondary',
                 borderRadius: 2,

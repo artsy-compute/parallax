@@ -160,6 +160,8 @@ export interface AlertDialogProps extends Omit<DialogProps, 'onClose' | 'title' 
   handleSubmit?: UseFormHandleSubmit<any>;
 
   secondaryAction?: ReactNode;
+
+  autoFocusAction?: 'cancel' | 'confirm' | 'submit';
 }
 
 export const AlertDialog: FC<AlertDialogProps> = (props) => {
@@ -187,6 +189,7 @@ export const AlertDialog: FC<AlertDialogProps> = (props) => {
     onSubmitInvalid,
     handleSubmit,
     secondaryAction,
+    autoFocusAction,
 
     ...rest
   } = props;
@@ -251,6 +254,7 @@ export const AlertDialog: FC<AlertDialogProps> = (props) => {
       color: 'secondary',
       onClick: pipeHandlers(onCancel),
       loading,
+      autoFocus: autoFocusAction === 'cancel',
     });
   }
 
@@ -261,6 +265,7 @@ export const AlertDialog: FC<AlertDialogProps> = (props) => {
       color,
       onClick: pipeHandlers(onConfirm),
       loading,
+      autoFocus: autoFocusAction === 'confirm',
     });
   }
 
@@ -270,6 +275,7 @@ export const AlertDialog: FC<AlertDialogProps> = (props) => {
       children: submitLabel,
       type: 'submit',
       loading,
+      autoFocus: autoFocusAction === 'submit',
     });
 
     if (handleSubmit && onSubmitValid) {

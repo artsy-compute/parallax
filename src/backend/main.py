@@ -303,6 +303,18 @@ async def chat_history_detail(conversation_id: str):
     )
 
 
+@app.delete("/chat/history/{conversation_id}")
+async def chat_history_delete(conversation_id: str):
+    deleted = request_handler.chat_memory.delete_conversation(conversation_id)
+    return JSONResponse(
+        content={
+            "type": "chat_history_delete",
+            "data": {"deleted": deleted, "conversation_id": conversation_id},
+        },
+        status_code=200 if deleted else 404,
+    )
+
+
 @app.get("/frontend/build_status")
 async def frontend_build_status():
     return JSONResponse(
