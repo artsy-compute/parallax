@@ -1,4 +1,4 @@
-import { Alert, Button, Stack, TextField } from '@mui/material';
+import { Alert, Box, Button, Stack, TextField, Tooltip } from '@mui/material';
 import {
   useEffect,
   useRef,
@@ -11,6 +11,23 @@ import { useRefCallback } from '../../hooks';
 import { useChat, useCluster } from '../../services';
 import { IconArrowBackUp, IconArrowUp, IconSquareFilled } from '@tabler/icons-react';
 import { DotPulse } from './dot-pulse';
+
+const BudgetTokenLabel: FC<{ label: string; title: string }> = ({ label, title }) => (
+  <Tooltip title={title} arrow>
+    <Box
+      component='span'
+      sx={{
+        display: 'inline-block',
+        textDecoration: 'underline dotted',
+        textUnderlineOffset: '0.16em',
+        cursor: 'help',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {label}
+    </Box>
+  </Tooltip>
+);
 
 export const ChatInput: FC = () => {
   const [
@@ -75,17 +92,58 @@ export const ChatInput: FC = () => {
         </Alert>
       )}
       {promptBudgetNotice && (
-        <Alert severity='info'>
-          Context budget: using about {promptBudgetNotice.estimatedInputTokens} input tokens out of {promptBudgetNotice.inputBudgetTokens},
-          keeping {promptBudgetNotice.recentMessagesCount} recent turns and {promptBudgetNotice.memorySectionsCount} memory section{promptBudgetNotice.memorySectionsCount === 1 ? '' : 's'}.
-          Summary: {promptBudgetNotice.summaryTokens} tok, memory snippets: {promptBudgetNotice.snippetTokens} tok, recent turns: {promptBudgetNotice.recentTurnTokens} tok.
-          {promptBudgetNotice.adaptedOutputBudget && (
-            <> Response budget was reduced from {promptBudgetNotice.requestedOutputTokens} to {promptBudgetNotice.adjustedOutputTokens} tokens to preserve more context.</>
-          )}
+        <Alert severity='info' sx={{ '& .MuiAlert-message': { fontSize: '0.8125rem', lineHeight: 1.45 } }}>
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', columnGap: 0.5, rowGap: 0.25, alignItems: 'baseline' }}>
+            <Box component='span'>Context budget: using about</Box>
+            <BudgetTokenLabel
+              label={`${promptBudgetNotice.estimatedInputTokens} input tokens`}
+              title='Estimated total input tokens used by the final prompt that was actually assembled for this request.'
+            />
+            <Box component='span'>out of</Box>
+            <BudgetTokenLabel
+              label={`${promptBudgetNotice.inputBudgetTokens}`}
+              title='Estimated maximum input-token budget available after reserving room for model output and prompt overhead.'
+            />
+            <Box component='span'>, keeping</Box>
+            <BudgetTokenLabel
+              label={`${promptBudgetNotice.recentMessagesCount} recent turns`}
+              title='How many recent chat messages were kept verbatim in the prompt after fitting the context budget.'
+            />
+            <Box component='span'>and</Box>
+            <BudgetTokenLabel
+              label={`${promptBudgetNotice.memorySectionsCount} memory section${promptBudgetNotice.memorySectionsCount === 1 ? '' : 's'}`}
+              title='How many older-memory blocks were included, such as the conversation summary and retrieved long-term snippets.'
+            />
+            <Box component='span'>.</Box>
+            <BudgetTokenLabel
+              label={`Summary: ${promptBudgetNotice.summaryTokens} tok`}
+              title='Estimated tokens used by the compact summary of older conversation history.'
+            />
+            <Box component='span'>,</Box>
+            <BudgetTokenLabel
+              label={`memory snippets: ${promptBudgetNotice.snippetTokens} tok`}
+              title='Estimated tokens used by retrieved older snippets pulled in from long-term memory for this request.'
+            />
+            <Box component='span'>,</Box>
+            <BudgetTokenLabel
+              label={`recent turns: ${promptBudgetNotice.recentTurnTokens} tok`}
+              title='Estimated tokens used by the raw recent chat messages kept verbatim in the prompt.'
+            />
+            <Box component='span'>.</Box>
+            {promptBudgetNotice.adaptedOutputBudget && (
+              <>
+                <BudgetTokenLabel
+                  label={`Response budget was reduced from ${promptBudgetNotice.requestedOutputTokens} to ${promptBudgetNotice.adjustedOutputTokens} tokens`}
+                  title='The backend lowered the allowed output length for this request so more conversation context could fit into the model context window.'
+                />
+                <Box component='span'>to preserve more context.</Box>
+              </>
+            )}
+          </Box>
         </Alert>
       )}
       {requestHealthNotice && (
-        <Alert severity={requestHealthNotice.severity}>
+        <Alert severity={requestHealthNotice.severity} sx={{ '& .MuiAlert-message': { fontSize: '0.8125rem', lineHeight: 1.45 } }}>
           {requestHealthNotice.message}
         </Alert>
       )}
