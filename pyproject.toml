@@ -69,6 +69,10 @@ benchmark = [
   "modelscope",
 ]
 
+semantic = [
+  "hnswlib>=0.8",
+]
+
 dev = [
   "black>=24.3",
   "ruff>=0.4",

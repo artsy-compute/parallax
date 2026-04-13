@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from backend.server.semantic_retrieval import SemanticSnippetRetriever
 from parallax_utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -45,6 +46,20 @@ class ChatMemoryService:
         self.model_summary_enabled = os.environ.get('PARALLAX_CHAT_MEMORY_MODEL_SUMMARY', '1').lower() not in {'0', 'false', 'no'}
         self.model_summary_max_tokens = int(os.environ.get('PARALLAX_CHAT_MEMORY_MODEL_SUMMARY_MAX_TOKENS', '256'))
         self.summary_source_char_budget = int(os.environ.get('PARALLAX_CHAT_MEMORY_SUMMARY_SOURCE_CHARS', '6000'))
+        self.semantic_retrieval_enabled = os.environ.get('PARALLAX_CHAT_MEMORY_SEMANTIC_RETRIEVAL', '1').lower() not in {'0', 'false', 'no'}
+        self.semantic_retrieval_dim = int(os.environ.get('PARALLAX_CHAT_MEMORY_SEMANTIC_DIM', '256'))
+        self.semantic_retrieval_recency_weight = float(os.environ.get('PARALLAX_CHAT_MEMORY_SEMANTIC_RECENCY_WEIGHT', '0.15'))
+        self.semantic_retriever = SemanticSnippetRetriever(
+            dim=self.semantic_retrieval_dim,
+            recency_weight=self.semantic_retrieval_recency_weight,
+        )
+        logger.info(
+            'Chat memory retrieval config: semantic_enabled=%s semantic_dim=%d semantic_backend=%s lexical_fallback=%s',
+            self.semantic_retrieval_enabled,
+            self.semantic_retrieval_dim,
+            getattr(self.semantic_retriever, 'backend_name', 'unknown'),
+            True,
+        )
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
@@ -392,7 +407,7 @@ class ChatMemoryService:
             row = cur.fetchone()
             return row['summary_source'] if row and row['summary_source'] else 'none'
 
-    def _retrieve_relevant_snippets(self, conversation_id: str, query: str) -> List[str]:
+    def _retrieve_relevant_snippets_lexical(self, conversation_id: str, query: str) -> List[str]:
         query_tokens = set(self._tokenize(query))
         if not query_tokens:
             return []
@@ -427,6 +442,40 @@ class ChatMemoryService:
             snippets.append(snippet)
             current_chars += len(snippet) + 1
         return snippets
+
+    def _retrieve_relevant_snippets(self, conversation_id: str, query: str) -> List[str]:
+        rows = self._load_messages(conversation_id)
+        if len(rows) <= self.recent_message_count:
+            return []
+        older_rows = rows[:-self.recent_message_count]
+        candidate_snippets = []
+        for row in older_rows:
+            prefix = 'User' if row['role'] == 'user' else 'Assistant' if row['role'] == 'assistant' else 'System'
+            candidate_snippets.append(f'{prefix}: {self._compact_text(row["content"], 220)}')
+
+        if self.semantic_retrieval_enabled:
+            semantic = self.semantic_retriever.retrieve(
+                query=query,
+                snippets=candidate_snippets,
+                limit=self.retrieval_limit,
+                char_budget=self.retrieval_char_budget,
+            )
+            if semantic:
+                logger.info(
+                    'Chat memory retrieval mode=semantic backend=%s snippets=%d conversation_id=%s',
+                    getattr(self.semantic_retriever, 'last_backend_used', getattr(self.semantic_retriever, 'backend_name', 'unknown')),
+                    len(semantic),
+                    conversation_id,
+                )
+                return semantic
+            logger.info('Chat memory retrieval mode=semantic_empty fallback=lexical conversation_id=%s', conversation_id)
+
+        lexical = self._retrieve_relevant_snippets_lexical(conversation_id, query)
+        if lexical:
+            logger.info('Chat memory retrieval mode=lexical snippets=%d conversation_id=%s', len(lexical), conversation_id)
+        else:
+            logger.info('Chat memory retrieval mode=none conversation_id=%s', conversation_id)
+        return lexical
 
     def list_conversations(self, limit: int = 50) -> List[Dict]:
         with self._lock, self._connect() as conn:
