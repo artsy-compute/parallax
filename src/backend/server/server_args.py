@@ -41,6 +41,12 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Use local Hugging Face cache only (no network download)",
     )
+    parser.add_argument(
+        "--build-frontend",
+        action="store_true",
+        default=False,
+        help="Build frontend assets on startup if the local frontend build is stale",
+    )
 
     # Weight refit configuration
     parser.add_argument(

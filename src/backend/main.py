@@ -1,7 +1,10 @@
 import asyncio
 import json
+import os
+import subprocess
 import time
 import uuid
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -36,6 +39,81 @@ logger = get_logger(__name__)
 
 scheduler_manage = None
 request_handler = RequestHandler()
+
+FRONTEND_DIR = get_project_root() / "src" / "frontend"
+FRONTEND_SRC_DIR = FRONTEND_DIR / "src"
+FRONTEND_DIST_DIR = FRONTEND_DIR / "dist"
+FRONTEND_INDEX_PATH = FRONTEND_DIST_DIR / "index.html"
+_FRONTEND_BUILD_STATUS = {
+    "stale": False,
+    "reason": "",
+    "checked_at": 0.0,
+    "dist_mtime": 0.0,
+    "latest_source_mtime": 0.0,
+}
+
+
+def _frontend_source_paths() -> list[Path]:
+    candidates = [
+        FRONTEND_DIR / "package.json",
+        FRONTEND_DIR / "package-lock.json",
+        FRONTEND_DIR / "tsconfig.json",
+        FRONTEND_DIR / "vite.config.ts",
+        FRONTEND_DIR / "vite.config.js",
+    ]
+    for base in (FRONTEND_DIR / "src", FRONTEND_DIR / "public"):
+        if base.exists():
+            candidates.extend(path for path in base.rglob("*") if path.is_file())
+    return [path for path in candidates if path.exists() and path.is_file()]
+
+
+def check_frontend_build_status() -> dict:
+    dist_exists = FRONTEND_INDEX_PATH.exists()
+    dist_mtime = FRONTEND_INDEX_PATH.stat().st_mtime if dist_exists else 0.0
+    source_paths = _frontend_source_paths()
+    latest_source_mtime = max((path.stat().st_mtime for path in source_paths), default=0.0)
+
+    stale = not dist_exists or latest_source_mtime > dist_mtime
+    if not dist_exists:
+        reason = f"missing build artifact: {FRONTEND_INDEX_PATH}"
+    elif latest_source_mtime > dist_mtime:
+        reason = "frontend source files are newer than dist/index.html"
+    else:
+        reason = ""
+
+    _FRONTEND_BUILD_STATUS.update(
+        {
+            "stale": stale,
+            "reason": reason,
+            "checked_at": time.time(),
+            "dist_mtime": dist_mtime,
+            "latest_source_mtime": latest_source_mtime,
+        }
+    )
+    return dict(_FRONTEND_BUILD_STATUS)
+
+
+def ensure_frontend_build(build_frontend: bool = False) -> None:
+    status = check_frontend_build_status()
+    if not status["stale"]:
+        return
+
+    auto_build = build_frontend or os.environ.get("PARALLAX_AUTO_BUILD_FRONTEND", "").lower() in {"1", "true", "yes", "on"}
+    if auto_build:
+        logger.warning("Frontend build is stale; running `npm run build` in %s", FRONTEND_DIR)
+        subprocess.run(["npm", "run", "build"], cwd=FRONTEND_DIR, check=True)
+        status = check_frontend_build_status()
+        if status["stale"]:
+            logger.warning("Frontend build still appears stale after rebuild: %s", status["reason"])
+        else:
+            logger.info("Frontend build completed and is up to date.")
+        return
+
+    logger.warning(
+        "Frontend build is stale: %s. Rebuild with `cd %s && npm run build` or set PARALLAX_AUTO_BUILD_FRONTEND=1.",
+        status["reason"],
+        FRONTEND_DIR,
+    )
 
 
 @app.post("/weight/refit")
@@ -210,21 +288,36 @@ async def chat_history_detail(conversation_id: str):
     )
 
 
+@app.get("/frontend/build_status")
+async def frontend_build_status():
+    return JSONResponse(
+        content={
+            "type": "frontend_build_status",
+            "data": check_frontend_build_status(),
+        },
+        status_code=200,
+    )
+
+
 # Disable caching for index.html
 @app.get("/")
 async def serve_index():
-    response = FileResponse(str(get_project_root()) + "/src/frontend/dist/index.html")
+    status = check_frontend_build_status()
+    response = FileResponse(str(FRONTEND_INDEX_PATH))
     # Disable cache
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
+    response.headers["X-Parallax-Frontend-Stale"] = "1" if status["stale"] else "0"
+    if status["reason"]:
+        response.headers["X-Parallax-Frontend-Stale-Reason"] = status["reason"]
     return response
 
 
 # mount the frontend
 app.mount(
     "/",
-    StaticFiles(directory=str(get_project_root() / "src" / "frontend" / "dist"), html=True),
+    StaticFiles(directory=str(FRONTEND_DIST_DIR), html=True),
     name="static",
 )
 
@@ -232,6 +325,8 @@ if __name__ == "__main__":
     args = parse_args()
     set_log_level(args.log_level)
     logger.info(f"args: {args}")
+
+    ensure_frontend_build(args.build_frontend)
 
     if args.model_name is None:
         init_model_info_dict_cache(args.use_hfcache)

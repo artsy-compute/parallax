@@ -172,6 +172,30 @@ def _get_relay_params():
     ]
 
 
+def build_frontend_command(args=None, passthrough_args: list[str] | None = None):
+    """Build the frontend bundle in src/frontend."""
+    check_python_version()
+
+    project_root = get_project_root()
+    frontend_dir = project_root / "src" / "frontend"
+    package_json = frontend_dir / "package.json"
+
+    if not package_json.exists():
+        logger.info(f"Error: frontend package.json not found at {package_json}")
+        sys.exit(1)
+
+    cmd = ["npm", "run", "build"]
+    logger.info(f"Building frontend in {frontend_dir}")
+    logger.info(f"Running command: {' '.join(cmd)}")
+
+    try:
+        subprocess.run(cmd, cwd=frontend_dir, check=True)
+        logger.info("Frontend build completed.")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Frontend build failed with exit code {e.returncode}")
+        sys.exit(e.returncode)
+
+
 def run_command(args, passthrough_args: list[str] | None = None):
     """Run the scheduler (equivalent to scripts/start.sh)."""
     if not args.skip_upload:
@@ -381,6 +405,11 @@ Examples:
     run_parser.add_argument(
         "-u", "--skip-upload", action="store_true", help="Skip upload package info"
     )
+    run_parser.add_argument(
+        "--build-frontend",
+        action="store_true",
+        help="Build frontend assets on startup if the local frontend build is stale",
+    )
 
     # Add 'join' command parser
     join_parser = subparsers.add_parser(
@@ -398,6 +427,12 @@ Examples:
     )
     join_parser.add_argument(
         "-u", "--skip-upload", action="store_true", help="Skip upload package info"
+    )
+
+    build_frontend_parser = subparsers.add_parser(
+        "build-frontend",
+        aliases=["build:frontend"],
+        help="Build the frontend bundle in src/frontend",
     )
 
     # Add 'chat' command parser
@@ -428,6 +463,8 @@ Examples:
         join_command(args, passthrough_args)
     elif args.command == "chat":
         chat_command(args, passthrough_args)
+    elif args.command in {"build-frontend", "build:frontend"}:
+        build_frontend_command(args, passthrough_args)
     else:
         parser.print_help()
         sys.exit(1)
