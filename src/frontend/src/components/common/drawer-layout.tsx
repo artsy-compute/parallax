@@ -363,7 +363,12 @@ export const DrawerLayout: FC<PropsWithChildren> = ({ children }) => {
       </DrawerLayoutSide>
       <DrawerLayoutContainer>
         <DrawerLayoutHeader direction='row'>
-          <ModelSelect variant='text' autoCommit />
+          <ModelSelect
+            variant='text'
+            autoCommit
+            showNodeCounts
+            onNodeCountsClick={() => setClusterSettingsOpen(true)}
+          />
         </DrawerLayoutHeader>
         <DrawerLayoutContent>{children}</DrawerLayoutContent>
       </DrawerLayoutContainer>

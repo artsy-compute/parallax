@@ -1,4 +1,4 @@
-import { useEffect, useState, type FC, type ReactNode } from 'react';
+import { useEffect, useState, type FC, type MouseEvent, type ReactNode } from 'react';
 import * as motion from 'motion/react-client';
 import {
   InputBase,
@@ -8,12 +8,10 @@ import {
   selectClasses,
   Stack,
   styled,
-  Typography,
 } from '@mui/material';
 import { useCluster, useHost, type ModelInfo } from '../../services';
 import { useRefCallback } from '../../hooks';
-import { useAlertDialog } from '../mui';
-import { IconCheck, IconLoader, IconRestore } from '@tabler/icons-react';
+import { IconCheck, IconLoader } from '@tabler/icons-react';
 
 const ModelSelectRoot = styled(Select)<{ ownerState: ModelSelectProps }>(({
   theme,
@@ -118,11 +116,40 @@ const ModelMemory = styled('span')(({ theme }) => ({
   whiteSpace: 'nowrap',
 }));
 
+const NodeCounts = styled(Stack)(({ theme }) => ({
+  flexDirection: 'row',
+  alignItems: 'center',
+  gap: theme.spacing(0.5),
+  flexWrap: 'nowrap',
+  cursor: 'pointer',
+}));
+
+const NodeCountBadge = styled('span')<{ ownerState: { tone: 'active' | 'inactive' } }>(
+  ({ theme, ownerState }) => ({
+    ...theme.typography.caption,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: '2.25rem',
+    padding: '0.125rem 0.4rem',
+    borderRadius: 999,
+    fontSize: '0.68rem',
+    lineHeight: 1,
+    fontWeight: theme.typography.fontWeightMedium,
+    whiteSpace: 'nowrap',
+    color: ownerState.tone === 'active' ? theme.palette.success.dark : theme.palette.error.dark,
+    backgroundColor: 'transparent',
+    border: `1px solid ${
+      ownerState.tone === 'active' ? theme.palette.success.main : theme.palette.error.main
+    }`,
+  }),
+);
+
 const formatRequiredMemory = (vram: number) => (vram > 0 ? `${vram} GB` : '');
 
 const renderOption = (
   { name, displayName, logoUrl, vram }: ModelInfo,
-  { selected, loading, disabled }: { selected?: boolean; loading?: boolean; disabled?: boolean },
+  { selected, loading }: { selected?: boolean; loading?: boolean },
 ): ReactNode => (
   <ModelSelectOption key={name} value={name}>
     <ModelExtraStatus
@@ -149,14 +176,22 @@ const renderOption = (
 export interface ModelSelectProps {
   variant?: 'outlined' | 'text';
   autoCommit?: boolean;
+  showNodeCounts?: boolean;
+  onNodeCountsClick?: () => void;
 }
 
-export const ModelSelect: FC<ModelSelectProps> = ({ variant = 'outlined', autoCommit = false }) => {
+export const ModelSelect: FC<ModelSelectProps> = ({
+  variant = 'outlined',
+  autoCommit = false,
+  showNodeCounts = false,
+  onNodeCountsClick,
+}) => {
   const [{ type: hostType }] = useHost();
   const [
     {
       config: { modelName: configModelName, modelInfoList },
       clusterInfo: { status: clusterStatus, modelName: clusterModelName },
+      nodeInfoList,
     },
     {
       config: { setModelName },
@@ -189,6 +224,14 @@ export const ModelSelect: FC<ModelSelectProps> = ({ variant = 'outlined', autoCo
   });
 
   const [canAutoCommit, setCanAutoCommit] = useState(false);
+  const activeNodes = nodeInfoList.filter((node) => node.status === 'available').length;
+  const inactiveNodes = nodeInfoList.length - activeNodes;
+
+  const handleNodeCountsClick = useRefCallback((event: MouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onNodeCountsClick?.();
+  });
   useEffect(() => {
     if (canAutoCommit && configModelName !== clusterModelName) {
       setCanAutoCommit(false);
@@ -198,39 +241,50 @@ export const ModelSelect: FC<ModelSelectProps> = ({ variant = 'outlined', autoCo
 
   return (
     <>
-      <ModelSelectRoot
-        ownerState={{ variant }}
-        readOnly={hostType === 'node'}
-        input={variant === 'outlined' ? <OutlinedInput /> : <InputBase />}
-        value={configModelName}
-        onChange={onChange}
-        renderValue={(value: unknown) => {
-          const model = modelInfoList.find((m) => m.name === value);
-          if (!model) return value as string;
+      <Stack direction="row" alignItems="center" gap={1} sx={{ minWidth: 0 }}>
+        <ModelSelectRoot
+          ownerState={{ variant }}
+          readOnly={hostType === 'node'}
+          input={variant === 'outlined' ? <OutlinedInput /> : <InputBase />}
+          value={configModelName}
+          onChange={onChange}
+          sx={{ minWidth: 0, flex: variant === 'outlined' ? 1 : 'none' }}
+          renderValue={(value: unknown) => {
+            const model = modelInfoList.find((m) => m.name === value);
+            if (!model) return value as string;
 
-          return variant === 'outlined' ?
-              <ValueRow>
-                <ModelLogo src={model.logoUrl} />
-                <ModelInfoColumn gap={0.125}>
-                  <ModelDisplayName>{model.displayName}</ModelDisplayName>
-                  <ModelName>{model.name}</ModelName>
-                </ModelInfoColumn>
-                {model.vram > 0 && <ModelMemory>{formatRequiredMemory(model.vram)}</ModelMemory>}
-              </ValueRow>
-            : model.name;
-        }}
-        IconComponent={hostType === 'node' ? () => null : undefined}
-      >
-        {modelInfoList.map((model) => {
-          const { name } = model;
-          const selected = name === configModelName || name === clusterModelName;
-          const loading =
-            clusterStatus !== 'idle'
-            && name === configModelName
-            && configModelName !== clusterModelName;
-          return renderOption(model, { selected, loading });
-        })}
-      </ModelSelectRoot>
+            return variant === 'outlined' ?
+                <ValueRow>
+                  <ModelLogo src={model.logoUrl} />
+                  <ModelInfoColumn gap={0.125}>
+                    <ModelDisplayName>{model.displayName}</ModelDisplayName>
+                    <ModelName>{model.name}</ModelName>
+                  </ModelInfoColumn>
+                  {model.vram > 0 && <ModelMemory>{formatRequiredMemory(model.vram)}</ModelMemory>}
+                </ValueRow>
+              : model.name;
+          }}
+          IconComponent={hostType === 'node' ? () => null : undefined}
+        >
+          {modelInfoList.map((model) => {
+            const { name } = model;
+            const selected = name === configModelName || name === clusterModelName;
+            const loading =
+              clusterStatus !== 'idle'
+              && name === configModelName
+              && configModelName !== clusterModelName;
+            return renderOption(model, { selected, loading });
+          })}
+        </ModelSelectRoot>
+        {showNodeCounts && (
+          <NodeCounts onClick={handleNodeCountsClick} role="button" aria-label="Open cluster settings">
+            <NodeCountBadge ownerState={{ tone: 'active' }}>{activeNodes} up</NodeCountBadge>
+            {inactiveNodes > 0 && (
+              <NodeCountBadge ownerState={{ tone: 'inactive' }}>{inactiveNodes} down</NodeCountBadge>
+            )}
+          </NodeCounts>
+        )}
+      </Stack>
 
       {/* {nodeDialog} */}
     </>
