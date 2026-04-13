@@ -1,4 +1,4 @@
-import type { FC, ForwardRefExoticComponent, RefAttributes } from 'react';
+import type { FC } from 'react';
 import * as motion from 'motion/react-client';
 import {
   IconCheck,
@@ -6,8 +6,6 @@ import {
   IconDevices2,
   IconLoader,
   IconX,
-  type Icon,
-  type IconProps,
 } from '@tabler/icons-react';
 import {
   Alert,
@@ -97,10 +95,7 @@ const STATUS_COLOR_MAP: Record<NodeStatus, 'info' | 'success' | 'error'> = {
   failed: 'error',
 };
 
-const STATUS_ICON_MAP: Record<
-  NodeStatus,
-  ForwardRefExoticComponent<IconProps & RefAttributes<Icon>>
-> = {
+const STATUS_ICON_MAP: Record<NodeStatus, typeof IconCheck> = {
   waiting: IconLoader,
   available: IconCheck,
   failed: IconX,

@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 'use client';
 
-import type { DOMAttributes, FC, ForwardRefExoticComponent, ReactNode, RefAttributes } from 'react';
+import type { DOMAttributes, FC, ReactNode } from 'react';
 import { useState } from 'react';
 
 import {
@@ -18,20 +18,15 @@ import {
   Box,
 } from '@mui/material';
 import {
-  type Icon,
   IconAlertCircle,
   IconCircleCheck,
   IconInfoCircle,
-  type IconProps,
   IconX,
 } from '@tabler/icons-react';
 import type { SubmitErrorHandler, SubmitHandler, UseFormHandleSubmit } from 'react-hook-form';
 import { TitleIcon, TitleIconForm } from '../title-icon';
 
-const COLOR_ICON_MAP: Record<
-  NonNullable<AlertDialogProps['color']>,
-  ForwardRefExoticComponent<IconProps & RefAttributes<Icon>>
-> = {
+const COLOR_ICON_MAP: Record<NonNullable<AlertDialogProps['color']>, typeof IconInfoCircle> = {
   primary: IconInfoCircle,
   secondary: IconInfoCircle,
   info: IconInfoCircle,
