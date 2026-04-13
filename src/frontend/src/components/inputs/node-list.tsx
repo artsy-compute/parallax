@@ -140,7 +140,18 @@ const Dash: FC<{ animate?: boolean }> = ({ animate }) => {
 };
 
 const Node: FC<{ variant: NodeListVariant; node?: NodeInfo }> = ({ variant, node }) => {
-  const { id, hostname, status, gpuNumber, gpuName, gpuMemory, approxRemainingContext } = node || { status: 'waiting' };
+  const {
+    id,
+    hostname,
+    status,
+    gpuNumber,
+    gpuName,
+    gpuMemory,
+    startLayer,
+    endLayer,
+    totalLayers,
+    approxRemainingContext,
+  } = node || { status: 'waiting' };
   const { palette } = useTheme();
   const { main, lighter } =
     status === 'waiting' ?
@@ -192,6 +203,14 @@ const Node: FC<{ variant: NodeListVariant; node?: NodeInfo }> = ({ variant, node
               {hostname && (
                 <Typography variant='caption' color='text.secondary'>
                   Host: {hostname}
+                </Typography>
+              )}
+              {(typeof startLayer === 'number'
+                || typeof endLayer === 'number'
+                || typeof totalLayers === 'number') && (
+                <Typography variant='caption' color='text.secondary'>
+                  Layers: [{typeof startLayer === 'number' ? startLayer : '?'}, {typeof endLayer === 'number' ? endLayer : '?'})
+                  {typeof totalLayers === 'number' && ` of ${totalLayers}`}
                 </Typography>
               )}
               {typeof approxRemainingContext === 'number' && (

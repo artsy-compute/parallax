@@ -103,6 +103,7 @@ class Scheduler:
         self._pending_joins: "queue.Queue[Node]" = queue.Queue()
         self._pending_leaves: "queue.Queue[str]" = queue.Queue()
         self._pending_node_updates: "queue.Queue[Tuple[str, Optional[int], Optional[float], Optional[int], Optional[Dict[str, float]], Optional[bool], Optional[bool]]]" = (queue.Queue())
+        self._pending_rebalances: "queue.Queue[str]" = queue.Queue()
 
         # Concurrency controls
         self._stop_event: threading.Event = threading.Event()
@@ -302,6 +303,18 @@ class Scheduler:
         """Enqueue a leave event."""
         self._pending_leaves.put(node_id)
         self._wake_event.set()
+
+    def enqueue_rebalance(self, reason: str = "manual") -> None:
+        """Enqueue a manual topology rebalance request."""
+        self._pending_rebalances.put(reason)
+        self._wake_event.set()
+
+    def supports_manual_topology_rebalance(self) -> bool:
+        """Return True if a manual topology rebalance is safe to perform."""
+        nodes = self.node_manager.nodes
+        if not nodes:
+            return False
+        return not any(node.manual_layer_assignment for node in nodes)
 
     def enqueue_node_update(
         self,
@@ -591,6 +604,7 @@ class Scheduler:
         while not self._stop_event.is_set():
             self._process_node_updates()
             self._process_joins()
+            self._process_rebalances()
             self._process_leaves()
             now = time.time()
             if now - last_hb_check >= max(0.5, poll_interval):
@@ -673,6 +687,37 @@ class Scheduler:
                 logger.debug(
                     f"Bootstrap attempt after join failed: {exc}; will retry on future joins"
                 )
+
+    def _process_rebalances(self) -> None:
+        """Handle operator-triggered topology rebalances."""
+        requested_reasons: list[str] = []
+        while True:
+            try:
+                requested_reasons.append(self._pending_rebalances.get_nowait())
+            except queue.Empty:
+                break
+
+        if not requested_reasons:
+            return
+
+        if not self.supports_manual_topology_rebalance():
+            logger.warning(
+                "Manual topology rebalance skipped because current nodes use manual/retained allocations"
+            )
+            return
+
+        if self.node_manager.num_nodes == 0:
+            logger.warning("Manual topology rebalance skipped because no nodes are joined")
+            return
+
+        logger.info(
+            "Manual topology rebalance requested (%d pending request(s)); rebooting allocation",
+            len(requested_reasons),
+        )
+        try:
+            self.bootstrap(reboot=True)
+        finally:
+            self.emit_alloc_log_snapshot(reason="after manual topology rebalance")
 
     def _process_leaves(self) -> None:
         """Handle pending leave events safely.

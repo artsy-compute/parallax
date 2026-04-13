@@ -161,6 +161,53 @@ class SchedulerManage:
     def need_more_nodes(self):
         return self.scheduler.need_more_nodes() if self.scheduler else False
 
+    def supports_manual_topology_rebalance(self) -> bool:
+        return self.scheduler.supports_manual_topology_rebalance() if self.scheduler else False
+
+    def get_topology_change_advisory(self) -> dict:
+        if self.scheduler is None:
+            return {
+                "show": False,
+                "message": "",
+                "can_rebalance": False,
+                "standby_nodes": 0,
+            }
+
+        standby_nodes = self.scheduler.node_manager.num_standby_nodes
+        active_nodes = self.scheduler.node_manager.num_active_nodes
+        show = self.scheduler.has_full_pipeline() and standby_nodes > 0
+        can_rebalance = show and self.supports_manual_topology_rebalance()
+        if not show:
+            message = ""
+        elif standby_nodes == 1:
+            message = (
+                "Cluster topology changed. Current allocation is still serving traffic. "
+                "Rebalance to use the newly available standby node."
+            )
+        else:
+            message = (
+                f"Cluster topology changed. Current allocation is still serving traffic. "
+                f"Rebalance to use {standby_nodes} standby nodes."
+            )
+        return {
+            "show": show,
+            "message": message,
+            "can_rebalance": can_rebalance,
+            "standby_nodes": standby_nodes,
+            "active_nodes": active_nodes,
+        }
+
+    def request_topology_rebalance(self) -> tuple[bool, str]:
+        if self.scheduler is None:
+            return False, "Scheduler is not initialized"
+        advisory = self.get_topology_change_advisory()
+        if not advisory["show"]:
+            return False, "No topology change requires a manual rebalance"
+        if not advisory["can_rebalance"]:
+            return False, "Current topology uses retained/manual allocations and cannot be manually rebalanced"
+        self.scheduler.enqueue_rebalance("operator_requested_topology_change")
+        return True, "Topology rebalance requested"
+
     def get_cluster_status(self):
         return {
             "type": "cluster_status",
@@ -173,6 +220,7 @@ class SchedulerManage:
                 ),
                 "node_list": self.get_node_list(),
                 "need_more_nodes": self.need_more_nodes(),
+                "topology_change_advisory": self.get_topology_change_advisory(),
                 "max_running_request": (
                     self.scheduler.report_pipeline_capacity()[1] if self.scheduler else 0
                 ),
@@ -193,6 +241,9 @@ class SchedulerManage:
             "gpu_num": node.hardware.num_gpus,
             "gpu_name": node.hardware.gpu_name,
             "gpu_memory": node.hardware.memory_gb,
+            "start_layer": node.start_layer,
+            "end_layer": node.end_layer,
+            "total_layers": node.model_info.num_layers if node.model_info is not None else None,
             "approx_remaining_context": node.approx_remaining_context,
         }
 

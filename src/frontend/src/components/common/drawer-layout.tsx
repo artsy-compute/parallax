@@ -91,8 +91,9 @@ export const DrawerLayout: FC<PropsWithChildren> = ({ children }) => {
   const [
     {
       config: { modelInfo },
-      clusterInfo: { status: clusterStatus, needMoreNodes },
+      clusterInfo: { status: clusterStatus, needMoreNodes, topologyChangeAdvisory },
     },
+    { rebalanceTopology },
   ] = useCluster();
 
   const [dialogWaiting, { open: openWaiting }] = useAlertDialog({
@@ -210,6 +211,22 @@ export const DrawerLayout: FC<PropsWithChildren> = ({ children }) => {
   }, [narrowWindow]);
 
   const [clusterSettingsOpen, setClusterSettingsOpen] = useState(false);
+
+  const [rebalancingTopology, setRebalancingTopology] = useState(false);
+
+  const onClickRebalanceTopology = async () => {
+    if (rebalancingTopology) {
+      return;
+    }
+    try {
+      setRebalancingTopology(true);
+      await rebalanceTopology();
+    } catch (error) {
+      console.error('rebalanceTopology error', error);
+    } finally {
+      setRebalancingTopology(false);
+    }
+  };
 
   return (
     <DrawerLayoutRoot direction='row'>
@@ -370,7 +387,46 @@ export const DrawerLayout: FC<PropsWithChildren> = ({ children }) => {
             onNodeCountsClick={() => setClusterSettingsOpen(true)}
           />
         </DrawerLayoutHeader>
-        <DrawerLayoutContent>{children}</DrawerLayoutContent>
+        <DrawerLayoutContent>
+          {topologyChangeAdvisory.show && (
+            <Stack
+              direction='row'
+              sx={{
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 2,
+                px: 2,
+                py: 1.5,
+                borderRadius: 2,
+                border: '1px solid',
+                borderColor: 'warning.light',
+                backgroundColor: 'rgba(255, 244, 229, 0.7)',
+              }}
+            >
+              <Stack sx={{ minWidth: 0 }}>
+                <Typography variant='body2' sx={{ fontWeight: 600, color: 'warning.dark' }}>
+                  Cluster topology changed
+                </Typography>
+                <Typography variant='caption' color='text.secondary'>
+                  {topologyChangeAdvisory.message}
+                </Typography>
+              </Stack>
+              {topologyChangeAdvisory.canRebalance && (
+                <Button
+                  size='small'
+                  variant='outlined'
+                  color='warning'
+                  disabled={rebalancingTopology}
+                  onClick={onClickRebalanceTopology}
+                  sx={{ flex: 'none', whiteSpace: 'nowrap' }}
+                >
+                  {rebalancingTopology ? 'Rebalancing...' : 'Rebalance now'}
+                </Button>
+              )}
+            </Stack>
+          )}
+          {children}
+        </DrawerLayoutContent>
       </DrawerLayoutContainer>
       <AlertDialog
         open={clusterSettingsOpen}

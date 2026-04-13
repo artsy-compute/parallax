@@ -33,6 +33,16 @@ export const createStreamClusterStatus = createHttpStreamFactory({
 });
 
 
+export const rebalanceCluster = async (): Promise<{ ok: boolean; message: string }> => {
+  const response = await fetch(`${API_BASE_URL}/cluster/rebalance`, { method: 'POST' });
+  const message = await response.json();
+  if (message.type !== 'cluster_rebalance') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  return message.data;
+};
+
+
 export interface ChatHistorySummary {
   readonly conversation_id: string;
   readonly title: string;

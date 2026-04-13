@@ -258,6 +258,21 @@ async def cluster_status_json() -> JSONResponse:
     return JSONResponse(content=scheduler_manage.get_cluster_status(), status_code=200)
 
 
+@app.post("/cluster/rebalance")
+async def cluster_rebalance() -> JSONResponse:
+    if scheduler_manage is None:
+        return JSONResponse(
+            content={"type": "cluster_rebalance", "data": {"ok": False, "message": "Scheduler is not initialized"}},
+            status_code=503,
+        )
+
+    ok, message = scheduler_manage.request_topology_rebalance()
+    return JSONResponse(
+        content={"type": "cluster_rebalance", "data": {"ok": ok, "message": message}},
+        status_code=200 if ok else 409,
+    )
+
+
 @app.post("/v1/chat/completions")
 async def openai_v1_chat_completions(raw_request: Request):
     request_data = await raw_request.json()

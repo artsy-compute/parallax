@@ -2,7 +2,7 @@
 import type { Dispatch, SetStateAction, FC, PropsWithChildren } from 'react';
 import { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { useRefCallback } from '../hooks';
-import { createStreamClusterStatus, getModelList, initScheduler } from './api';
+import { createStreamClusterStatus, getModelList, initScheduler, rebalanceCluster } from './api';
 import { useHost } from './host';
 
 import logoUrlOpenAI from '../assets/models/OpenAI-black-monoblossom.svg';
@@ -54,6 +54,13 @@ export interface ClusterInfo {
   readonly nodeJoinCommand: Readonly<Record<string, string>>;
   readonly initNodesNumber: number;
   readonly needMoreNodes: boolean;
+  readonly topologyChangeAdvisory: {
+    readonly show: boolean;
+    readonly message: string;
+    readonly canRebalance: boolean;
+    readonly standbyNodes: number;
+    readonly activeNodes: number;
+  };
 }
 
 const INITIAL_CLUSTER_INFO: ClusterInfo = {
@@ -64,6 +71,13 @@ const INITIAL_CLUSTER_INFO: ClusterInfo = {
   nodeJoinCommand: {},
   initNodesNumber: 4,
   needMoreNodes: false,
+  topologyChangeAdvisory: {
+    show: false,
+    message: '',
+    canRebalance: false,
+    standbyNodes: 0,
+    activeNodes: 0,
+  },
 };
 
 export type NodeStatus = 'waiting' | 'available' | 'failed';
@@ -75,6 +89,9 @@ export interface NodeInfo {
   readonly gpuNumber: number;
   readonly gpuName: string;
   readonly gpuMemory: number;
+  readonly startLayer?: number;
+  readonly endLayer?: number;
+  readonly totalLayers?: number;
   readonly approxRemainingContext?: number;
 }
 
@@ -107,6 +124,7 @@ export interface ClusterStates {
 export interface ClusterActions {
   readonly config: ClusterConfigSetters;
   readonly init: () => Promise<void>;
+  readonly rebalanceTopology: () => Promise<void>;
 }
 
 // Implementation
@@ -192,6 +210,7 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
             node_join_command,
             node_list,
             need_more_nodes,
+            topology_change_advisory,
           },
         } = message;
         setClusterInfo((prev) => {
@@ -203,6 +222,13 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
             modelInfo: modelInfoList.find((model) => model.name === model_name),
             nodeJoinCommand: node_join_command || {},
             needMoreNodes: need_more_nodes || false,
+            topologyChangeAdvisory: {
+              show: !!topology_change_advisory?.show,
+              message: topology_change_advisory?.message || '',
+              canRebalance: !!topology_change_advisory?.can_rebalance,
+              standbyNodes: topology_change_advisory?.standby_nodes || 0,
+              activeNodes: topology_change_advisory?.active_nodes || 0,
+            },
           };
           if (JSON.stringify(next) !== JSON.stringify(prev)) {
             debugLog('setClusterInfo', next);
@@ -220,6 +246,9 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
               gpu_num,
               gpu_name,
               gpu_memory,
+              start_layer,
+              end_layer,
+              total_layers,
               approx_remaining_context,
             }: any) => ({
               id: node_id,
@@ -228,6 +257,9 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
               gpuNumber: gpu_num || 1,
               gpuName: gpu_name || '',
               gpuMemory: gpu_memory || 0,
+              startLayer: typeof start_layer === 'number' ? start_layer : undefined,
+              endLayer: typeof end_layer === 'number' ? end_layer : undefined,
+              totalLayers: typeof total_layers === 'number' ? total_layers : undefined,
               approxRemainingContext: approx_remaining_context,
             }),
           );
@@ -290,6 +322,13 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
     }
   }, [modelInfoList, clusterInfo]);
 
+  const rebalanceTopology = useRefCallback(async () => {
+    const result = await rebalanceCluster();
+    if (!result.ok) {
+      throw new Error(result.message || 'Failed to request topology rebalance');
+    }
+  });
+
   const init = useRefCallback(async () => {
     if (initNodesNumber < 1) {
       throw new Error('initNodesNumber must be greater than 0');
@@ -328,6 +367,7 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
         setModelName,
       },
       init,
+      rebalanceTopology,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
