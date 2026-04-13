@@ -20,6 +20,7 @@ import argparse
 import multiprocessing
 import os
 import signal
+import socket
 import sys
 import tempfile
 import time
@@ -29,7 +30,7 @@ from parallax.server.executor.factory import run_executor_process, stop_executor
 from parallax.server.http_server import launch_http_server, stop_http_server
 from parallax.server.server_args import parse_args
 from parallax.utils.shared_state import SharedState
-from parallax.utils.utils import fetch_model_from_hf, initialize_nccl_port
+from parallax.utils.utils import fetch_model_from_hf, initialize_nccl_port, is_port_available
 from parallax_utils.ascii_anime import display_parallax_join
 from parallax_utils.logging_config import get_logger, set_log_level
 from parallax_utils.runtime_profiles import infer_is_local_network, resolve_runtime_profile
@@ -65,6 +66,24 @@ def _stop_executor_processes(executor_subprocs):
         if executor_process.is_alive():
             logger.debug(f"Terminating executor process {executor_process.pid}")
             stop_executor_process(executor_process)
+
+
+def _auto_select_local_http_port(*, avoid_ports: set[int] | None = None) -> int:
+    """Pick a free local HTTP port for a node process.
+
+    Use OS-assigned ephemeral ports instead of fixed low ports so multiple local
+    node instances can coexist without colliding with each other or with the
+    scheduler/chat app.
+    """
+    avoid = {p for p in (avoid_ports or set()) if p > 0}
+    for _ in range(32):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            port = int(s.getsockname()[1])
+        if port not in avoid and is_port_available(port):
+            return port
+
+    raise RuntimeError("Failed to auto-select a free local HTTP port for node startup")
 
 
 def _wait_executors_check_layer_change(shared_state: SharedState, executor_subprocs):
@@ -176,6 +195,14 @@ if __name__ == "__main__":
             args.heartbeat_rpc_timeout_sec,
             args.force_rejoin_threshold,
         )
+
+        # Node-local HTTP ports must be unique on a shared machine. Always pick a
+        # free local port automatically for node launches instead of relying on the
+        # CLI default, and avoid the backend/chat-app default port.
+        reserved_local_ports = {3001, int(getattr(args, "node_chat_port", 0) or 0)}
+        args.port = _auto_select_local_http_port(avoid_ports=reserved_local_ports)
+        logger.info("Selected local node HTTP port automatically: %s", args.port)
+
         args.recv_from_peer_addr = f"ipc://{tempfile.NamedTemporaryFile().name}"
         args.send_to_peer_addr = f"ipc://{tempfile.NamedTemporaryFile().name}"
         args.executor_input_ipc = f"ipc://{tempfile.NamedTemporaryFile().name}"

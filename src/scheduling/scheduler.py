@@ -20,6 +20,7 @@ from scheduling.node import Node, RequestSignal
 from scheduling.node_management import NodeManager, NodeState
 from scheduling.request_routing import (
     DynamicProgrammingRouting,
+    RandomizedOverDynamicPipelinesRouting,
     RoundRobinOverFixedPipelinesRouting,
 )
 
@@ -207,6 +208,49 @@ class Scheduler:
         self.emit_alloc_log_snapshot(reason="Post Bootstrap")
         return True
 
+    def _extend_rr_pipelines_for_recovered_allocations(self) -> None:
+        """Register additional fixed pipelines discovered from recovered ACTIVE nodes.
+
+        This is used after scheduler restart recovery when manual/retained allocations
+        are re-applied directly on nodes after the first pipeline has already restored
+        routing. Requests should then be distributed across any additional feasible
+        recovered pipelines instead of leaving those nodes ACTIVE but unroutable.
+        """
+        if self.dynamic_pipelines_router:
+            return
+
+        active_nodes = self.node_manager.active_nodes
+        if not active_nodes:
+            return
+
+        discovered = RandomizedOverDynamicPipelinesRouting.pipeline_discovery(
+            active_nodes, self.num_layers
+        )
+        if not discovered:
+            return
+
+        new_pipelines = [
+            pipeline
+            for pipeline in discovered
+            if pipeline
+            and all(self.node_manager.pipeline_id_of_node(node_id) is None for node_id in pipeline)
+        ]
+        if not new_pipelines:
+            return
+
+        try:
+            self.node_manager.extend_registered_pipelines(new_pipelines)
+            logger.info(
+                "[Scheduler] Registered %d additional recovered pipeline(s): %s",
+                len(new_pipelines),
+                new_pipelines,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[Scheduler] Failed to register recovered fixed pipelines: %s",
+                exc,
+            )
+
     def update_last_refit_time(self):
         min_refit_time = None
         for node in self.node_manager.nodes:
@@ -356,6 +400,8 @@ class Scheduler:
                     )
                     self.request_router.bootstrap()
                     self._bootstrapped_event.set()
+                else:
+                    self._extend_rr_pipelines_for_recovered_allocations()
         elif bootstrapped:
             self.node_manager.upsert(node)
 
