@@ -18,7 +18,7 @@ export const ChatInput: FC = () => {
       clusterInfo: { status: clusterStatus },
     },
   ] = useCluster();
-  const [{ input, status, inputTruncationNotice }, { setInput, generate, stop, clear, registerInputFocus, startNewConversation }] = useChat();
+  const [{ input, status, inputTruncationNotice, requestHealthNotice }, { setInput, generate, stop, clear, registerInputFocus, startNewConversation }] = useChat();
 
   const compositionRef = useRef(false);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -72,6 +72,11 @@ export const ChatInput: FC = () => {
         >
           Prompt was truncated to fit context: kept {inputTruncationNotice.keptPromptTokens} of {inputTruncationNotice.originalPromptTokens} input tokens.
           Your next prompt will continue this conversation unless you start a new chat.
+        </Alert>
+      )}
+      {requestHealthNotice && (
+        <Alert severity={requestHealthNotice.severity}>
+          {requestHealthNotice.message}
         </Alert>
       )}
       {/* <Stack direction='row' sx={{ gap: 1, p: 1 }}>

@@ -23,6 +23,7 @@ const debugLog = async (...args: any[]) => {
 
 const STORAGE_KEY = 'parallax.chat.conversation_id';
 const FIRST_TOKEN_TIMEOUT_MS = 30000;
+const NO_PROGRESS_TIMEOUT_MS = 45000;
 
 const createConversationId = () =>
   globalThis.crypto?.randomUUID?.() || `conv-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -69,6 +70,10 @@ export interface ChatStates {
     readonly maxSequenceLength: number;
     readonly maxNewTokens: number;
   } | null;
+  readonly requestHealthNotice: {
+    readonly severity: 'warning' | 'error';
+    readonly message: string;
+  } | null;
 }
 
 export interface ChatActions {
@@ -112,15 +117,34 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
   const [history, setHistory] = useState<readonly ChatHistorySummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [inputTruncationNotice, setInputTruncationNotice] = useState<ChatStates['inputTruncationNotice']>(null);
+  const [requestHealthNotice, setRequestHealthNotice] = useState<ChatStates['requestHealthNotice']>(null);
   const inputFocusRef = useConst<{ current: (() => void) | null }>(() => ({ current: null }));
   const firstTokenTimeoutRef = useConst<{ current: ReturnType<typeof setTimeout> | null }>(() => ({ current: null }));
+  const noProgressTimeoutRef = useConst<{ current: ReturnType<typeof setTimeout> | null }>(() => ({ current: null }));
   const timedOutBeforeFirstTokenRef = useConst<{ current: boolean }>(() => ({ current: false }));
+  const timedOutDuringGenerationRef = useConst<{ current: boolean }>(() => ({ current: false }));
 
   const clearFirstTokenTimeout = useRefCallback(() => {
     if (firstTokenTimeoutRef.current) {
       clearTimeout(firstTokenTimeoutRef.current);
       firstTokenTimeoutRef.current = null;
     }
+  });
+
+  const clearNoProgressTimeout = useRefCallback(() => {
+    if (noProgressTimeoutRef.current) {
+      clearTimeout(noProgressTimeoutRef.current);
+      noProgressTimeoutRef.current = null;
+    }
+  });
+
+  const armNoProgressTimeout = useRefCallback(() => {
+    clearNoProgressTimeout();
+    noProgressTimeoutRef.current = setTimeout(() => {
+      debugLog('SSE NO PROGRESS TIMEOUT');
+      timedOutDuringGenerationRef.current = true;
+      sse.disconnect();
+    }, NO_PROGRESS_TIMEOUT_MS);
   });
 
   const focusInput = useRefCallback<ChatActions['focusInput']>(() => {
@@ -156,6 +180,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
       const detail = await getChatHistoryDetail(nextConversationId);
       setConversationId(detail.conversation_id || nextConversationId);
       setInputTruncationNotice(null);
+      setRequestHealthNotice(null);
       setMessages(
         detail.messages.map((message) => ({
           id: message.id,
@@ -197,7 +222,9 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
       onOpen: () => {
         debugLog('SSE OPEN');
         timedOutBeforeFirstTokenRef.current = false;
+        timedOutDuringGenerationRef.current = false;
         clearFirstTokenTimeout();
+        clearNoProgressTimeout();
         firstTokenTimeoutRef.current = setTimeout(() => {
           debugLog('SSE FIRST TOKEN TIMEOUT');
           timedOutBeforeFirstTokenRef.current = true;
@@ -208,9 +235,14 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
       onClose: () => {
         debugLog('SSE CLOSE');
         clearFirstTokenTimeout();
+        clearNoProgressTimeout();
         const timedOutBeforeFirstToken = timedOutBeforeFirstTokenRef.current;
+        const timedOutDuringGeneration = timedOutDuringGenerationRef.current;
         setMessages((prev) => {
           const lastMessage = prev[prev.length - 1];
+          if (!lastMessage) {
+            return prev;
+          }
           const { id, raw, thinking, content } = lastMessage;
           debugLog('GENERATING DONE', 'lastMessage:', lastMessage);
           debugLog('GENERATING DONE', 'id:', id);
@@ -221,20 +253,36 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
             ...prev.slice(0, -1),
             {
               ...lastMessage,
-              status: 'done',
+              status: (timedOutBeforeFirstToken || timedOutDuringGeneration) ? 'error' : 'done',
             },
           ];
         });
-        setStatus(timedOutBeforeFirstToken ? 'error' : 'closed');
+        if (timedOutBeforeFirstToken) {
+          setRequestHealthNotice({
+            severity: 'warning',
+            message: 'No output arrived in time. The request may be stuck during prompt processing. Try a shorter prompt or send the request again.',
+          });
+        } else if (timedOutDuringGeneration) {
+          setRequestHealthNotice({
+            severity: 'warning',
+            message: 'Generation stalled after it started. You can retry the request or shorten the prompt.',
+          });
+        }
+        setStatus(timedOutBeforeFirstToken || timedOutDuringGeneration ? 'error' : 'closed');
         timedOutBeforeFirstTokenRef.current = false;
+        timedOutDuringGenerationRef.current = false;
         refreshHistory();
       },
       onError: (error) => {
         clearFirstTokenTimeout();
+        clearNoProgressTimeout();
         debugLog('SSE ERROR', error);
         // Set last message to done
         setMessages((prev) => {
           const lastMessage = prev[prev.length - 1];
+          if (!lastMessage) {
+            return prev;
+          }
           const { id, raw, thinking, content } = lastMessage;
           debugLog('GENERATING ERROR', 'lastMessage:', lastMessage);
           debugLog('GENERATING ERROR', 'id:', id);
@@ -245,10 +293,16 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
             ...prev.slice(0, -1),
             {
               ...lastMessage,
-              status: 'done',
+              status: 'error',
             },
           ];
         });
+        if (!timedOutBeforeFirstTokenRef.current && !timedOutDuringGenerationRef.current) {
+          setRequestHealthNotice({
+            severity: 'error',
+            message: 'The request ended unexpectedly. You can retry it from the current conversation.',
+          });
+        }
         debugLog('SSE ERROR', error);
         setStatus('error');
         refreshHistory();
@@ -362,6 +416,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
 
     let nextMessages: readonly ChatMessage[] = messages;
     setInputTruncationNotice(null);
+    setRequestHealthNotice(null);
     if (message) {
       // Regenerate
       const finalMessageIndex = messages.findIndex((m) => m.id === message.id);
@@ -403,6 +458,8 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     if (status === 'closed' || status === 'error') {
       return;
     }
+    clearFirstTokenTimeout();
+    clearNoProgressTimeout();
     sse.disconnect();
   });
 
@@ -416,6 +473,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     await deleteChatHistoryConversation(targetConversationId);
     if (targetConversationId === conversationId) {
       setInputTruncationNotice(null);
+      setRequestHealthNotice(null);
       setMessages([]);
       setStatus('closed');
       setConversationId(createConversationId());
@@ -426,6 +484,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
   const startNewConversation = useRefCallback<ChatActions['startNewConversation']>(() => {
     stop();
     setInputTruncationNotice(null);
+    setRequestHealthNotice(null);
     setMessages([]);
     setStatus('closed');
     setConversationId(createConversationId());
@@ -442,6 +501,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
       return;
     }
     setInputTruncationNotice(null);
+    setRequestHealthNotice(null);
     setMessages([]);
     setConversationId(createConversationId());
     refreshHistory();
@@ -470,10 +530,11 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
         history,
         historyLoading,
         inputTruncationNotice,
+        requestHealthNotice,
       },
       actions,
     ],
-    [input, status, messages, conversationId, history, historyLoading, inputTruncationNotice, actions],
+    [input, status, messages, conversationId, history, historyLoading, inputTruncationNotice, requestHealthNotice, actions],
   );
 
   return <context.Provider value={value}>{children}</context.Provider>;
