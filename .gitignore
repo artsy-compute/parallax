@@ -13,4 +13,4 @@ build/
 .vscode/
 hosts.json
 
-src/frontend/dist/
+src/frontend/dist/*

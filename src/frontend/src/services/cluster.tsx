@@ -137,16 +137,25 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
     while (!succeed) {
       try {
         const rawList = await getModelList();
-        const next: readonly ModelInfo[] = rawList.map(({ name, vram_gb }) => {
-          name = name || '';
-          vram_gb = vram_gb || 0;
-          return {
-            name,
-            displayName: name,
-            logoUrl: getLogoUrl(name),
-            vram: vram_gb,
-          };
-        });
+        const next: readonly ModelInfo[] = rawList
+          .map(({ name, vram_gb }) => {
+            name = name || '';
+            vram_gb = vram_gb || 0;
+            return {
+              name,
+              displayName: name,
+              logoUrl: getLogoUrl(name),
+              vram: vram_gb,
+            };
+          })
+          .sort((a, b) => {
+            const aUnknown = a.vram <= 0;
+            const bUnknown = b.vram <= 0;
+            if (aUnknown !== bUnknown) {
+              return aUnknown ? 1 : -1;
+            }
+            return a.vram - b.vram || a.name.localeCompare(b.name);
+          });
         setModelInfoList(next);
         succeed = true;
       } catch (error) {
