@@ -11,6 +11,7 @@ from parallax_utils.logging_config import get_logger
 logger = get_logger(__name__)
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_\-']+")
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
 class ChatMemoryService:
@@ -77,6 +78,12 @@ class ChatMemoryService:
         if len(text) <= max_chars:
             return text
         return text[: max_chars - 1].rstrip() + '...'
+
+    def _clean_history_text(self, text: str, max_chars: int = 180) -> str:
+        text = _THINK_RE.sub('', text or '')
+        text = re.sub(r'<[^>]+>', ' ', text)
+        text = ' '.join(text.split())
+        return self._compact_text(text, max_chars)
 
     def ensure_conversation(self, conversation_id: str) -> None:
         now = time.time()
@@ -254,13 +261,29 @@ class ChatMemoryService:
             rows = list(cur.fetchall())
         conversations = []
         for row in rows:
-            last_message = self._compact_text(row['last_message'] or '', 120)
-            title = last_message or f"Conversation {row['conversation_id'][:8]}"
+            with self._lock, self._connect() as conn:
+                first_user_cur = conn.execute(
+                    """
+                    SELECT content FROM messages
+                    WHERE conversation_id=? AND role='user'
+                    ORDER BY created_at ASC, id ASC
+                    LIMIT 1
+                    """,
+                    (row['conversation_id'],),
+                )
+                first_user_row = first_user_cur.fetchone()
+            first_user_message = self._clean_history_text(
+                first_user_row['content'] if first_user_row else '',
+                80,
+            )
+            last_message = self._clean_history_text(row['last_message'] or '', 120)
+            summary = self._clean_history_text(row['summary_text'] or '', 180)
+            title = first_user_message or last_message or f"Conversation {row['conversation_id'][:8]}"
             conversations.append(
                 {
                     'conversation_id': row['conversation_id'],
                     'title': title,
-                    'summary': self._compact_text(row['summary_text'] or '', 180),
+                    'summary': summary,
                     'message_count': int(row['message_count'] or 0),
                     'created_at': float(row['created_at']),
                     'updated_at': float(row['updated_at']),

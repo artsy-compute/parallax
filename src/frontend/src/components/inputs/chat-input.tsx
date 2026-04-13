@@ -1,5 +1,6 @@
 import { Button, Stack, TextField } from '@mui/material';
 import {
+  useEffect,
   useRef,
   type CompositionEventHandler,
   type FC,
@@ -17,9 +18,19 @@ export const ChatInput: FC = () => {
       clusterInfo: { status: clusterStatus },
     },
   ] = useCluster();
-  const [{ input, status }, { setInput, generate, stop, clear }] = useChat();
+  const [{ input, status }, { setInput, generate, stop, clear, registerInputFocus }] = useChat();
 
   const compositionRef = useRef(false);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    registerInputFocus(() => {
+      inputRef.current?.focus();
+    });
+    return () => {
+      registerInputFocus(null);
+    };
+  }, [registerInputFocus]);
 
   const onCompositionStart = useRefCallback<CompositionEventHandler>((e) => {
     compositionRef.current = true;
@@ -54,6 +65,7 @@ export const ChatInput: FC = () => {
         {modelName}
       </Stack> */}
       <TextField
+        inputRef={inputRef}
         value={input}
         onChange={(event) => setInput(event.target.value)}
         multiline

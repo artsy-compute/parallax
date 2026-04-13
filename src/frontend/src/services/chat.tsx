@@ -71,6 +71,8 @@ export interface ChatActions {
   readonly refreshHistory: () => Promise<void>;
   readonly loadConversation: (conversationId: string) => Promise<void>;
   readonly startNewConversation: () => void;
+  readonly focusInput: () => void;
+  readonly registerInputFocus: (focusFn: (() => void) | null) => void;
 }
 
 export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
@@ -100,6 +102,15 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
   });
   const [history, setHistory] = useState<readonly ChatHistorySummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const inputFocusRef = useConst<{ current: (() => void) | null }>(() => ({ current: null }));
+
+  const focusInput = useRefCallback<ChatActions['focusInput']>(() => {
+    inputFocusRef.current?.();
+  });
+
+  const registerInputFocus = useRefCallback<ChatActions['registerInputFocus']>((focusFn) => {
+    inputFocusRef.current = focusFn;
+  });
 
   useEffect(() => {
     globalThis.localStorage?.setItem(STORAGE_KEY, conversationId);
@@ -358,6 +369,9 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     setStatus('closed');
     setConversationId(createConversationId());
     refreshHistory();
+    requestAnimationFrame(() => {
+      focusInput();
+    });
   });
 
   const clear = useRefCallback<ChatActions['clear']>(() => {
@@ -379,6 +393,8 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     refreshHistory,
     loadConversation,
     startNewConversation,
+    focusInput,
+    registerInputFocus,
   });
 
   const value = useMemo<readonly [ChatStates, ChatActions]>(
