@@ -641,6 +641,7 @@ class BaseExecutor:
         max_seq_len = max(max_seq_len, 4096)
         max_new_tokens = raw_request.get("max_tokens", 2048)
         input_token_num = len(prompt)
+        original_input_token_num = input_token_num
         if input_token_num + max_new_tokens >= max_seq_len:
             logger.warning(
                 f"Input token length {input_token_num} + max_new_tokens {max_new_tokens} exceeds max_sequence_length {max_seq_len}."
@@ -651,10 +652,24 @@ class BaseExecutor:
                 )
                 max_new_tokens = 2048
             if input_token_num + max_new_tokens >= max_seq_len:
+                kept_prompt_tokens = max_seq_len - max_new_tokens
                 logger.warning(
-                    f"Trunc input prompt, keep last {max_seq_len - max_new_tokens} tokens"
+                    f"Trunc input prompt, keep last {kept_prompt_tokens} tokens"
                 )
-                prompt = prompt[-(max_seq_len - max_new_tokens) :]
+                prompt = prompt[-kept_prompt_tokens:]
+                if hasattr(self, "send_to_ipc_socket") and self.send_to_ipc_socket is not None:
+                    try:
+                        self.send_to_ipc_socket.send_pyobj({
+                            "type": "truncation_info",
+                            "rid": rid,
+                            "truncated": True,
+                            "original_prompt_tokens": original_input_token_num,
+                            "kept_prompt_tokens": len(prompt),
+                            "max_sequence_length": max_seq_len,
+                            "max_new_tokens": max_new_tokens,
+                        })
+                    except Exception:
+                        pass
 
         max_total_length = len(prompt) + max_new_tokens
         logger.debug(f"Final max_new_tokens for request ID {rid}: {max_new_tokens}")

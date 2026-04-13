@@ -22,6 +22,7 @@ const debugLog = async (...args: any[]) => {
 };
 
 const STORAGE_KEY = 'parallax.chat.conversation_id';
+const FIRST_TOKEN_TIMEOUT_MS = 30000;
 
 const createConversationId = () =>
   globalThis.crypto?.randomUUID?.() || `conv-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -61,6 +62,13 @@ export interface ChatStates {
   readonly conversationId: string;
   readonly history: readonly ChatHistorySummary[];
   readonly historyLoading: boolean;
+  readonly inputTruncationNotice: {
+    readonly truncated: boolean;
+    readonly originalPromptTokens: number;
+    readonly keptPromptTokens: number;
+    readonly maxSequenceLength: number;
+    readonly maxNewTokens: number;
+  } | null;
 }
 
 export interface ChatActions {
@@ -102,7 +110,17 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
   });
   const [history, setHistory] = useState<readonly ChatHistorySummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [inputTruncationNotice, setInputTruncationNotice] = useState<ChatStates['inputTruncationNotice']>(null);
   const inputFocusRef = useConst<{ current: (() => void) | null }>(() => ({ current: null }));
+  const firstTokenTimeoutRef = useConst<{ current: ReturnType<typeof setTimeout> | null }>(() => ({ current: null }));
+  const timedOutBeforeFirstTokenRef = useConst<{ current: boolean }>(() => ({ current: false }));
+
+  const clearFirstTokenTimeout = useRefCallback(() => {
+    if (firstTokenTimeoutRef.current) {
+      clearTimeout(firstTokenTimeoutRef.current);
+      firstTokenTimeoutRef.current = null;
+    }
+  });
 
   const focusInput = useRefCallback<ChatActions['focusInput']>(() => {
     inputFocusRef.current?.();
@@ -136,6 +154,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     try {
       const detail = await getChatHistoryDetail(nextConversationId);
       setConversationId(detail.conversation_id || nextConversationId);
+      setInputTruncationNotice(null);
       setMessages(
         detail.messages.map((message) => ({
           id: message.id,
@@ -176,10 +195,19 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     createSSE({
       onOpen: () => {
         debugLog('SSE OPEN');
+        timedOutBeforeFirstTokenRef.current = false;
+        clearFirstTokenTimeout();
+        firstTokenTimeoutRef.current = setTimeout(() => {
+          debugLog('SSE FIRST TOKEN TIMEOUT');
+          timedOutBeforeFirstTokenRef.current = true;
+          sse.disconnect();
+        }, FIRST_TOKEN_TIMEOUT_MS);
         setStatus('opened');
       },
       onClose: () => {
         debugLog('SSE CLOSE');
+        clearFirstTokenTimeout();
+        const timedOutBeforeFirstToken = timedOutBeforeFirstTokenRef.current;
         setMessages((prev) => {
           const lastMessage = prev[prev.length - 1];
           const { id, raw, thinking, content } = lastMessage;
@@ -196,10 +224,12 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
             },
           ];
         });
-        setStatus('closed');
+        setStatus(timedOutBeforeFirstToken ? 'error' : 'closed');
+        timedOutBeforeFirstTokenRef.current = false;
         refreshHistory();
       },
       onError: (error) => {
+        clearFirstTokenTimeout();
         debugLog('SSE ERROR', error);
         // Set last message to done
         setMessages((prev) => {
@@ -241,10 +271,21 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
         //   usage: null,
         // };
         const {
-          data: { id, object, model, created, choices, usage },
+          data: { id, object, model, created, choices, usage, input_truncation },
         } = message;
+        if (input_truncation?.truncated) {
+          setInputTruncationNotice({
+            truncated: true,
+            originalPromptTokens: input_truncation.original_prompt_tokens || 0,
+            keptPromptTokens: input_truncation.kept_prompt_tokens || 0,
+            maxSequenceLength: input_truncation.max_sequence_length || 0,
+            maxNewTokens: input_truncation.max_new_tokens || 0,
+          });
+        }
         if (object === 'chat.completion.chunk' && choices?.length > 0) {
           if (choices[0].delta.content) {
+            timedOutBeforeFirstTokenRef.current = false;
+            clearFirstTokenTimeout();
             setStatus('generating');
           }
           setMessages((prev) => {
@@ -319,6 +360,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     }
 
     let nextMessages: readonly ChatMessage[] = messages;
+    setInputTruncationNotice(null);
     if (message) {
       // Regenerate
       const finalMessageIndex = messages.findIndex((m) => m.id === message.id);
@@ -365,6 +407,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
 
   const startNewConversation = useRefCallback<ChatActions['startNewConversation']>(() => {
     stop();
+    setInputTruncationNotice(null);
     setMessages([]);
     setStatus('closed');
     setConversationId(createConversationId());
@@ -380,6 +423,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     if (status === 'opened' || status === 'generating') {
       return;
     }
+    setInputTruncationNotice(null);
     setMessages([]);
     setConversationId(createConversationId());
     refreshHistory();
@@ -406,10 +450,11 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
         conversationId,
         history,
         historyLoading,
+        inputTruncationNotice,
       },
       actions,
     ],
-    [input, status, messages, conversationId, history, historyLoading, actions],
+    [input, status, messages, conversationId, history, historyLoading, inputTruncationNotice, actions],
   );
 
   return <context.Provider value={value}>{children}</context.Provider>;

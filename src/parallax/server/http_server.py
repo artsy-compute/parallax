@@ -83,6 +83,12 @@ class HTTPRequestInfo:
     # usage
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    input_truncated: bool = False
+    original_prompt_tokens: int = 0
+    kept_prompt_tokens: int = 0
+    truncation_max_sequence_length: int = 0
+    truncation_max_new_tokens: int = 0
+    truncation_notice_ready: Optional[asyncio.Event] = field(default=None, repr=False)
     # helper
     is_finish: bool = False
     # Queue for streaming tokens one by one
@@ -162,7 +168,14 @@ class HTTPHandler:
         )
         if stream:
             request_info.token_queue = asyncio.Queue()
+            request_info.truncation_notice_ready = asyncio.Event()
         self.processing_requests[rid] = request_info
+
+    @staticmethod
+    def _mark_truncation_notice_ready(request_info: HTTPRequestInfo):
+        event = request_info.truncation_notice_ready
+        if event is not None and not event.is_set():
+            event.set()
 
     def release_request(self, rid: str):
         """Releases the request resources"""
@@ -253,6 +266,14 @@ class HTTPHandler:
                 for token_id, prob in zip(request_info.token_ids_list, request_info.probs_list)
             ]
             choice["token_ids"] = request_info.token_ids_list
+        if request_info.input_truncated:
+            response["input_truncation"] = {
+                "truncated": True,
+                "original_prompt_tokens": request_info.original_prompt_tokens,
+                "kept_prompt_tokens": request_info.kept_prompt_tokens,
+                "max_sequence_length": request_info.truncation_max_sequence_length,
+                "max_new_tokens": request_info.truncation_max_new_tokens,
+            }
         if request_info.weight_version is not None:
             response["weight_version"] = request_info.weight_version
         response_json = json.dumps(response, separators=(",", ":"))
@@ -273,6 +294,18 @@ class HTTPHandler:
 
     async def generate_stream_response(self, rid):
         """Generates a streaming response by consuming from a token queue."""
+        request_info = self.processing_requests.get(rid)
+        if request_info is None:
+            return
+
+        # Give truncation metadata a brief chance to arrive so the first chunk can
+        # carry it consistently instead of racing ahead without the notice.
+        if request_info.truncation_notice_ready is not None:
+            try:
+                await asyncio.wait_for(request_info.truncation_notice_ready.wait(), timeout=0.2)
+            except asyncio.TimeoutError:
+                pass
+
         # Send first chunk with role
         yield self._generate_stream_chunk(rid, None, is_first=True)
 
@@ -331,6 +364,14 @@ class HTTPHandler:
             choice["token_ids"] = request_info.token_ids_list
         if request_info.routed_experts is not None:
             choice["routed_experts"] = request_info.routed_experts
+        if request_info.input_truncated:
+            response["input_truncation"] = {
+                "truncated": True,
+                "original_prompt_tokens": request_info.original_prompt_tokens,
+                "kept_prompt_tokens": request_info.kept_prompt_tokens,
+                "max_sequence_length": request_info.truncation_max_sequence_length,
+                "max_new_tokens": request_info.truncation_max_new_tokens,
+            }
         if request_info.weight_version is not None:
             response["weight_version"] = request_info.weight_version
         return response
@@ -354,6 +395,7 @@ class HTTPHandler:
         request_info.error_status = status
         request_info.finish_reason = "error"
         request_info.is_finish = True
+        self._mark_truncation_notice_ready(request_info)
 
         if request_info.stream and request_info.token_queue is not None:
             payload = {
@@ -377,6 +419,15 @@ class HTTPHandler:
                 continue
 
             request_info = self.processing_requests[rid]
+            if recv_dict.get("type") == "truncation_info":
+                request_info.input_truncated = bool(recv_dict.get("truncated", False))
+                request_info.original_prompt_tokens = int(recv_dict.get("original_prompt_tokens", 0) or 0)
+                request_info.kept_prompt_tokens = int(recv_dict.get("kept_prompt_tokens", 0) or 0)
+                request_info.truncation_max_sequence_length = int(recv_dict.get("max_sequence_length", 0) or 0)
+                request_info.truncation_max_new_tokens = int(recv_dict.get("max_new_tokens", 0) or 0)
+                self._mark_truncation_notice_ready(request_info)
+                continue
+            self._mark_truncation_notice_ready(request_info)
             request_info.update_time = time.time()
             request_info.prompt_tokens = recv_dict["prompt_tokens"]
             next_token_id = recv_dict["next_token_id"]

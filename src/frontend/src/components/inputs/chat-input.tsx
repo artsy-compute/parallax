@@ -1,4 +1,4 @@
-import { Button, Stack, TextField } from '@mui/material';
+import { Alert, Button, Stack, TextField } from '@mui/material';
 import {
   useEffect,
   useRef,
@@ -18,7 +18,7 @@ export const ChatInput: FC = () => {
       clusterInfo: { status: clusterStatus },
     },
   ] = useCluster();
-  const [{ input, status }, { setInput, generate, stop, clear, registerInputFocus }] = useChat();
+  const [{ input, status, inputTruncationNotice }, { setInput, generate, stop, clear, registerInputFocus, startNewConversation }] = useChat();
 
   const compositionRef = useRef(false);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -60,7 +60,20 @@ export const ChatInput: FC = () => {
   });
 
   return (
-    <Stack data-status={status}>
+    <Stack data-status={status} sx={{ gap: 1 }}>
+      {inputTruncationNotice?.truncated && (
+        <Alert
+          severity='warning'
+          action={
+            <Button color='inherit' size='small' onClick={startNewConversation}>
+              New Chat
+            </Button>
+          }
+        >
+          Prompt was truncated to fit context: kept {inputTruncationNotice.keptPromptTokens} of {inputTruncationNotice.originalPromptTokens} input tokens.
+          Your next prompt will continue this conversation unless you start a new chat.
+        </Alert>
+      )}
       {/* <Stack direction='row' sx={{ gap: 1, p: 1 }}>
         {modelName}
       </Stack> */}
@@ -107,7 +120,7 @@ export const ChatInput: FC = () => {
                 <Button
                   size='small'
                   color='primary'
-                  disabled={clusterStatus !== 'available' || status === 'opened'}
+                  disabled={clusterStatus !== 'available'}
                   // loading={status === 'opened'}
                   onClick={onClickMainButton}
                 >
