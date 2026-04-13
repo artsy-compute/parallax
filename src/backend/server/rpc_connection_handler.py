@@ -48,6 +48,14 @@ class RPCConnectionHandler(ConnectionHandler):
         logger.info(f"receive node_join request: {message}")
         try:
             node = self.build_node(message)
+            if message.get("recovery_layer_allocation") and message.get("start_layer") is not None and message.get("end_layer") is not None:
+                node.manual_layer_assignment = True
+                logger.info(
+                    "Applying retained layer allocation during node_join recovery for %s: [%s, %s)",
+                    node.node_id,
+                    message.get("start_layer"),
+                    message.get("end_layer"),
+                )
             self.scheduler.enqueue_join(node)
 
             response = self.wait_layer_allocation(node.node_id, wait_seconds=300)
@@ -81,12 +89,23 @@ class RPCConnectionHandler(ConnectionHandler):
             # Check if node exists in scheduler
             if self.scheduler.get_node(node.node_id) is None:
                 # Node not found, automatically join it (e.g., after scheduler restart)
-                logger.info(
-                    "Node %s not found in scheduler, auto-joining via node_update and waiting for allocation rebuild",
-                    node.node_id,
-                )
+                if message.get("recovery_layer_allocation") and message.get("start_layer") is not None and message.get("end_layer") is not None:
+                    node.manual_layer_assignment = True
+                    logger.info(
+                        "Node %s not found in scheduler; recovering retained allocation [%s, %s) via node_update",
+                        node.node_id,
+                        message.get("start_layer"),
+                        message.get("end_layer"),
+                    )
+                else:
+                    logger.info(
+                        "Node %s not found in scheduler, auto-joining via node_update and waiting for allocation rebuild",
+                        node.node_id,
+                    )
                 self.scheduler.enqueue_join(node)
-                layer_allocation = self.wait_layer_allocation(node.node_id, wait_seconds=30)
+                # Leave margin below the node-side RPC timeout so restart recovery does not
+                # surface as a transport timeout when allocation rebuild is still converging.
+                layer_allocation = self.wait_layer_allocation(node.node_id, wait_seconds=25)
                 return layer_allocation, {}
 
             # Node exists, update its info

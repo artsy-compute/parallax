@@ -536,6 +536,10 @@ class GradientServer:
             if node_info == {}:
                 logger.warning("Forced scheduler rejoin aborted: empty node info")
                 return False
+            if self.block_start_index is not None and self.block_end_index is not None:
+                node_info["start_layer"] = self.block_start_index
+                node_info["end_layer"] = self.block_end_index
+                node_info["recovery_layer_allocation"] = True
             if self.manual_layer_assignment:
                 node_info["manual_layer_assignment"] = True
             response = self.scheduler_stub.node_join(node_info)
@@ -891,7 +895,7 @@ class GradientServer:
                             )
                             # Get the response result
                             response, refit_message = (
-                                response_future.result(timeout=30)
+                                response_future.result(timeout=60)
                                 if hasattr(response_future, "result")
                                 else response_future
                             )
@@ -1071,6 +1075,9 @@ class GradientServer:
             "is_active": self._get_status() == ServerState.READY.value,
             "last_refit_time": self.last_refit_time,
         }
+
+        if self.block_start_index is not None and self.block_end_index is not None:
+            info["recovery_layer_allocation"] = True
 
         logger.info(
             "Prepared node info: node_id=%s peers=%d rtts=%s status=%s is_active=%s",

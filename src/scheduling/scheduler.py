@@ -126,6 +126,11 @@ class Scheduler:
         self.refit_set = set()
         self.last_refit_time = 0.0
 
+        # Track whether bootstrap has actually failed with the currently joined nodes.
+        # This is used for operator/UI signals such as "need more nodes" so transient
+        # scheduler-restart recovery does not look like a hard capacity failure.
+        self._bootstrap_failed_no_pipeline: bool = False
+
     def list_node_allocations(
         self, total_layers: Optional[int] = None
     ) -> List[Tuple[str, int, int]]:
@@ -154,6 +159,7 @@ class Scheduler:
     def bootstrap(self, reboot: bool = False) -> bool:
         """Initial Node Allocation Assignment."""
         logger.info("[Scheduler] Starting Bootstrap")
+        self._bootstrap_failed_no_pipeline = False
         overide_min_node_check = False
         if reboot:
             # Clear any fixed pipeline registrations; they are no longer valid.
@@ -167,24 +173,31 @@ class Scheduler:
             if self._bootstrapped_event.is_set():
                 logger.info("[Scheduler] Already bootstrapped, returning Success")
                 return True
-        # Check if we have enough nodes for bootstraping
+        # Do not hard-gate restart recovery on the original init node count.
+        # Try allocation with the nodes that have actually rejoined and let the
+        # allocator decide whether a full pipeline can be formed.
         if (
             self.node_manager.num_nodes < self.min_nodes_bootstrapping
             and not overide_min_node_check
         ):
             logger.info(
-                f"[Scheduler] Bootstrap deferred: have {self.node_manager.num_nodes} nodes; need >= {self.min_nodes_bootstrapping}"
+                "[Scheduler] Attempting bootstrap with %d joined node(s), below configured target %d",
+                self.node_manager.num_nodes,
+                self.min_nodes_bootstrapping,
             )
-            return False
 
         # Perform global allocation
         success = self.layer_allocator.allocate_from_standby()
         if not success:
             logger.warning("Global allocation failed to produce a full pipeline")
+            # This is a real capacity/bootstrap failure with the currently joined nodes,
+            # not just a transient restart-recovery gap.
+            self._bootstrap_failed_no_pipeline = True
             # Stay un-bootstrapped so future joins can retry bootstrap.
             self._bootstrapped_event.clear()
             return False
 
+        self._bootstrap_failed_no_pipeline = False
         assignments = self.node_manager.list_node_allocations(self.num_layers)
         logger.info(f"[Scheduler] Post Bootstrap Layer Assignments: {assignments}")
 
@@ -322,8 +335,9 @@ class Scheduler:
                 if not self._bootstrapped_event.is_set():
                     logger.info(
                         "[Scheduler] Manual layer assignments have established a full pipeline; "
-                        "marking scheduler as bootstrapped"
+                        "bootstrapping request router and marking scheduler as bootstrapped"
                     )
+                    self.request_router.bootstrap()
                     self._bootstrapped_event.set()
         elif bootstrapped:
             self.node_manager.upsert(node)
@@ -586,22 +600,15 @@ class Scheduler:
         # subsequent joins.
         # Skip bootstrap if manual assignments were used (they handle bootstrapping internally).
         if joined_any and not self._bootstrapped_event.is_set() and not had_manual_assignment:
-            if self.node_manager.num_standby_nodes >= self.min_nodes_bootstrapping:
-                try:
-                    ok = self.bootstrap()
-                    if not ok:
-                        logger.debug(
-                            "Bootstrap attempt after join did not produce a full pipeline; will retry on future joins"
-                        )
-                except Exception as exc:
+            try:
+                ok = self.bootstrap()
+                if not ok:
                     logger.debug(
-                        f"Bootstrap attempt after join failed: {exc}; will retry on future joins"
+                        "Bootstrap attempt after join did not produce a full pipeline; will retry on future joins"
                     )
-            else:
+            except Exception as exc:
                 logger.debug(
-                    "Deferring bootstrap: have %d nodes; need >= %d",
-                    self.node_manager.num_standby_nodes,
-                    self.min_nodes_bootstrapping,
+                    f"Bootstrap attempt after join failed: {exc}; will retry on future joins"
                 )
 
     def _process_leaves(self) -> None:
@@ -671,5 +678,6 @@ class Scheduler:
     def need_more_nodes(self):
         return (
             not self._bootstrapped_event.is_set()
-            and self.node_manager.num_standby_nodes >= self.min_nodes_bootstrapping
+            and self._bootstrap_failed_no_pipeline
+            and self.node_manager.num_nodes >= self.min_nodes_bootstrapping
         )
