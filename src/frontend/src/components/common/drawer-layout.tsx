@@ -1,4 +1,4 @@
-import { useEffect, useState, type FC, type PropsWithChildren } from 'react';
+import { useEffect, useRef, useState, type FC, type PropsWithChildren } from 'react';
 import {
   Box,
   Button,
@@ -8,6 +8,8 @@ import {
   styled,
   Tooltip,
   Typography,
+  useMediaQuery,
+  useTheme,
 } from '@mui/material';
 import { useCluster, useHost } from '../../services';
 import { useAlertDialog } from '../mui';
@@ -83,6 +85,8 @@ const DrawerLayoutContent = styled(Stack)(({ theme }) => {
 
 export const DrawerLayout: FC<PropsWithChildren> = ({ children }) => {
   const [{ type: hostType }] = useHost();
+  const theme = useTheme();
+  const narrowWindow = useMediaQuery(theme.breakpoints.down('lg'));
 
   const [
     {
@@ -193,7 +197,17 @@ export const DrawerLayout: FC<PropsWithChildren> = ({ children }) => {
     }
   }, [clusterStatus, openFailed]);
 
-  const [sidebarExpanded, setMenuOpen] = useState(true);
+  const [sidebarExpanded, setMenuOpen] = useState(!narrowWindow);
+  const wideSidebarPreferenceRef = useRef(!narrowWindow);
+
+  useEffect(() => {
+    if (narrowWindow) {
+      wideSidebarPreferenceRef.current = sidebarExpanded;
+      setMenuOpen(false);
+      return;
+    }
+    setMenuOpen(wideSidebarPreferenceRef.current);
+  }, [narrowWindow]);
 
   const [dialogClusterSettings, { open: openClusterSettings }] = useAlertDialog({
     color: 'primary',
@@ -255,7 +269,15 @@ export const DrawerLayout: FC<PropsWithChildren> = ({ children }) => {
                     color: '#808080FF',
                     '&:hover': { bgcolor: 'action.hover' },
                   }}
-                  onClick={() => setMenuOpen((prev) => !prev)}
+                  onClick={() => {
+                    setMenuOpen((prev) => {
+                      const next = !prev;
+                      if (!narrowWindow) {
+                        wideSidebarPreferenceRef.current = next;
+                      }
+                      return next;
+                    });
+                  }}
                 >
                   <IconLayoutSidebarLeftCollapse />
                 </IconButton>
@@ -308,7 +330,15 @@ export const DrawerLayout: FC<PropsWithChildren> = ({ children }) => {
                       '&:hover': { bgcolor: 'action.hover' },
                     }}
                     aria-label='Expand Sidebar'
-                    onClick={() => setMenuOpen((prev) => !prev)}
+                    onClick={() => {
+                      setMenuOpen((prev) => {
+                        const next = !prev;
+                        if (!narrowWindow) {
+                          wideSidebarPreferenceRef.current = next;
+                        }
+                        return next;
+                      });
+                    }}
                   >
                     <IconLayoutSidebarLeftExpand />
                   </IconButton>
