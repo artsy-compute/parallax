@@ -96,8 +96,32 @@ const ModelName = styled('span')(({ theme }) => ({
   color: theme.palette.text.secondary,
 }));
 
+const ModelInfoColumn = styled(Stack)({
+  minWidth: 0,
+  flex: 1,
+});
+
+const ModelMemory = styled('span')(({ theme }) => ({
+  ...theme.typography.caption,
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  minWidth: '3rem',
+  padding: '0.125rem 0.45rem',
+  borderRadius: 999,
+  fontSize: '0.68rem',
+  lineHeight: 1,
+  fontWeight: theme.typography.fontWeightMedium,
+  color: theme.palette.text.secondary,
+  backgroundColor: theme.palette.grey[200],
+  border: `1px solid ${theme.palette.divider}`,
+  whiteSpace: 'nowrap',
+}));
+
+const formatRequiredMemory = (vram: number) => (vram > 0 ? `${vram} GB` : '');
+
 const renderOption = (
-  { name, displayName, logoUrl }: ModelInfo,
+  { name, displayName, logoUrl, vram }: ModelInfo,
   { selected, loading, disabled }: { selected?: boolean; loading?: boolean; disabled?: boolean },
 ): ReactNode => (
   <ModelSelectOption key={name} value={name}>
@@ -114,10 +138,11 @@ const renderOption = (
       {(loading && <IconLoader />) || (selected && <IconCheck />)}
     </ModelExtraStatus>
     <ModelLogo src={logoUrl} />
-    <Stack gap={0.25}>
+    <ModelInfoColumn gap={0.125}>
       <ModelDisplayName>{displayName}</ModelDisplayName>
       <ModelName>{name}</ModelName>
-    </Stack>
+    </ModelInfoColumn>
+    {vram > 0 && <ModelMemory>{formatRequiredMemory(vram)}</ModelMemory>}
   </ModelSelectOption>
 );
 
@@ -186,10 +211,11 @@ export const ModelSelect: FC<ModelSelectProps> = ({ variant = 'outlined', autoCo
           return variant === 'outlined' ?
               <ValueRow>
                 <ModelLogo src={model.logoUrl} />
-                <Stack gap={0.25}>
+                <ModelInfoColumn gap={0.125}>
                   <ModelDisplayName>{model.displayName}</ModelDisplayName>
                   <ModelName>{model.name}</ModelName>
-                </Stack>
+                </ModelInfoColumn>
+                {model.vram > 0 && <ModelMemory>{formatRequiredMemory(model.vram)}</ModelMemory>}
               </ValueRow>
             : model.name;
         }}
