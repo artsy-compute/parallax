@@ -349,6 +349,8 @@ if __name__ == "__main__":
         use_hfcache=args.use_hfcache,
         enable_weight_refit=args.enable_weight_refit,
         weight_refit_mode=args.weight_refit_mode,
+        profile=args.profile,
+        scheduler_heartbeat_timeout_sec=args.scheduler_heartbeat_timeout_sec,
     )
 
     request_handler.set_scheduler_manage(scheduler_manage)

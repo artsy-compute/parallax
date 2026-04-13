@@ -12,6 +12,7 @@ from backend.server.static_config import get_model_info, get_node_join_command
 from parallax.cli import PUBLIC_INITIAL_PEERS, PUBLIC_RELAY_SERVERS
 from parallax.p2p.server import TransformerConnectionHandler
 from parallax_utils.logging_config import get_logger
+from parallax_utils.runtime_profiles import DEFAULT_RUNTIME_PROFILE, resolve_runtime_profile
 from scheduling.node import RequestSignal
 from scheduling.scheduler import Scheduler
 
@@ -39,6 +40,8 @@ class SchedulerManage:
         use_hfcache: bool = False,
         enable_weight_refit: bool = False,
         weight_refit_mode: str = "disk",
+        profile: str = DEFAULT_RUNTIME_PROFILE,
+        scheduler_heartbeat_timeout_sec: float | None = None,
     ):
         """Initialize the manager with networking bootstrap parameters."""
         self.initial_peers = initial_peers
@@ -50,6 +53,8 @@ class SchedulerManage:
         self.use_hfcache = use_hfcache
         self.enable_weight_refit = enable_weight_refit
         self.weight_refit_mode = weight_refit_mode
+        self.profile = profile or DEFAULT_RUNTIME_PROFILE
+        self.scheduler_heartbeat_timeout_sec = scheduler_heartbeat_timeout_sec
         self.model_name = None
         self.init_nodes_num = None
         self.scheduler = None
@@ -205,6 +210,19 @@ class SchedulerManage:
         self.model_name = model_name
         self.init_nodes_num = init_nodes_num
 
+        runtime_profile = resolve_runtime_profile(self.profile, is_local_network=self.is_local_network)
+        heartbeat_timeout = (
+            self.scheduler_heartbeat_timeout_sec
+            if self.scheduler_heartbeat_timeout_sec is not None
+            else runtime_profile.scheduler_heartbeat_timeout_sec
+        )
+        logger.info(
+            "Using runtime profile for scheduler: requested=%s resolved=%s heartbeat_timeout=%.1fs",
+            self.profile,
+            runtime_profile.resolved_name,
+            heartbeat_timeout,
+        )
+
         model_info = get_model_info(model_name, self.use_hfcache)
         self.scheduler = Scheduler(
             model_info,
@@ -212,6 +230,7 @@ class SchedulerManage:
             min_nodes_bootstrapping=init_nodes_num,
             enable_weight_refit=self.enable_weight_refit,
             weight_refit_mode=self.weight_refit_mode,
+            heartbeat_timeout=heartbeat_timeout,
         )
 
         # Run the scheduler's event/dispatch loops in background so the process

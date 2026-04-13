@@ -32,6 +32,7 @@ from parallax.utils.shared_state import SharedState
 from parallax.utils.utils import fetch_model_from_hf, initialize_nccl_port
 from parallax_utils.ascii_anime import display_parallax_join
 from parallax_utils.logging_config import get_logger, set_log_level
+from parallax_utils.runtime_profiles import infer_is_local_network, resolve_runtime_profile
 from parallax_utils.version_check import check_latest_release
 
 logger = get_logger("parallax.launch")
@@ -147,6 +148,34 @@ if __name__ == "__main__":
         args = parse_args()
         set_log_level(args.log_level)
         logger.debug(f"args: {args}")
+
+        runtime_profile = resolve_runtime_profile(
+            args.profile,
+            is_local_network=infer_is_local_network(
+                scheduler_addr=args.scheduler_addr,
+                relay_servers=args.relay_servers,
+            ),
+        )
+        if args.heartbeat_interval_sec is None:
+            args.heartbeat_interval_sec = runtime_profile.node_heartbeat_interval_sec
+        if args.heartbeat_rpc_timeout_sec is None:
+            args.heartbeat_rpc_timeout_sec = runtime_profile.node_heartbeat_rpc_timeout_sec
+        if args.force_rejoin_threshold is None:
+            args.force_rejoin_threshold = runtime_profile.force_rejoin_threshold
+        if args.force_rejoin_cooldown_sec is None:
+            args.force_rejoin_cooldown_sec = runtime_profile.force_rejoin_cooldown_sec
+        if args.local_http_retry_attempts is None:
+            args.local_http_retry_attempts = runtime_profile.local_http_retry_attempts
+        if args.local_http_retry_delay_sec is None:
+            args.local_http_retry_delay_sec = runtime_profile.local_http_retry_delay_sec
+        logger.info(
+            "Using runtime profile for node: requested=%s resolved=%s heartbeat_interval=%.1fs heartbeat_rpc_timeout=%.1fs force_rejoin_threshold=%d",
+            args.profile,
+            runtime_profile.resolved_name,
+            args.heartbeat_interval_sec,
+            args.heartbeat_rpc_timeout_sec,
+            args.force_rejoin_threshold,
+        )
         args.recv_from_peer_addr = f"ipc://{tempfile.NamedTemporaryFile().name}"
         args.send_to_peer_addr = f"ipc://{tempfile.NamedTemporaryFile().name}"
         args.executor_input_ipc = f"ipc://{tempfile.NamedTemporaryFile().name}"
@@ -205,6 +234,12 @@ if __name__ == "__main__":
                     shared_state=shared_state.dict,
                     log_level=args.log_level,
                     conn=conn_main,
+                    heartbeat_interval_sec=args.heartbeat_interval_sec,
+                    heartbeat_rpc_timeout_sec=args.heartbeat_rpc_timeout_sec,
+                    heartbeat_force_rejoin_threshold=args.force_rejoin_threshold,
+                    heartbeat_force_rejoin_cooldown_sec=args.force_rejoin_cooldown_sec,
+                    local_http_retry_attempts=args.local_http_retry_attempts,
+                    local_http_retry_delay_sec=args.local_http_retry_delay_sec,
                 )
 
             # Build connectors for tp communication
@@ -263,6 +298,12 @@ if __name__ == "__main__":
                 shared_state=shared_state.dict,  # Pass dict to subprocess
                 log_level=args.log_level,
                 conn=conn_main,
+                heartbeat_interval_sec=args.heartbeat_interval_sec,
+                heartbeat_rpc_timeout_sec=args.heartbeat_rpc_timeout_sec,
+                heartbeat_force_rejoin_threshold=args.force_rejoin_threshold,
+                heartbeat_force_rejoin_cooldown_sec=args.force_rejoin_cooldown_sec,
+                local_http_retry_attempts=args.local_http_retry_attempts,
+                local_http_retry_delay_sec=args.local_http_retry_delay_sec,
             )
 
             # Wait for layer allocation from scheduler (via shared state)

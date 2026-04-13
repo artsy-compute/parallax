@@ -227,6 +227,9 @@ def run_command(args, passthrough_args: list[str] | None = None):
             "Using public relay server to help nodes and the scheduler establish a connection (remote mode). Your IP address will be reported to the relay server to help establish the connection."
         )
 
+    if args.profile:
+        cmd.extend(["--profile", args.profile])
+
     # Append any passthrough args (unrecognized by this CLI) directly to the command
     if passthrough_args:
         cmd.extend(passthrough_args)
@@ -276,6 +279,9 @@ def join_command(args, passthrough_args: list[str] | None = None):
         logger.info(
             "Using public relay server to help nodes and the scheduler establish a connection (remote mode). Your IP address will be reported to the relay server to help establish the connection."
         )
+
+    if args.profile:
+        cmd.extend(["--profile", args.profile])
 
     # Append any passthrough args (unrecognized by this CLI) directly to the command
     if passthrough_args:
@@ -410,6 +416,11 @@ Examples:
         action="store_true",
         help="Build frontend assets on startup if the local frontend build is stale",
     )
+    run_parser.add_argument(
+        "--profile",
+        default="auto",
+        help="Runtime recovery profile name. Defaults to auto-detect.",
+    )
 
     # Add 'join' command parser
     join_parser = subparsers.add_parser(
@@ -427,6 +438,11 @@ Examples:
     )
     join_parser.add_argument(
         "-u", "--skip-upload", action="store_true", help="Skip upload package info"
+    )
+    join_parser.add_argument(
+        "--profile",
+        default="auto",
+        help="Runtime recovery profile name. Defaults to auto-detect.",
     )
 
     build_frontend_parser = subparsers.add_parser(

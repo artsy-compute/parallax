@@ -1,0 +1,10 @@
+{
+  "description": "More tolerant recovery timing for relay or public-network deployments.",
+  "scheduler_heartbeat_timeout_sec": 90.0,
+  "node_heartbeat_interval_sec": 10.0,
+  "node_heartbeat_rpc_timeout_sec": 90.0,
+  "force_rejoin_threshold": 4,
+  "force_rejoin_cooldown_sec": 60.0,
+  "local_http_retry_attempts": 8,
+  "local_http_retry_delay_sec": 1.5
+}

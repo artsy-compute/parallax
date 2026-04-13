@@ -46,6 +46,49 @@ def parse_args() -> argparse.Namespace:
         "--notify-url", type=str, default=None, help="URL to notify when a request is finished"
     )
 
+    parser.add_argument(
+        "--profile",
+        type=str,
+        default="auto",
+        help="Runtime recovery profile name. Defaults to auto-detect.",
+    )
+    parser.add_argument(
+        "--heartbeat-interval-sec",
+        type=float,
+        default=None,
+        help="Heartbeat interval in seconds for node announcements.",
+    )
+    parser.add_argument(
+        "--heartbeat-rpc-timeout-sec",
+        type=float,
+        default=None,
+        help="Timeout in seconds for scheduler heartbeat RPCs.",
+    )
+    parser.add_argument(
+        "--force-rejoin-threshold",
+        type=int,
+        default=None,
+        help="Consecutive heartbeat failures before forcing a scheduler rejoin.",
+    )
+    parser.add_argument(
+        "--force-rejoin-cooldown-sec",
+        type=float,
+        default=None,
+        help="Cooldown in seconds between forced scheduler rejoins.",
+    )
+    parser.add_argument(
+        "--local-http-retry-attempts",
+        type=int,
+        default=None,
+        help="Retry attempts when the local node HTTP server is not ready yet.",
+    )
+    parser.add_argument(
+        "--local-http-retry-delay-sec",
+        type=float,
+        default=None,
+        help="Delay in seconds between local node HTTP retry attempts.",
+    )
+
     # Model configuration
     parser.add_argument(
         "--model-path",
@@ -355,6 +398,19 @@ def validate_args(args: argparse.Namespace) -> None:
 
     if getattr(args, "request_timeout_s", None) is not None and args.request_timeout_s <= 0:
         raise ValueError("request_timeout_s must be positive")
+
+    if getattr(args, "heartbeat_interval_sec", None) is not None and args.heartbeat_interval_sec <= 0:
+        raise ValueError("heartbeat_interval_sec must be positive")
+    if getattr(args, "heartbeat_rpc_timeout_sec", None) is not None and args.heartbeat_rpc_timeout_sec <= 0:
+        raise ValueError("heartbeat_rpc_timeout_sec must be positive")
+    if getattr(args, "force_rejoin_threshold", None) is not None and args.force_rejoin_threshold <= 0:
+        raise ValueError("force_rejoin_threshold must be positive")
+    if getattr(args, "force_rejoin_cooldown_sec", None) is not None and args.force_rejoin_cooldown_sec <= 0:
+        raise ValueError("force_rejoin_cooldown_sec must be positive")
+    if getattr(args, "local_http_retry_attempts", None) is not None and args.local_http_retry_attempts <= 0:
+        raise ValueError("local_http_retry_attempts must be positive")
+    if getattr(args, "local_http_retry_delay_sec", None) is not None and args.local_http_retry_delay_sec <= 0:
+        raise ValueError("local_http_retry_delay_sec must be positive")
 
     # Validate weight-refit args
     if args.enable_weight_refit and args.weight_refit_mode not in ["cpu", "disk"]:

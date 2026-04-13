@@ -17,7 +17,7 @@ from scheduling.layer_allocation import (
 )
 from scheduling.model_info import ModelInfo
 from scheduling.node import Node, RequestSignal
-from scheduling.node_management import NodeManager
+from scheduling.node_management import NodeManager, NodeState
 from scheduling.request_routing import (
     DynamicProgrammingRouting,
     RoundRobinOverFixedPipelinesRouting,
@@ -304,7 +304,9 @@ class Scheduler:
             node.manual_layer_assignment,
             bootstrapped,
         )
-        if self.node_manager.get(node.node_id) is None:
+        existing_node = self.node_manager.get(node.node_id)
+        existing_state = self.node_manager.state_of(node.node_id)
+        if existing_node is None:
             self.node_manager.upsert(node)
             if bootstrapped:
                 if self.dynamic_pipelines_router:
@@ -314,6 +316,8 @@ class Scheduler:
                     self.request_router.expand_pipelines()
                 except NotImplementedError:
                     pass
+        else:
+            self.node_manager.upsert(node, state=existing_state)
 
         # Manual layer assignment bypasses bootstrap waiting
         if node.manual_layer_assignment:
@@ -327,8 +331,21 @@ class Scheduler:
                 f"Manual layer assignment for node {node.node_id}: "
                 f"layers [{node.start_layer}, {node.end_layer})"
             )
-            # Directly allocate the specified layers without automatic assignment
-            self.layer_allocator.allocate(node, node.start_layer, node.end_layer)
+            if (
+                existing_state == NodeState.ACTIVE
+                and existing_node is not None
+                and existing_node.start_layer == node.start_layer
+                and existing_node.end_layer == node.end_layer
+            ):
+                logger.info(
+                    "Node %s is already active with retained layers [%s, %s); skipping re-activation",
+                    node.node_id,
+                    node.start_layer,
+                    node.end_layer,
+                )
+            else:
+                # Directly allocate the specified layers without automatic assignment
+                self.layer_allocator.allocate(node, node.start_layer, node.end_layer)
 
             # Check if manual allocations now cover the full pipeline
             if self.has_full_pipeline():

@@ -48,6 +48,19 @@ def parse_args() -> argparse.Namespace:
         help="Build frontend assets on startup if the local frontend build is stale",
     )
 
+    parser.add_argument(
+        "--profile",
+        type=str,
+        default="auto",
+        help="Runtime recovery profile name. Defaults to auto-detect.",
+    )
+    parser.add_argument(
+        "--scheduler-heartbeat-timeout-sec",
+        type=float,
+        default=None,
+        help="Override scheduler heartbeat timeout in seconds.",
+    )
+
     # Weight refit configuration
     parser.add_argument(
         "--enable-weight-refit", type=bool, default=False, help="Enable online weight refit"

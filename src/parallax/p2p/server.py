@@ -118,6 +118,8 @@ class TransformerConnectionHandler(ConnectionHandler):
         block_end_index: int,
         http_port: Optional[int] = None,
         notify_url: Optional[str] = None,
+        local_http_retry_attempts: int = 5,
+        local_http_retry_delay_sec: float = 1.0,
     ):
         # Initialize the base class
         super().__init__(lattica)
@@ -127,6 +129,8 @@ class TransformerConnectionHandler(ConnectionHandler):
         self.block_end_index = block_end_index
         self.http_port = http_port
         self.notify_url = notify_url
+        self.local_http_retry_attempts = local_http_retry_attempts
+        self.local_http_retry_delay_sec = local_http_retry_delay_sec
         self._recv_from_peer = None
         self._recv_from_peer_lock = threading.Lock()
 
@@ -189,8 +193,8 @@ class TransformerConnectionHandler(ConnectionHandler):
         """Handle chat completion request"""
         logger.debug(f"Chat completion request: {request}, type: {type(request)}")
         url = f"http://localhost:{self.http_port}/v1/chat/completions"
-        max_attempts = 5
-        retry_delay_secs = 1.0
+        max_attempts = self.local_http_retry_attempts
+        retry_delay_secs = self.local_http_retry_delay_sec
 
         try:
             with httpx.Client(timeout=10 * 60, proxy=None, trust_env=False) as client:
@@ -390,6 +394,12 @@ class GradientServer:
         param_mem_ratio: float = 0.65,
         kvcache_mem_ratio: float = 0.25,
         conn: Any = None,
+        heartbeat_interval_sec: float = 10.0,
+        heartbeat_rpc_timeout_sec: float = 60.0,
+        heartbeat_force_rejoin_threshold: int = 3,
+        heartbeat_force_rejoin_cooldown_sec: float = 30.0,
+        local_http_retry_attempts: int = 5,
+        local_http_retry_delay_sec: float = 1.0,
     ):
         self.recv_from_peer_addr = recv_from_peer_addr
         self.send_to_peer_addr = send_to_peer_addr
@@ -428,6 +438,10 @@ class GradientServer:
         self.status = ServerState.JOINING
         self.manual_layer_assignment = block_end_index is not None and block_start_index is not None
         self.conn = conn
+        self.heartbeat_interval_sec = heartbeat_interval_sec
+        self.heartbeat_rpc_timeout_sec = heartbeat_rpc_timeout_sec
+        self.local_http_retry_attempts = local_http_retry_attempts
+        self.local_http_retry_delay_sec = local_http_retry_delay_sec
 
         self.scheduler_stub = None
         self.scheduler_peer_id = None
@@ -440,9 +454,9 @@ class GradientServer:
         self._shared_state = None  # Will be set if running in subprocess mode
         self._heartbeat_empty_response_count = 0
         self._heartbeat_error_count = 0
-        self._heartbeat_force_rejoin_threshold = 3
+        self._heartbeat_force_rejoin_threshold = heartbeat_force_rejoin_threshold
         self._heartbeat_last_force_rejoin_at = 0.0
-        self._heartbeat_force_rejoin_cooldown = 30.0
+        self._heartbeat_force_rejoin_cooldown = heartbeat_force_rejoin_cooldown_sec
 
     def _sync_to_shared_state(self):
         """Sync current layer allocation and status to shared state if available"""
@@ -543,7 +557,7 @@ class GradientServer:
             if self.manual_layer_assignment:
                 node_info["manual_layer_assignment"] = True
             response = self.scheduler_stub.node_join(node_info)
-            response = response.result(timeout=60) if hasattr(response, "result") else response
+            response = response.result(timeout=max(1, int(self.heartbeat_rpc_timeout_sec))) if hasattr(response, "result") else response
             if not response or response == {}:
                 logger.warning("Forced scheduler rejoin returned no allocation: %s", response)
                 return False
@@ -652,7 +666,7 @@ class GradientServer:
                             self.lattica.close()
                         self.lattica = None
                         self.scheduler_stub = None
-                        time.sleep(10)
+                        time.sleep(self.heartbeat_interval_sec)
                         continue
 
                     if self.manual_layer_assignment:
@@ -688,6 +702,8 @@ class GradientServer:
             block_end_index=self.block_end_index,
             http_port=self.http_port,
             notify_url=self.notify_url,
+            local_http_retry_attempts=self.local_http_retry_attempts,
+            local_http_retry_delay_sec=self.local_http_retry_delay_sec,
         )  # thread
 
         self.start_node_announcer()  # thread
@@ -895,7 +911,7 @@ class GradientServer:
                             )
                             # Get the response result
                             response, refit_message = (
-                                response_future.result(timeout=60)
+                                response_future.result(timeout=max(1, int(self.heartbeat_rpc_timeout_sec)))
                                 if hasattr(response_future, "result")
                                 else response_future
                             )
@@ -1157,6 +1173,12 @@ def _run_p2p_server_process(
     shared_state: Optional[dict] = None,
     log_level: str = "INFO",
     conn: Any = None,
+    heartbeat_interval_sec: float = 10.0,
+    heartbeat_rpc_timeout_sec: float = 60.0,
+    heartbeat_force_rejoin_threshold: int = 3,
+    heartbeat_force_rejoin_cooldown_sec: float = 30.0,
+    local_http_retry_attempts: int = 5,
+    local_http_retry_delay_sec: float = 1.0,
 ):
     """Run P2P server in subprocess"""
     # Set log level in subprocess (spawn mode doesn't inherit log configuration)
@@ -1188,6 +1210,12 @@ def _run_p2p_server_process(
             param_mem_ratio=param_mem_ratio,
             kvcache_mem_ratio=kvcache_mem_ratio,
             conn=conn,
+            heartbeat_interval_sec=heartbeat_interval_sec,
+            heartbeat_rpc_timeout_sec=heartbeat_rpc_timeout_sec,
+            heartbeat_force_rejoin_threshold=heartbeat_force_rejoin_threshold,
+            heartbeat_force_rejoin_cooldown_sec=heartbeat_force_rejoin_cooldown_sec,
+            local_http_retry_attempts=local_http_retry_attempts,
+            local_http_retry_delay_sec=local_http_retry_delay_sec,
         )
         # Attach shared state to server for syncing layer allocation
         if shared_state is not None:
@@ -1239,6 +1267,12 @@ def launch_p2p_server_process(
     shared_state: Optional[dict] = None,
     log_level: str = "INFO",
     conn: Optional[Any] = None,
+    heartbeat_interval_sec: float = 10.0,
+    heartbeat_rpc_timeout_sec: float = 60.0,
+    heartbeat_force_rejoin_threshold: int = 3,
+    heartbeat_force_rejoin_cooldown_sec: float = 30.0,
+    local_http_retry_attempts: int = 5,
+    local_http_retry_delay_sec: float = 1.0,
 ) -> multiprocessing.Process:
     """Launch P2P server as a subprocess and return the process object
 
@@ -1274,6 +1308,12 @@ def launch_p2p_server_process(
             shared_state,
             log_level,
             conn,
+            heartbeat_interval_sec,
+            heartbeat_rpc_timeout_sec,
+            heartbeat_force_rejoin_threshold,
+            heartbeat_force_rejoin_cooldown_sec,
+            local_http_retry_attempts,
+            local_http_retry_delay_sec,
         ),
     )
     process.start()
