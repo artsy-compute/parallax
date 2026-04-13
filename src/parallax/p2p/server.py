@@ -188,22 +188,56 @@ class TransformerConnectionHandler(ConnectionHandler):
     ):
         """Handle chat completion request"""
         logger.debug(f"Chat completion request: {request}, type: {type(request)}")
+        url = f"http://localhost:{self.http_port}/v1/chat/completions"
+        max_attempts = 5
+        retry_delay_secs = 1.0
+
         try:
             with httpx.Client(timeout=10 * 60, proxy=None, trust_env=False) as client:
                 if request.get("stream", False):
-                    with client.stream(
-                        "POST",
-                        f"http://localhost:{self.http_port}/v1/chat/completions",
-                        json=request,
-                    ) as response:
-                        for chunk in response.iter_bytes():
-                            if chunk:
-                                yield chunk
+                    last_error = None
+                    for attempt in range(1, max_attempts + 1):
+                        try:
+                            with client.stream("POST", url, json=request) as response:
+                                for chunk in response.iter_bytes():
+                                    if chunk:
+                                        yield chunk
+                                return
+                        except httpx.ConnectError as e:
+                            last_error = e
+                            if attempt >= max_attempts:
+                                raise
+                            logger.warning(
+                                "Local HTTP server not ready for streaming chat request on %s (attempt %d/%d); retrying in %.1fs",
+                                url,
+                                attempt,
+                                max_attempts,
+                                retry_delay_secs,
+                            )
+                            time.sleep(retry_delay_secs)
+                    if last_error is not None:
+                        raise last_error
                 else:
-                    response = client.post(
-                        f"http://localhost:{self.http_port}/v1/chat/completions", json=request
-                    )
-                    yield response.content
+                    last_error = None
+                    for attempt in range(1, max_attempts + 1):
+                        try:
+                            response = client.post(url, json=request)
+                            yield response.content
+                            return
+                        except httpx.ConnectError as e:
+                            last_error = e
+                            if attempt >= max_attempts:
+                                raise
+                            logger.warning(
+                                "Local HTTP server not ready for chat request on %s (attempt %d/%d); retrying in %.1fs",
+                                url,
+                                attempt,
+                                max_attempts,
+                                retry_delay_secs,
+                            )
+                            time.sleep(retry_delay_secs)
+                    if last_error is not None:
+                        raise last_error
         except Exception as e:
             logger.exception(f"Error in chat completion: {e}")
             yield b"internal server error"
@@ -404,6 +438,11 @@ class GradientServer:
         logger.debug(f"manual_layer_assignment: {self.manual_layer_assignment}")
         self._layer_allocation_changed = False
         self._shared_state = None  # Will be set if running in subprocess mode
+        self._heartbeat_empty_response_count = 0
+        self._heartbeat_error_count = 0
+        self._heartbeat_force_rejoin_threshold = 3
+        self._heartbeat_last_force_rejoin_at = 0.0
+        self._heartbeat_force_rejoin_cooldown = 30.0
 
     def _sync_to_shared_state(self):
         """Sync current layer allocation and status to shared state if available"""
@@ -418,6 +457,97 @@ class GradientServer:
                 status=self.status.value,
                 _layer_allocation_changed=self._layer_allocation_changed,
             )
+
+    def _apply_scheduler_allocation(self, response: dict, source: str = "scheduler") -> bool:
+        start_layer = response.get("start_layer")
+        end_layer = response.get("end_layer")
+        model_name = response.get("model_name")
+
+        if start_layer is None or end_layer is None:
+            logger.warning(
+                "%s: Missing layer allocation in scheduler response: %s",
+                source,
+                response,
+            )
+            return False
+
+        allocation_changed = (
+            start_layer != self.block_start_index
+            or end_layer != self.block_end_index
+            or model_name != self.model_name
+        )
+
+        if allocation_changed:
+            logger.warning(
+                "%s: Layer allocation changed! Current: [%s, %s) -> New: [%s, %s) Model: %s -> %s",
+                source,
+                self.block_start_index,
+                self.block_end_index,
+                start_layer,
+                end_layer,
+                self.model_name,
+                model_name,
+            )
+            self.block_start_index = start_layer
+            self.block_end_index = end_layer
+            if model_name:
+                self.model_name = model_name
+            self._layer_allocation_changed = True
+            self.status = ServerState.INITIALIZING
+            logger.info(
+                "%s: Layer allocation updated. Executor will reload on next check. Status set to INITIALIZING.",
+                source,
+            )
+        else:
+            self._layer_allocation_changed = False
+            if model_name:
+                self.model_name = model_name
+            if self.status != ServerState.READY:
+                self.status = ServerState.READY
+                logger.info(
+                    "%s: Scheduler confirmed existing allocation; node status restored to READY.",
+                    source,
+                )
+
+        self.tp_size = response.get("tp_size", self.tp_size)
+        self.enable_weight_refit = response.get("enable_weight_refit", self.enable_weight_refit)
+        self.weight_refit_mode = response.get("weight_refit_mode", self.weight_refit_mode)
+        self._heartbeat_empty_response_count = 0
+        self._heartbeat_error_count = 0
+        self._sync_to_shared_state()
+        if self._shared_state is not None:
+            self._shared_state.set_status(self.status.value)
+        return True
+
+    def _force_scheduler_rejoin(self, reason: str) -> bool:
+        now = time.time()
+        if now - self._heartbeat_last_force_rejoin_at < self._heartbeat_force_rejoin_cooldown:
+            logger.info(
+                "Skipping forced scheduler rejoin due to cooldown (reason=%s, cooldown_remaining=%.1fs)",
+                reason,
+                self._heartbeat_force_rejoin_cooldown - (now - self._heartbeat_last_force_rejoin_at),
+            )
+            return False
+
+        self._heartbeat_last_force_rejoin_at = now
+        logger.warning("Forcing scheduler rejoin after heartbeat failures: %s", reason)
+        try:
+            node_info = self.get_node_info()
+            if node_info == {}:
+                logger.warning("Forced scheduler rejoin aborted: empty node info")
+                return False
+            if self.manual_layer_assignment:
+                node_info["manual_layer_assignment"] = True
+            response = self.scheduler_stub.node_join(node_info)
+            response = response.result(timeout=60) if hasattr(response, "result") else response
+            if not response or response == {}:
+                logger.warning("Forced scheduler rejoin returned no allocation: %s", response)
+                return False
+            logger.info("Forced scheduler rejoin succeeded: %s", response)
+            return self._apply_scheduler_allocation(response, source="Forced rejoin")
+        except Exception as e:
+            logger.warning("Forced scheduler rejoin failed: %s", e, exc_info=True)
+            return False
 
     def check_and_release_disk_weight(self):
         """Only save 3 history versions of weight"""
@@ -534,17 +664,9 @@ class GradientServer:
                         exit(1)
 
                     logger.info(f"Join scheduler response: {response}")
-
-                    if not self.manual_layer_assignment:
-                        self.block_start_index = response.get("start_layer")
-                        self.block_end_index = response.get("end_layer")
-                    self.model_name = response.get("model_name")
-                    self.tp_size = response.get("tp_size")
-                    self.enable_weight_refit = response.get("enable_weight_refit")
-                    self.weight_refit_mode = response.get("weight_refit_mode")
-
-                    # Sync to shared state if available
-                    self._sync_to_shared_state()
+                    if not self._apply_scheduler_allocation(response, source="Join"):
+                        logger.error("Failed to apply scheduler allocation during join")
+                        exit(1)
                     break
 
                 except Exception as e:
@@ -776,56 +898,26 @@ class GradientServer:
 
                             # Print layer allocation information
                             if response and isinstance(response, dict):
-                                start_layer = response.get("start_layer")
-                                end_layer = response.get("end_layer")
-                                model_name = response.get("model_name")
-                                if start_layer is not None and end_layer is not None:
-                                    logger.debug(
-                                        f"Heartbeat: Node {self.lattica.peer_id()}... "
-                                        f"Model: {model_name}, Layers: [{start_layer}, {end_layer})"
-                                    )
-                                    allocation_changed = (
-                                        start_layer != self.block_start_index
-                                        or end_layer != self.block_end_index
-                                        or model_name != self.model_name
-                                    )
-                                    if allocation_changed:
-                                        logger.warning(
-                                            f"Layer allocation changed! "
-                                            f"Current: [{self.block_start_index}, {self.block_end_index}) -> "
-                                            f"New: [{start_layer}, {end_layer}) "
-                                            f"Model: {self.model_name} -> {model_name}"
-                                        )
-                                        self.block_start_index = start_layer
-                                        self.block_end_index = end_layer
-                                        if model_name:
-                                            self.model_name = model_name
-                                        self._layer_allocation_changed = True
-                                        self.status = ServerState.INITIALIZING
-                                        self._sync_to_shared_state()
-                                        logger.info(
-                                            "Layer allocation updated. Executor will reload on next check. "
-                                            "Status set to INITIALIZING to prevent new requests."
-                                        )
-                                    elif self.status != ServerState.READY:
-                                        self.status = ServerState.READY
-                                        self._sync_to_shared_state()
-                                        logger.info(
-                                            "Heartbeat: Scheduler confirmed existing allocation; node status restored to READY."
-                                        )
-                                else:
-                                    logger.debug(
-                                        f"Heartbeat: Missing layer info - start_layer={start_layer}, "
-                                        f"end_layer={end_layer}, response={response}"
-                                    )
+                                logger.debug(
+                                    "Heartbeat: Node %s... Model: %s, Layers: [%s, %s)",
+                                    self.lattica.peer_id(),
+                                    response.get("model_name"),
+                                    response.get("start_layer"),
+                                    response.get("end_layer"),
+                                )
+                                if not self._apply_scheduler_allocation(response, source="Heartbeat"):
+                                    self._heartbeat_empty_response_count += 1
                             else:
                                 had_previous_allocation = (
                                     self.block_start_index is not None
                                     and self.block_end_index is not None
                                     and self.model_name is not None
                                 )
+                                self._heartbeat_empty_response_count += 1
                                 logger.warning(
-                                    f"Heartbeat: No layer allocation received yet, response: {response}"
+                                    "Heartbeat: No layer allocation received yet, response: %s (consecutive_empty=%d)",
+                                    response,
+                                    self._heartbeat_empty_response_count,
                                 )
                                 self.status = (
                                     ServerState.INITIALIZING if had_previous_allocation else ServerState.JOINING
@@ -843,6 +935,11 @@ class GradientServer:
                                 else:
                                     logger.debug(
                                         "Status set to JOINING because no valid layer allocation has been received yet."
+                                    )
+
+                                if self._heartbeat_empty_response_count >= self._heartbeat_force_rejoin_threshold:
+                                    self._force_scheduler_rejoin(
+                                        f"{self._heartbeat_empty_response_count} consecutive empty heartbeat responses"
                                     )
                             if refit_message and isinstance(refit_message, dict):
                                 if self.enable_weight_refit:
@@ -870,10 +967,23 @@ class GradientServer:
                                 expiration_time=time.time() + 60,  # Valid for 60 seconds
                             )
                     except Exception as e:
+                        self._heartbeat_error_count += 1
                         logger.warning(
-                            f"Failed to announce {self.prefix_id}_{self.lattica.peer_id()}: {e}",
+                            "Failed to announce %s_%s: %s (consecutive_errors=%d)",
+                            self.prefix_id,
+                            self.lattica.peer_id(),
+                            e,
+                            self._heartbeat_error_count,
                             exc_info=True,
                         )
+                        if (
+                            self.scheduler_addr is not None
+                            and self.scheduler_stub is not None
+                            and self._heartbeat_error_count >= self._heartbeat_force_rejoin_threshold
+                        ):
+                            self._force_scheduler_rejoin(
+                                f"{self._heartbeat_error_count} consecutive heartbeat errors"
+                            )
 
                     time.sleep(10)
             except Exception as e:

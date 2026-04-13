@@ -12,7 +12,7 @@ import {
   useTheme,
 } from '@mui/material';
 import { useCluster, useHost } from '../../services';
-import { useAlertDialog } from '../mui';
+import { AlertDialog, useAlertDialog } from '../mui';
 import { IconBrandGradient } from '../brand';
 import {
   IconCirclePlus,
@@ -209,37 +209,7 @@ export const DrawerLayout: FC<PropsWithChildren> = ({ children }) => {
     setMenuOpen(wideSidebarPreferenceRef.current);
   }, [narrowWindow]);
 
-  const [dialogClusterSettings, { open: openClusterSettings }] = useAlertDialog({
-    color: 'primary',
-    titleIcon: <IconSettings />,
-    title: 'Cluster Settings',
-    content: (
-      <Stack sx={{ gap: 4.5 }}>
-        <Stack sx={{ gap: 1 }}>
-          <Typography variant='body1'>Model</Typography>
-          <Typography variant='body2' color='text.disabled'>
-            Choose the model hosted by the scheduler and review its memory requirement.
-          </Typography>
-          <ModelSelect autoCommit />
-        </Stack>
-        <Stack sx={{ gap: 1 }}>
-          <Typography variant='body1'>Live nodes</Typography>
-          <Typography variant='body2' color='text.disabled'>
-            Check current node status and verify the cluster is healthy.
-          </Typography>
-          <NodeList sx={{ maxHeight: '18rem' }} />
-        </Stack>
-        <Stack sx={{ gap: 1 }}>
-          <Typography variant='body1'>Add nodes</Typography>
-          <Typography variant='body2' color='text.disabled'>
-            Start new nodes with this command and watch them appear above.
-          </Typography>
-          <JoinCommand />
-        </Stack>
-      </Stack>
-    ),
-    confirmLabel: 'Close',
-  });
+  const [clusterSettingsOpen, setClusterSettingsOpen] = useState(false);
 
   return (
     <DrawerLayoutRoot direction='row'>
@@ -355,7 +325,7 @@ export const DrawerLayout: FC<PropsWithChildren> = ({ children }) => {
               color='inherit'
               variant='text'
               startIcon={<IconSettings size={18} />}
-              onClick={openClusterSettings}
+              onClick={() => setClusterSettingsOpen(true)}
               sx={{
                 justifyContent: 'flex-start',
                 color: 'text.secondary',
@@ -384,7 +354,7 @@ export const DrawerLayout: FC<PropsWithChildren> = ({ children }) => {
                 borderRadius: '10px',
                 '&:hover': { bgcolor: 'action.hover' },
               }}
-              onClick={openClusterSettings}
+              onClick={() => setClusterSettingsOpen(true)}
             >
               <IconSettings size={18} />
             </IconButton>
@@ -397,7 +367,39 @@ export const DrawerLayout: FC<PropsWithChildren> = ({ children }) => {
         </DrawerLayoutHeader>
         <DrawerLayoutContent>{children}</DrawerLayoutContent>
       </DrawerLayoutContainer>
-      {dialogClusterSettings}
+      <AlertDialog
+        open={clusterSettingsOpen}
+        onClose={() => setClusterSettingsOpen(false)}
+        color='primary'
+        titleIcon={<IconSettings />}
+        title='Cluster Settings'
+        content={
+          <Stack sx={{ gap: 4.5 }}>
+            <Stack sx={{ gap: 1 }}>
+              <Typography variant='body1'>Model</Typography>
+              <Typography variant='body2' color='text.disabled'>
+                Choose the model hosted by the scheduler and review its memory requirement.
+              </Typography>
+              <ModelSelect autoCommit />
+            </Stack>
+            <Stack sx={{ gap: 1 }}>
+              <Typography variant='body1'>Live nodes</Typography>
+              <Typography variant='body2' color='text.disabled'>
+                Check current node status and verify the cluster is healthy.
+              </Typography>
+              <NodeList sx={{ maxHeight: '18rem' }} />
+            </Stack>
+            <Stack sx={{ gap: 1 }}>
+              <Typography variant='body1'>Add nodes</Typography>
+              <Typography variant='body2' color='text.disabled'>
+                Start new nodes with this command and watch them appear above.
+              </Typography>
+              <JoinCommand />
+            </Stack>
+          </Stack>
+        }
+        confirmLabel='Close'
+      />
       {dialogWaiting}
       {dialogRebalancing}
       {dialogFailed}
