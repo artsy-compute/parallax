@@ -635,8 +635,12 @@ def stop_http_server(http_server_process):
     if http_server_process is not None:
         logger.info("Stopping HTTP server process...")
         try:
-            http_server_process.kill()
-            http_server_process.join()
+            http_server_process.terminate()
+            http_server_process.join(timeout=5)
+            if http_server_process.is_alive():
+                logger.warning("HTTP server process did not terminate gracefully, killing...")
+                http_server_process.kill()
+                http_server_process.join()
         except Exception as e:
             logger.error(f"Failed to terminate HTTP server process: {e}")
         return None

@@ -124,10 +124,14 @@ def run_executor_process(args, shared_state=None, conn=None):
 
 
 def stop_executor_process(executor_process):
-    """Kill a subprocess"""
+    """Stop an executor subprocess, preferring graceful termination before kill."""
     logger.debug("Terminating executor subprocess...")
     try:
-        executor_process.kill()
-        executor_process.join()
+        executor_process.terminate()
+        executor_process.join(timeout=5)
+        if executor_process.is_alive():
+            logger.warning("Executor process did not terminate gracefully, killing...")
+            executor_process.kill()
+            executor_process.join()
     except Exception as e:
         logger.error(f"Failed to terminate executor subprocess: {e}")

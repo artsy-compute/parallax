@@ -19,6 +19,8 @@ python src/parallax/launch.py \
 import argparse
 import multiprocessing
 import os
+import signal
+import sys
 import tempfile
 import time
 
@@ -97,6 +99,49 @@ if __name__ == "__main__":
     conn_refit = None
     conn_tp_0 = []
     conn_tp_i = []
+    cleanup_state = {"started": False}
+
+    def _cleanup_processes():
+        if cleanup_state["started"]:
+            return
+        cleanup_state["started"] = True
+
+        logger.debug("Shutting down all processes...")
+        try:
+            shared_state.set_status(ServerState.OFFLINE.value)
+        except Exception:
+            pass
+
+        _stop_executor_processes(executor_subprocs)
+
+        if p2p_server_process is not None:
+            stop_p2p_server(p2p_server_process)
+
+        if http_server_process is not None:
+            stop_http_server(http_server_process)
+
+        for conn in [conn_main, conn_refit, *conn_tp_0, *conn_tp_i]:
+            if conn is None:
+                continue
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        try:
+            shared_state.shutdown()
+        except Exception:
+            pass
+
+        logger.debug("All processes shut down.")
+
+    def _handle_signal(signum, frame):
+        logger.warning("Received signal %s, shutting down node process tree...", signum)
+        _cleanup_processes()
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
 
     try:
         args = parse_args()
@@ -313,33 +358,4 @@ if __name__ == "__main__":
     except Exception as e:
         logger.exception(e)
     finally:
-        # Shutdown all processes
-        logger.debug("Shutting down all processes...")
-
-        # Shutdown executor subprocesses
-        for executor_process in executor_subprocs:
-            if executor_process.is_alive():
-                stop_executor_process(executor_process)
-
-        # Shutdown P2P server subprocess
-        if p2p_server_process is not None:
-            stop_p2p_server(p2p_server_process)
-
-        # Shutdown http server
-        if http_server_process is not None:
-            stop_http_server(http_server_process)
-
-        for conn in [conn_main, conn_refit, *conn_tp_0, *conn_tp_i]:
-            if conn is None:
-                continue
-            try:
-                conn.close()
-            except Exception:
-                pass
-
-        try:
-            shared_state.shutdown()
-        except Exception:
-            pass
-
-        logger.debug("All processes shut down.")
+        _cleanup_processes()
