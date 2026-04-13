@@ -17,10 +17,7 @@ import {
   IconInfoCircle,
   IconLayoutSidebarLeftCollapse,
   IconLayoutSidebarLeftExpand,
-  IconLayoutSidebarRightCollapse,
-  IconLayoutSidebarRightExpand,
-  IconPlus,
-  IconTopologyStar3,
+  IconSettings,
 } from '@tabler/icons-react';
 import { ConversationHistory, JoinCommand, ModelSelect, NodeList } from '../inputs';
 
@@ -198,45 +195,37 @@ export const DrawerLayout: FC<PropsWithChildren> = ({ children }) => {
 
   const [sidebarExpanded, setMenuOpen] = useState(true);
 
-  const [dialogJoinCommand, { open: openJoinCommand }] = useAlertDialog({
+  const [dialogClusterSettings, { open: openClusterSettings }] = useAlertDialog({
     color: 'primary',
-    titleIcon: <IconCirclePlus />,
-    title: 'Add New Nodes',
+    titleIcon: <IconSettings />,
+    title: 'Cluster Settings',
     content: (
-      <Stack sx={{ gap: 5 }}>
+      <Stack sx={{ gap: 4.5 }}>
         <Stack sx={{ gap: 1 }}>
-          <Typography variant='body1'>Run join command on all nodes</Typography>
-          <JoinCommand />
+          <Typography variant='body1'>Model</Typography>
+          <Typography variant='body2' color='text.disabled'>
+            Choose the model hosted by the scheduler and review its memory requirement.
+          </Typography>
+          <ModelSelect autoCommit />
         </Stack>
         <Stack sx={{ gap: 1 }}>
-          <Typography variant='body1'>Check your live node status</Typography>
+          <Typography variant='body1'>Live nodes</Typography>
           <Typography variant='body2' color='text.disabled'>
-            After you successfully start the server on the nodes, you should see them show up on the
-            below dashboard.
+            Check current node status and verify the cluster is healthy.
           </Typography>
-          <NodeList />
+          <NodeList sx={{ maxHeight: '18rem' }} />
+        </Stack>
+        <Stack sx={{ gap: 1 }}>
+          <Typography variant='body1'>Add nodes</Typography>
+          <Typography variant='body2' color='text.disabled'>
+            Start new nodes with this command and watch them appear above.
+          </Typography>
+          <JoinCommand />
         </Stack>
       </Stack>
     ),
-    confirmLabel: 'Finish',
+    confirmLabel: 'Close',
   });
-
-  const IconCluster = () => (
-    <svg width='1.5rem' height='1.5rem' viewBox='0 0 27 27' fill='currentColor'>
-      <g
-        fill='none'
-        stroke='currentColor'
-        stroke-linecap='round'
-        stroke-linejoin='round'
-        stroke-width='2'
-      >
-        <rect width='6' height='6' x='16' y='16' rx='1' />
-        <rect width='6' height='6' x='2' y='16' rx='1' />
-        <rect width='6' height='6' x='9' y='2' rx='1' />
-        <path d='M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3m-7-4V8' />
-      </g>
-    </svg>
-  );
 
   return (
     <DrawerLayoutRoot direction='row'>
@@ -329,24 +318,47 @@ export const DrawerLayout: FC<PropsWithChildren> = ({ children }) => {
           }
         </Stack>
         {sidebarExpanded && (
-          <Stack sx={{ minHeight: 0, flex: 1, gap: 2.5 }}>
+          <Stack sx={{ minHeight: 0, flex: 1, gap: 2, overflow: 'hidden' }}>
             <ConversationHistory />
-            <Stack sx={{ gap: 1.25 }}>
-              <Stack direction='row' sx={{ gap: 1, color: 'text.primary' }}>
-                <Typography variant='body1' sx={{ mt: '1.5px', color: '#A7A7A7FF', fontWeight: 600 }}>
-                  Cluster topology
-                </Typography>
-              </Stack>
-              <NodeList variant='menu' sx={{ maxHeight: '16rem' }} />
-              <Button
-                color='info'
-                startIcon={<IconPlus />}
-                onClick={openJoinCommand}
-              >
-                Add Nodes
-              </Button>
-            </Stack>
+            <Box sx={{ flex: 1 }} />
+            <Button
+              color='inherit'
+              variant='text'
+              startIcon={<IconSettings size={18} />}
+              onClick={openClusterSettings}
+              sx={{
+                justifyContent: 'flex-start',
+                color: 'text.secondary',
+                borderRadius: 2,
+                px: 1,
+                py: 0.75,
+                '&:hover': { bgcolor: 'rgba(255,255,255,0.5)' },
+              }}
+            >
+              Settings
+            </Button>
           </Stack>
+        )}
+        {!sidebarExpanded && (
+          <Tooltip
+            title='Settings'
+            placement='right'
+            slotProps={{
+              tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } },
+            }}
+          >
+            <IconButton
+              sx={{
+                mt: 'auto',
+                color: 'text.secondary',
+                borderRadius: '10px',
+                '&:hover': { bgcolor: 'action.hover' },
+              }}
+              onClick={openClusterSettings}
+            >
+              <IconSettings size={18} />
+            </IconButton>
+          </Tooltip>
         )}
       </DrawerLayoutSide>
       <DrawerLayoutContainer>
@@ -355,7 +367,7 @@ export const DrawerLayout: FC<PropsWithChildren> = ({ children }) => {
         </DrawerLayoutHeader>
         <DrawerLayoutContent>{children}</DrawerLayoutContent>
       </DrawerLayoutContainer>
-      {dialogJoinCommand}
+      {dialogClusterSettings}
       {dialogWaiting}
       {dialogRebalancing}
       {dialogFailed}
