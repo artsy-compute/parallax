@@ -1,7 +1,8 @@
 import asyncio
 import json
 import time
-from typing import Dict
+from dataclasses import dataclass, field
+from typing import Dict, Optional
 
 import aiohttp
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -15,6 +16,22 @@ from parallax_utils.request_metrics import get_request_metrics
 logger = get_logger(__name__)
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=20 * 60 * 60)
+
+
+@dataclass
+class ActiveRequestRecord:
+    request_id: str
+    request_data: Dict
+    received_ts: int
+    conversation_id: Optional[str] = None
+    routing_table: Optional[list[str]] = None
+    first_hop: Optional[str] = None
+    emitted_text: str = ""
+    emitted_any_bytes: bool = False
+    status: str = "pending"
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    last_error: Optional[str] = None
 
 
 class RequestHandler:
@@ -35,6 +52,7 @@ class RequestHandler:
         self.scheduler_manage = None
         self.stubs = {}
         self.chat_memory = ChatMemoryService()
+        self.active_requests: dict[str, ActiveRequestRecord] = {}
 
     def set_scheduler_manage(self, scheduler_manage):
         self.scheduler_manage = scheduler_manage
@@ -43,6 +61,92 @@ class RequestHandler:
         if node_id not in self.stubs:
             self.stubs[node_id] = self.scheduler_manage.completion_handler.get_stub(node_id)
         return self.stubs[node_id]
+
+    def _register_active_request(
+        self,
+        request_id: str,
+        request_data: Dict,
+        received_ts: int,
+        conversation_id: Optional[str],
+    ) -> ActiveRequestRecord:
+        record = ActiveRequestRecord(
+            request_id=str(request_id),
+            request_data=dict(request_data),
+            received_ts=received_ts,
+            conversation_id=conversation_id,
+        )
+        self.active_requests[str(request_id)] = record
+        return record
+
+    def _mark_request_routed(self, request_id: str, routing_table: list[str]) -> None:
+        record = self.active_requests.get(str(request_id))
+        if record is None:
+            return
+        record.routing_table = list(routing_table)
+        record.first_hop = routing_table[0] if routing_table else None
+        record.status = 'routed'
+        record.updated_at = time.time()
+
+    def _append_request_output(self, request_id: str, text: str, *, emitted_any_bytes: bool = False) -> None:
+        record = self.active_requests.get(str(request_id))
+        if record is None:
+            return
+        if text:
+            record.emitted_text += text
+        if emitted_any_bytes:
+            record.emitted_any_bytes = True
+        if record.status != 'completed':
+            record.status = 'streaming'
+        record.updated_at = time.time()
+
+    def _fail_active_request(self, request_id: str, error: Exception | str) -> None:
+        record = self.active_requests.get(str(request_id))
+        if record is None:
+            return
+        record.status = 'failed'
+        record.last_error = str(error)
+        record.updated_at = time.time()
+
+    def _complete_active_request(self, request_id: str) -> None:
+        record = self.active_requests.get(str(request_id))
+        if record is None:
+            return
+        record.status = 'completed'
+        record.updated_at = time.time()
+        self.active_requests.pop(str(request_id), None)
+
+    async def _resolve_routing_table(self, request_id: str, received_ts: int) -> Optional[list[str]]:
+        attempts = 0
+        last_error: Optional[Exception] = None
+        while attempts < self.MAX_ROUTING_RETRY:
+            try:
+                if self.scheduler_manage is None:
+                    raise RuntimeError('Scheduler manager is not initialized')
+                if self.scheduler_manage.get_schedule_status() != NODE_STATUS_AVAILABLE:
+                    routing_table = None
+                else:
+                    routing_table = self.scheduler_manage.get_routing_table(request_id, received_ts)
+                    logger.debug(
+                        'get_routing_table for request %s return: %s (attempt %d)',
+                        request_id,
+                        routing_table,
+                        attempts + 1,
+                    )
+            except Exception as e:
+                last_error = e
+                logger.warning('get_routing_table error for %s: %s', request_id, e)
+                routing_table = None
+
+            if routing_table and len(routing_table) > 0:
+                return routing_table
+
+            attempts += 1
+            if attempts < self.MAX_ROUTING_RETRY:
+                await asyncio.sleep(self.RETRY_DELAY_SEC)
+
+        if last_error is not None:
+            raise RuntimeError(f'Get routing table error: {last_error}') from last_error
+        return None
 
     def _extract_stream_delta_text(self, chunk: bytes) -> str:
         try:
@@ -81,111 +185,111 @@ class RequestHandler:
 
     async def _forward_request(self, request_data: Dict, request_id: str, received_ts: int):
         request_data, conversation_id = self.chat_memory.prepare_request(request_data)
+        record = self._register_active_request(str(request_id), request_data, received_ts, conversation_id)
         start_time = time.time()
         logger.debug(
             f"Forwarding request {request_id}; stream={request_data.get('stream', False)} conversation_id={conversation_id}"
         )
-        if (
-            self.scheduler_manage is None
-            or not self.scheduler_manage.get_schedule_status() == NODE_STATUS_AVAILABLE
-        ):
-            return JSONResponse(
-                content={"error": "Server is not ready"},
-                status_code=500,
-            )
 
         # Try to get a success response
         forward_attempts = 0
         while forward_attempts < self.MAX_FORWARD_RETRY:
-            # Try to resolve routing; retry if table is an empty list (capacity full)
-            attempts = 0
-            routing_table = None
-            while attempts < self.MAX_ROUTING_RETRY:
-                try:
-                    routing_table = self.scheduler_manage.get_routing_table(request_id, received_ts)
-                    logger.debug(
-                        f"get_routing_table for request {request_id} return: {routing_table} (attempt {attempts+1})"
-                    )
-                except Exception as e:
-                    logger.exception(f"get_routing_table error: {e}")
-                    return JSONResponse(
-                        content={"error": "Get routing table error"},
-                        status_code=500,
-                    )
-
-                # None -> scheduler has not set yet; treat as hard error (no waiting here)
-                if routing_table is None:
-                    return JSONResponse(
-                        content={"error": "Routing pipelines not ready"},
-                        status_code=503,
-                    )
-
-                # Non-empty -> proceed
-                if len(routing_table) > 0:
-                    break
-
-                # Empty list -> capacity full now, retry after short delay
-                attempts += 1
-                if attempts < self.MAX_ROUTING_RETRY:
-                    # small async delay before re-forwarding
-                    await asyncio.sleep(self.RETRY_DELAY_SEC)
-
-            # If still empty after retries, return 429 Too Many Requests
-            if routing_table is not None and len(routing_table) == 0:
+            try:
+                routing_table = await self._resolve_routing_table(str(request_id), received_ts)
+            except Exception as e:
+                self._fail_active_request(str(request_id), e)
                 return JSONResponse(
-                    content={"error": "All pipelines are busy or not ready. Please retry later."},
-                    status_code=429,
+                    content={"error": "Get routing table error"},
+                    status_code=500,
                 )
 
-            # Add request_id and routing_table to request_data
+            if not routing_table:
+                self._fail_active_request(str(request_id), 'Routing pipelines not ready')
+                return JSONResponse(
+                    content={"error": "Routing pipelines not ready"},
+                    status_code=503,
+                )
+
             request_data["rid"] = str(request_id)
             request_data["routing_table"] = routing_table
+            self._mark_request_routed(str(request_id), routing_table)
             stub = self.get_stub(routing_table[0])
             is_stream = request_data.get("stream", False)
             try:
                 if is_stream:
 
                     async def stream_generator():
-                        response = stub.chat_completion(request_data)
+                        attempts = 0
                         first_token_time = None
                         last_chunk = None
                         last_token_time = None
                         assistant_chunks = []
-                        try:
-                            iterator = iterate_in_threadpool(response)
-                            async for chunk in iterator:
-                                last_token_time = time.time()
-                                if first_token_time is None:
-                                    first_token_time = last_token_time
-                                if chunk is not None and not chunk.decode("utf-8").startswith(
-                                    "data: [DONE]"
-                                ):
-                                    last_chunk = chunk
-                                    delta_text = self._extract_stream_delta_text(chunk)
-                                    if delta_text:
-                                        assistant_chunks.append(delta_text)
-                                yield chunk
-                        finally:
-                            assistant_text = ''.join(assistant_chunks)
-                            if assistant_text:
-                                self.chat_memory.save_assistant_message(
-                                    conversation_id, assistant_text, str(request_id)
-                                )
-                            if last_chunk is not None:
-                                tps, ttft, input_tokens, output_tokens = get_request_metrics(
-                                    last_chunk, start_time, first_token_time, last_token_time
-                                )
-                                if (
-                                    tps is not None
-                                    and ttft is not None
-                                    and input_tokens is not None
-                                    and output_tokens is not None
-                                ):
-                                    logger.info(
-                                        f"Request ID: {request_id} | TPS: {tps:.2f} |  TTFT: {ttft} ms | Output tokens: {output_tokens} | Input tokens: {input_tokens}"
+                        while attempts < self.MAX_FORWARD_RETRY:
+                            current_routing_table = request_data["routing_table"]
+                            current_stub = self.get_stub(current_routing_table[0])
+                            response = current_stub.chat_completion(request_data)
+                            try:
+                                iterator = iterate_in_threadpool(response)
+                                async for chunk in iterator:
+                                    last_token_time = time.time()
+                                    if first_token_time is None:
+                                        first_token_time = last_token_time
+                                    if chunk is not None and not chunk.decode("utf-8").startswith(
+                                        "data: [DONE]"
+                                    ):
+                                        last_chunk = chunk
+                                        self._append_request_output(
+                                            str(request_id), '', emitted_any_bytes=True
+                                        )
+                                        delta_text = self._extract_stream_delta_text(chunk)
+                                        if delta_text:
+                                            assistant_chunks.append(delta_text)
+                                            self._append_request_output(str(request_id), delta_text)
+                                    yield chunk
+                                assistant_text = ''.join(assistant_chunks)
+                                if assistant_text:
+                                    self.chat_memory.save_assistant_message(
+                                        conversation_id, assistant_text, str(request_id)
                                     )
-                            logger.debug(f"client disconnected for {request_id}")
-                            response.cancel()
+                                self._complete_active_request(str(request_id))
+                                return
+                            except Exception as e:
+                                record = self.active_requests.get(str(request_id))
+                                emitted_any = bool(record and record.emitted_any_bytes)
+                                attempts += 1
+                                if not emitted_any and attempts < self.MAX_FORWARD_RETRY:
+                                    logger.warning(
+                                        'Retrying streamed request %s after forwarding error before any output: %s',
+                                        request_id,
+                                        e,
+                                    )
+                                    await asyncio.sleep(self.FORWARD_DELAY_SEC)
+                                    fresh_routing = await self._resolve_routing_table(
+                                        str(request_id), received_ts
+                                    )
+                                    if not fresh_routing:
+                                        raise
+                                    request_data["routing_table"] = fresh_routing
+                                    self._mark_request_routed(str(request_id), fresh_routing)
+                                    continue
+                                self._fail_active_request(str(request_id), e)
+                                raise
+                            finally:
+                                if last_chunk is not None:
+                                    tps, ttft, input_tokens, output_tokens = get_request_metrics(
+                                        last_chunk, start_time, first_token_time, last_token_time
+                                    )
+                                    if (
+                                        tps is not None
+                                        and ttft is not None
+                                        and input_tokens is not None
+                                        and output_tokens is not None
+                                    ):
+                                        logger.info(
+                                            f"Request ID: {request_id} | TPS: {tps:.2f} |  TTFT: {ttft} ms | Output tokens: {output_tokens} | Input tokens: {input_tokens}"
+                                        )
+                                logger.debug(f"client disconnected for {request_id}")
+                                response.cancel()
 
                     resp = StreamingResponse(
                         stream_generator(),
@@ -205,14 +309,23 @@ class RequestHandler:
                         self.chat_memory.save_assistant_message(
                             conversation_id, assistant_text, str(request_id)
                         )
+                        self._append_request_output(str(request_id), assistant_text, emitted_any_bytes=True)
+                    self._complete_active_request(str(request_id))
                     logger.debug(f"Non-stream response completed for {request_id}")
                     return Response(content=content, media_type="application/json")
             except Exception as e:
+                record = self.active_requests.get(str(request_id))
+                emitted_any = bool(record and record.emitted_any_bytes)
                 forward_attempts += 1
-                if forward_attempts < self.MAX_FORWARD_RETRY:
-                    # small async delay before re-forwarding
+                if not emitted_any and forward_attempts < self.MAX_FORWARD_RETRY:
                     await asyncio.sleep(self.FORWARD_DELAY_SEC)
+                    logger.warning(
+                        f"Error in _forward_request before output for {request_id}: {e}. Retry attempts {forward_attempts}"
+                    )
+                    continue
+                self._fail_active_request(str(request_id), e)
                 logger.warning(f"Error in _forward_request: {e}. Retry attemps {forward_attempts}")
+                break
 
         return JSONResponse(
             content={"error": "Internal server error"},
