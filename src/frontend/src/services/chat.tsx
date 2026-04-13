@@ -74,6 +74,14 @@ export interface ChatStates {
     readonly severity: 'warning' | 'error';
     readonly message: string;
   } | null;
+  readonly promptBudgetNotice: {
+    readonly inputBudgetTokens: number;
+    readonly reservedOutputTokens: number;
+    readonly estimatedInputTokens: number;
+    readonly recentMessagesCount: number;
+    readonly memorySectionsCount: number;
+    readonly memoryBudgetTokens: number;
+  } | null;
 }
 
 export interface ChatActions {
@@ -118,6 +126,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [inputTruncationNotice, setInputTruncationNotice] = useState<ChatStates['inputTruncationNotice']>(null);
   const [requestHealthNotice, setRequestHealthNotice] = useState<ChatStates['requestHealthNotice']>(null);
+  const [promptBudgetNotice, setPromptBudgetNotice] = useState<ChatStates['promptBudgetNotice']>(null);
   const inputFocusRef = useConst<{ current: (() => void) | null }>(() => ({ current: null }));
   const firstTokenTimeoutRef = useConst<{ current: ReturnType<typeof setTimeout> | null }>(() => ({ current: null }));
   const noProgressTimeoutRef = useConst<{ current: ReturnType<typeof setTimeout> | null }>(() => ({ current: null }));
@@ -181,6 +190,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
       setConversationId(detail.conversation_id || nextConversationId);
       setInputTruncationNotice(null);
       setRequestHealthNotice(null);
+      setPromptBudgetNotice(null);
       setMessages(
         detail.messages.map((message) => ({
           id: message.id,
@@ -326,7 +336,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
         //   usage: null,
         // };
         const {
-          data: { id, object, model, created, choices, usage, input_truncation },
+          data: { id, object, model, created, choices, usage, input_truncation, prompt_budget },
         } = message;
         if (input_truncation?.truncated) {
           setInputTruncationNotice({
@@ -335,6 +345,16 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
             keptPromptTokens: input_truncation.kept_prompt_tokens || 0,
             maxSequenceLength: input_truncation.max_sequence_length || 0,
             maxNewTokens: input_truncation.max_new_tokens || 0,
+          });
+        }
+        if (prompt_budget) {
+          setPromptBudgetNotice({
+            inputBudgetTokens: prompt_budget.input_budget_tokens || 0,
+            reservedOutputTokens: prompt_budget.reserved_output_tokens || 0,
+            estimatedInputTokens: prompt_budget.estimated_input_tokens || 0,
+            recentMessagesCount: prompt_budget.recent_messages_count || 0,
+            memorySectionsCount: prompt_budget.memory_sections_count || 0,
+            memoryBudgetTokens: prompt_budget.memory_budget_tokens || 0,
           });
         }
         if (object === 'chat.completion.chunk' && choices?.length > 0) {
@@ -417,6 +437,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     let nextMessages: readonly ChatMessage[] = messages;
     setInputTruncationNotice(null);
     setRequestHealthNotice(null);
+    setPromptBudgetNotice(null);
     if (message) {
       // Regenerate
       const finalMessageIndex = messages.findIndex((m) => m.id === message.id);
@@ -474,6 +495,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     if (targetConversationId === conversationId) {
       setInputTruncationNotice(null);
       setRequestHealthNotice(null);
+      setPromptBudgetNotice(null);
       setMessages([]);
       setStatus('closed');
       setConversationId(createConversationId());
@@ -485,6 +507,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     stop();
     setInputTruncationNotice(null);
     setRequestHealthNotice(null);
+    setPromptBudgetNotice(null);
     setMessages([]);
     setStatus('closed');
     setConversationId(createConversationId());
@@ -502,6 +525,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     }
     setInputTruncationNotice(null);
     setRequestHealthNotice(null);
+    setPromptBudgetNotice(null);
     setMessages([]);
     setConversationId(createConversationId());
     refreshHistory();
@@ -531,10 +555,11 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
         historyLoading,
         inputTruncationNotice,
         requestHealthNotice,
+        promptBudgetNotice,
       },
       actions,
     ],
-    [input, status, messages, conversationId, history, historyLoading, inputTruncationNotice, requestHealthNotice, actions],
+    [input, status, messages, conversationId, history, historyLoading, inputTruncationNotice, requestHealthNotice, promptBudgetNotice, actions],
   );
 
   return <context.Provider value={value}>{children}</context.Provider>;

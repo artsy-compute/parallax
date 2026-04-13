@@ -37,6 +37,11 @@ class ChatMemoryService:
         self.summary_char_budget = int(os.environ.get('PARALLAX_CHAT_MEMORY_SUMMARY_CHARS', '3000'))
         self.retrieval_limit = int(os.environ.get('PARALLAX_CHAT_MEMORY_RETRIEVAL_LIMIT', '4'))
         self.retrieval_char_budget = int(os.environ.get('PARALLAX_CHAT_MEMORY_RETRIEVAL_CHARS', '1800'))
+        self.default_max_sequence_tokens = int(os.environ.get('PARALLAX_CHAT_MEMORY_MAX_SEQUENCE_TOKENS', '7168'))
+        self.default_response_reserve_tokens = int(os.environ.get('PARALLAX_CHAT_MEMORY_RESPONSE_RESERVE_TOKENS', '2048'))
+        self.prompt_overhead_tokens = int(os.environ.get('PARALLAX_CHAT_MEMORY_PROMPT_OVERHEAD_TOKENS', '96'))
+        self.max_memory_fraction = float(os.environ.get('PARALLAX_CHAT_MEMORY_MAX_MEMORY_FRACTION', '0.35'))
+        self.min_recent_message_count = int(os.environ.get('PARALLAX_CHAT_MEMORY_MIN_RECENT_MESSAGES', '2'))
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
@@ -84,6 +89,129 @@ class ChatMemoryService:
         text = re.sub(r'<[^>]+>', ' ', text)
         text = ' '.join(text.split())
         return self._compact_text(text, max_chars)
+
+    def _estimate_text_tokens(self, text: str) -> int:
+        compact = ' '.join((text or '').split())
+        if not compact:
+            return 0
+        return max(1, (len(compact) + 3) // 4)
+
+    def _estimate_message_tokens(self, message: Dict) -> int:
+        role = str(message.get('role') or '')
+        content = str(message.get('content') or '')
+        overhead = 8 + (len(role) // 8)
+        return overhead + self._estimate_text_tokens(content)
+
+    def _truncate_text_to_budget(
+        self,
+        text: str,
+        budget_tokens: int,
+        *,
+        preserve_tail: bool = False,
+    ) -> str:
+        compact = ' '.join((text or '').split())
+        if budget_tokens <= 0 or not compact:
+            return ''
+        if self._estimate_text_tokens(compact) <= budget_tokens:
+            return compact
+
+        marker = ' ...[content omitted to fit context]... '
+        max_chars = max(16, budget_tokens * 4)
+        if len(compact) <= max_chars:
+            return compact
+        if max_chars <= len(marker) + 8:
+            return compact[-max_chars:] if preserve_tail else compact[:max_chars]
+
+        if preserve_tail:
+            tail_chars = max_chars - len(marker)
+            return marker.strip() + compact[-tail_chars:]
+
+        head_chars = max_chars // 3
+        tail_chars = max_chars - len(marker) - head_chars
+        if tail_chars <= 0:
+            return compact[:max_chars]
+        return compact[:head_chars].rstrip() + marker + compact[-tail_chars:].lstrip()
+
+    def _fit_recent_messages(self, messages: List[Dict], budget_tokens: int) -> List[Dict[str, str]]:
+        sanitized_messages = [
+            {'role': str(m.get('role')), 'content': str(m.get('content')).strip()}
+            for m in messages
+            if m.get('role') and str(m.get('content') or '').strip()
+        ]
+        if not sanitized_messages:
+            return []
+
+        kept: List[Dict[str, str]] = []
+        used_tokens = 0
+        min_keep = min(self.min_recent_message_count, len(sanitized_messages))
+
+        for reverse_index, message in enumerate(reversed(sanitized_messages)):
+            remaining_messages = len(sanitized_messages) - reverse_index
+            must_keep = remaining_messages <= min_keep
+            message_tokens = self._estimate_message_tokens(message)
+            available = max(0, budget_tokens - used_tokens)
+
+            if message_tokens <= available:
+                kept.append(message)
+                used_tokens += message_tokens
+                continue
+
+            if must_keep or not kept:
+                content_budget = max(8, available - 8)
+                trimmed_content = self._truncate_text_to_budget(
+                    message['content'],
+                    content_budget,
+                    preserve_tail=message['role'] == 'user',
+                )
+                if trimmed_content:
+                    trimmed_message = {'role': message['role'], 'content': trimmed_content}
+                    kept.append(trimmed_message)
+                    used_tokens += self._estimate_message_tokens(trimmed_message)
+                continue
+
+        kept.reverse()
+        return kept
+
+    def _build_memory_sections(
+        self,
+        summary: str,
+        retrieved: List[str],
+        budget_tokens: int,
+    ) -> List[str]:
+        if budget_tokens <= 0:
+            return []
+
+        sections: List[str] = []
+        used_tokens = 0
+
+        if summary:
+            remaining = max(0, budget_tokens - used_tokens)
+            if remaining > 0:
+                trimmed_summary = self._truncate_text_to_budget(summary, remaining)
+                if trimmed_summary:
+                    sections.append(trimmed_summary)
+                    used_tokens += self._estimate_text_tokens(trimmed_summary)
+
+        if retrieved:
+            remaining = max(0, budget_tokens - used_tokens)
+            if remaining > 12:
+                snippets: List[str] = []
+                header = 'Relevant earlier snippets from long-term memory:'
+                snippet_budget = max(0, remaining - self._estimate_text_tokens(header))
+                current = 0
+                for snippet in retrieved:
+                    trimmed = self._truncate_text_to_budget(snippet, snippet_budget - current)
+                    if not trimmed:
+                        break
+                    snippet_tokens = self._estimate_text_tokens(trimmed)
+                    if current + snippet_tokens > snippet_budget:
+                        break
+                    snippets.append(f'- {trimmed}')
+                    current += snippet_tokens
+                if snippets:
+                    sections.append(header + '\n' + '\n'.join(snippets))
+
+        return sections
 
     def ensure_conversation(self, conversation_id: str) -> None:
         now = time.time()
@@ -362,32 +490,62 @@ class ChatMemoryService:
         retrieved = self._retrieve_relevant_snippets(conversation_id, latest_user)
         recent_messages = messages[-self.recent_message_count :]
 
-        memory_sections = []
-        if summary:
-            memory_sections.append(summary)
-        if retrieved:
-            memory_sections.append(
-                'Relevant earlier snippets from long-term memory:\n' + '\n'.join(f'- {s}' for s in retrieved)
-            )
+        max_sequence_tokens = int(request_data.get('max_sequence_length') or self.default_max_sequence_tokens)
+        response_reserve_tokens = int(request_data.get('max_tokens') or self.default_response_reserve_tokens)
+        input_budget_tokens = max(256, max_sequence_tokens - response_reserve_tokens - self.prompt_overhead_tokens)
+        memory_budget_tokens = max(0, int(input_budget_tokens * self.max_memory_fraction))
+        recent_budget_tokens = max(128, input_budget_tokens - memory_budget_tokens)
+
+        fitted_recent_messages = self._fit_recent_messages(recent_messages, recent_budget_tokens)
+        recent_used_tokens = sum(self._estimate_message_tokens(message) for message in fitted_recent_messages)
+        remaining_for_memory = max(0, input_budget_tokens - recent_used_tokens)
+        fitted_memory_sections = self._build_memory_sections(summary, retrieved, remaining_for_memory)
 
         model_messages: List[Dict[str, str]] = []
-        if memory_sections:
-            model_messages.append(
-                {
-                    'role': 'system',
-                    'content': (
-                        'Use the following memory only as approximate prior context. '
-                        'Prefer the recent verbatim turns if there is any conflict.\n\n'
-                        + '\n\n'.join(memory_sections)
-                    ),
-                }
+        if fitted_memory_sections:
+            memory_message = {
+                'role': 'system',
+                'content': (
+                    'Use the following memory only as approximate prior context. '
+                    'Prefer the recent verbatim turns if there is any conflict.\n\n'
+                    + '\n\n'.join(fitted_memory_sections)
+                ),
+            }
+            if self._estimate_message_tokens(memory_message) > remaining_for_memory:
+                memory_content_budget = max(32, remaining_for_memory - 16)
+                memory_message['content'] = self._truncate_text_to_budget(memory_message['content'], memory_content_budget)
+            if memory_message['content']:
+                model_messages.append(memory_message)
+
+        model_messages.extend(fitted_recent_messages)
+
+        estimated_input_tokens = sum(self._estimate_message_tokens(message) for message in model_messages)
+        prompt_budget = {
+            'input_budget_tokens': input_budget_tokens,
+            'reserved_output_tokens': response_reserve_tokens,
+            'estimated_input_tokens': estimated_input_tokens,
+            'recent_messages_count': len(fitted_recent_messages),
+            'memory_sections_count': len(fitted_memory_sections),
+            'memory_budget_tokens': remaining_for_memory,
+        }
+        if estimated_input_tokens > input_budget_tokens:
+            logger.warning(
+                'Chat memory budgeting still exceeded target input budget for conversation %s: estimated_input_tokens=%d budget=%d',
+                conversation_id,
+                estimated_input_tokens,
+                input_budget_tokens,
+            )
+        else:
+            logger.info(
+                'Chat memory prompt budget for %s: input_budget=%d reserved_output=%d estimated_input=%d recent_messages=%d memory_sections=%d',
+                conversation_id,
+                input_budget_tokens,
+                response_reserve_tokens,
+                estimated_input_tokens,
+                len(fitted_recent_messages),
+                len(fitted_memory_sections),
             )
 
-        model_messages.extend(
-            {'role': m.get('role'), 'content': m.get('content')}
-            for m in recent_messages
-            if m.get('role') and m.get('content')
-        )
-
         sanitized['messages'] = model_messages
+        sanitized['_prompt_budget'] = prompt_budget
         return sanitized, conversation_id

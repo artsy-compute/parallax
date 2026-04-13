@@ -88,6 +88,7 @@ class HTTPRequestInfo:
     kept_prompt_tokens: int = 0
     truncation_max_sequence_length: int = 0
     truncation_max_new_tokens: int = 0
+    prompt_budget: Optional[Dict[str, int]] = None
     truncation_notice_ready: Optional[asyncio.Event] = field(default=None, repr=False)
     # helper
     is_finish: bool = False
@@ -166,6 +167,16 @@ class HTTPHandler:
         request_info.tool_state = ToolCallState.from_tokenizer(
             self.tokenizer, request.get("tools"), stream
         )
+        prompt_budget = request.get('_prompt_budget')
+        if isinstance(prompt_budget, dict):
+            request_info.prompt_budget = {
+                'input_budget_tokens': int(prompt_budget.get('input_budget_tokens', 0) or 0),
+                'reserved_output_tokens': int(prompt_budget.get('reserved_output_tokens', 0) or 0),
+                'estimated_input_tokens': int(prompt_budget.get('estimated_input_tokens', 0) or 0),
+                'recent_messages_count': int(prompt_budget.get('recent_messages_count', 0) or 0),
+                'memory_sections_count': int(prompt_budget.get('memory_sections_count', 0) or 0),
+                'memory_budget_tokens': int(prompt_budget.get('memory_budget_tokens', 0) or 0),
+            }
         if stream:
             request_info.token_queue = asyncio.Queue()
             request_info.truncation_notice_ready = asyncio.Event()
@@ -274,6 +285,8 @@ class HTTPHandler:
                 "max_sequence_length": request_info.truncation_max_sequence_length,
                 "max_new_tokens": request_info.truncation_max_new_tokens,
             }
+        if request_info.prompt_budget is not None:
+            response["prompt_budget"] = request_info.prompt_budget
         if request_info.weight_version is not None:
             response["weight_version"] = request_info.weight_version
         response_json = json.dumps(response, separators=(",", ":"))
@@ -372,6 +385,8 @@ class HTTPHandler:
                 "max_sequence_length": request_info.truncation_max_sequence_length,
                 "max_new_tokens": request_info.truncation_max_new_tokens,
             }
+        if request_info.prompt_budget is not None:
+            response["prompt_budget"] = request_info.prompt_budget
         if request_info.weight_version is not None:
             response["weight_version"] = request_info.weight_version
         return response
