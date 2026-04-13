@@ -81,6 +81,13 @@ export interface ChatStates {
     readonly recentMessagesCount: number;
     readonly memorySectionsCount: number;
     readonly memoryBudgetTokens: number;
+    readonly recentTurnTokens: number;
+    readonly summaryTokens: number;
+    readonly snippetTokens: number;
+    readonly requestedOutputTokens: number;
+    readonly adjustedOutputTokens: number;
+    readonly outputTokensReduced: number;
+    readonly adaptedOutputBudget: boolean;
   } | null;
 }
 
@@ -355,6 +362,13 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
             recentMessagesCount: prompt_budget.recent_messages_count || 0,
             memorySectionsCount: prompt_budget.memory_sections_count || 0,
             memoryBudgetTokens: prompt_budget.memory_budget_tokens || 0,
+            recentTurnTokens: prompt_budget.recent_turn_tokens || 0,
+            summaryTokens: prompt_budget.summary_tokens || 0,
+            snippetTokens: prompt_budget.snippet_tokens || 0,
+            requestedOutputTokens: prompt_budget.requested_output_tokens || 0,
+            adjustedOutputTokens: prompt_budget.adjusted_output_tokens || 0,
+            outputTokensReduced: prompt_budget.output_tokens_reduced || 0,
+            adaptedOutputBudget: !!prompt_budget.adapted_output_budget,
           });
         }
         if (object === 'chat.completion.chunk' && choices?.length > 0) {

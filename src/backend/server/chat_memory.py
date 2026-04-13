@@ -43,6 +43,8 @@ class ChatMemoryService:
         self.prompt_overhead_tokens = int(os.environ.get('PARALLAX_CHAT_MEMORY_PROMPT_OVERHEAD_TOKENS', '96'))
         self.max_memory_fraction = float(os.environ.get('PARALLAX_CHAT_MEMORY_MAX_MEMORY_FRACTION', '0.35'))
         self.min_recent_message_count = int(os.environ.get('PARALLAX_CHAT_MEMORY_MIN_RECENT_MESSAGES', '2'))
+        self.adaptive_max_tokens_enabled = os.environ.get('PARALLAX_CHAT_MEMORY_ADAPTIVE_MAX_TOKENS', '1').lower() not in {'0', 'false', 'no'}
+        self.min_response_reserve_tokens = int(os.environ.get('PARALLAX_CHAT_MEMORY_MIN_RESPONSE_RESERVE_TOKENS', '256'))
         self.model_summary_enabled = os.environ.get('PARALLAX_CHAT_MEMORY_MODEL_SUMMARY', '1').lower() not in {'0', 'false', 'no'}
         self.model_summary_max_tokens = int(os.environ.get('PARALLAX_CHAT_MEMORY_MODEL_SUMMARY_MAX_TOKENS', '256'))
         self.summary_source_char_budget = int(os.environ.get('PARALLAX_CHAT_MEMORY_SUMMARY_SOURCE_CHARS', '6000'))
@@ -155,12 +157,15 @@ class ChatMemoryService:
             return compact[:max_chars]
         return compact[:head_chars].rstrip() + marker + compact[-tail_chars:].lstrip()
 
-    def _fit_recent_messages(self, messages: List[Dict], budget_tokens: int) -> List[Dict[str, str]]:
-        sanitized_messages = [
+    def _sanitize_messages(self, messages: List[Dict]) -> List[Dict[str, str]]:
+        return [
             {'role': str(m.get('role')), 'content': str(m.get('content')).strip()}
             for m in messages
             if m.get('role') and str(m.get('content') or '').strip()
         ]
+
+    def _fit_recent_messages(self, messages: List[Dict], budget_tokens: int) -> List[Dict[str, str]]:
+        sanitized_messages = self._sanitize_messages(messages)
         if not sanitized_messages:
             return []
 
@@ -194,6 +199,67 @@ class ChatMemoryService:
 
         kept.reverse()
         return kept
+
+    def _estimate_memory_message_tokens(self, summary: str, retrieved: List[str], budget_tokens: int) -> int:
+        sections = self._build_memory_sections(summary, retrieved, budget_tokens)
+        if not sections:
+            return 0
+        memory_message = {
+            'role': 'system',
+            'content': (
+                'Use the following memory only as approximate prior context. '
+                'Prefer the recent verbatim turns if there is any conflict.\n\n'
+                + '\n\n'.join(sections)
+            ),
+        }
+        return self._estimate_message_tokens(memory_message)
+
+    def _compute_adaptive_response_reserve(
+        self,
+        *,
+        requested_output_tokens: int,
+        max_sequence_tokens: int,
+        recent_messages: List[Dict],
+        summary: str,
+        retrieved: List[str],
+    ) -> Tuple[int, Dict[str, int]]:
+        minimum_output_tokens = max(64, self.min_response_reserve_tokens)
+        requested_output_tokens = max(64, requested_output_tokens)
+        adjusted_output_tokens = requested_output_tokens
+        metadata = {
+            'requested_output_tokens': requested_output_tokens,
+            'adjusted_output_tokens': requested_output_tokens,
+            'output_tokens_reduced': 0,
+            'adapted_output_budget': 0,
+        }
+        if not self.adaptive_max_tokens_enabled or requested_output_tokens <= minimum_output_tokens:
+            return requested_output_tokens, metadata
+
+        sanitized_recent_messages = self._sanitize_messages(recent_messages)
+        if not sanitized_recent_messages:
+            return requested_output_tokens, metadata
+
+        full_recent_tokens = sum(self._estimate_message_tokens(message) for message in sanitized_recent_messages)
+        minimum_input_budget = max(256, max_sequence_tokens - minimum_output_tokens - self.prompt_overhead_tokens)
+        desired_memory_tokens = min(
+            self._estimate_memory_message_tokens(summary, retrieved, minimum_input_budget),
+            max(0, int(minimum_input_budget * self.max_memory_fraction)),
+        )
+        desired_input_tokens = full_recent_tokens + desired_memory_tokens
+        requested_input_budget = max(256, max_sequence_tokens - requested_output_tokens - self.prompt_overhead_tokens)
+
+        if desired_input_tokens <= requested_input_budget:
+            return requested_output_tokens, metadata
+
+        extra_input_needed = desired_input_tokens - requested_input_budget
+        adjusted_output_tokens = max(minimum_output_tokens, requested_output_tokens - extra_input_needed)
+        if adjusted_output_tokens >= requested_output_tokens:
+            return requested_output_tokens, metadata
+
+        metadata['adjusted_output_tokens'] = adjusted_output_tokens
+        metadata['output_tokens_reduced'] = requested_output_tokens - adjusted_output_tokens
+        metadata['adapted_output_budget'] = 1
+        return adjusted_output_tokens, metadata
 
     def _build_memory_sections(
         self,
@@ -609,7 +675,14 @@ class ChatMemoryService:
         recent_messages = messages[-self.recent_message_count :]
 
         max_sequence_tokens = int(request_data.get('max_sequence_length') or self.default_max_sequence_tokens)
-        response_reserve_tokens = int(request_data.get('max_tokens') or self.default_response_reserve_tokens)
+        requested_output_tokens = int(request_data.get('max_tokens') or self.default_response_reserve_tokens)
+        response_reserve_tokens, adaptive_output_budget = self._compute_adaptive_response_reserve(
+            requested_output_tokens=requested_output_tokens,
+            max_sequence_tokens=max_sequence_tokens,
+            recent_messages=recent_messages,
+            summary=summary,
+            retrieved=retrieved,
+        )
         input_budget_tokens = max(256, max_sequence_tokens - response_reserve_tokens - self.prompt_overhead_tokens)
         memory_budget_tokens = max(0, int(input_budget_tokens * self.max_memory_fraction))
         recent_budget_tokens = max(128, input_budget_tokens - memory_budget_tokens)
@@ -618,6 +691,14 @@ class ChatMemoryService:
         recent_used_tokens = sum(self._estimate_message_tokens(message) for message in fitted_recent_messages)
         remaining_for_memory = max(0, input_budget_tokens - recent_used_tokens)
         fitted_memory_sections = self._build_memory_sections(summary, retrieved, remaining_for_memory)
+        summary_tokens = 0
+        snippet_tokens = 0
+        for section in fitted_memory_sections:
+            section_tokens = self._estimate_text_tokens(section)
+            if section.startswith('Relevant earlier snippets from long-term memory:'):
+                snippet_tokens += section_tokens
+            else:
+                summary_tokens += section_tokens
 
         model_messages: List[Dict[str, str]] = []
         if fitted_memory_sections:
@@ -645,6 +726,13 @@ class ChatMemoryService:
             'recent_messages_count': len(fitted_recent_messages),
             'memory_sections_count': len(fitted_memory_sections),
             'memory_budget_tokens': remaining_for_memory,
+            'recent_turn_tokens': recent_used_tokens,
+            'summary_tokens': summary_tokens,
+            'snippet_tokens': snippet_tokens,
+            'requested_output_tokens': adaptive_output_budget['requested_output_tokens'],
+            'adjusted_output_tokens': adaptive_output_budget['adjusted_output_tokens'],
+            'output_tokens_reduced': adaptive_output_budget['output_tokens_reduced'],
+            'adapted_output_budget': adaptive_output_budget['adapted_output_budget'],
         }
         if estimated_input_tokens > input_budget_tokens:
             logger.warning(
@@ -655,15 +743,18 @@ class ChatMemoryService:
             )
         else:
             logger.info(
-                'Chat memory prompt budget for %s: input_budget=%d reserved_output=%d estimated_input=%d recent_messages=%d memory_sections=%d',
+                'Chat memory prompt budget for %s: input_budget=%d reserved_output=%d requested_output=%d estimated_input=%d recent_messages=%d memory_sections=%d adapted_output=%s',
                 conversation_id,
                 input_budget_tokens,
                 response_reserve_tokens,
+                requested_output_tokens,
                 estimated_input_tokens,
                 len(fitted_recent_messages),
                 len(fitted_memory_sections),
+                bool(adaptive_output_budget['adapted_output_budget']),
             )
 
         sanitized['messages'] = model_messages
+        sanitized['max_tokens'] = response_reserve_tokens
         sanitized['_prompt_budget'] = prompt_budget
         return sanitized, conversation_id

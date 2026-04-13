@@ -78,6 +78,10 @@ export const ChatInput: FC = () => {
         <Alert severity='info'>
           Context budget: using about {promptBudgetNotice.estimatedInputTokens} input tokens out of {promptBudgetNotice.inputBudgetTokens},
           keeping {promptBudgetNotice.recentMessagesCount} recent turns and {promptBudgetNotice.memorySectionsCount} memory section{promptBudgetNotice.memorySectionsCount === 1 ? '' : 's'}.
+          Summary: {promptBudgetNotice.summaryTokens} tok, memory snippets: {promptBudgetNotice.snippetTokens} tok, recent turns: {promptBudgetNotice.recentTurnTokens} tok.
+          {promptBudgetNotice.adaptedOutputBudget && (
+            <> Response budget was reduced from {promptBudgetNotice.requestedOutputTokens} to {promptBudgetNotice.adjustedOutputTokens} tokens to preserve more context.</>
+          )}
         </Alert>
       )}
       {requestHealthNotice && (

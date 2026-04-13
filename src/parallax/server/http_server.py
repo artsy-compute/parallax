@@ -176,6 +176,13 @@ class HTTPHandler:
                 'recent_messages_count': int(prompt_budget.get('recent_messages_count', 0) or 0),
                 'memory_sections_count': int(prompt_budget.get('memory_sections_count', 0) or 0),
                 'memory_budget_tokens': int(prompt_budget.get('memory_budget_tokens', 0) or 0),
+                'recent_turn_tokens': int(prompt_budget.get('recent_turn_tokens', 0) or 0),
+                'summary_tokens': int(prompt_budget.get('summary_tokens', 0) or 0),
+                'snippet_tokens': int(prompt_budget.get('snippet_tokens', 0) or 0),
+                'requested_output_tokens': int(prompt_budget.get('requested_output_tokens', 0) or 0),
+                'adjusted_output_tokens': int(prompt_budget.get('adjusted_output_tokens', 0) or 0),
+                'output_tokens_reduced': int(prompt_budget.get('output_tokens_reduced', 0) or 0),
+                'adapted_output_budget': int(prompt_budget.get('adapted_output_budget', 0) or 0),
             }
         if stream:
             request_info.token_queue = asyncio.Queue()
