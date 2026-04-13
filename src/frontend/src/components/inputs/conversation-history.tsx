@@ -98,10 +98,12 @@ export const ConversationHistory: FC = () => {
         {history.map((item) => {
           const fullLabel = cleanHistoryLabel(item.title || item.last_message || '') || 'Untitled conversation';
           const label = truncateHistoryLabel(fullLabel);
+          const summarySourceLabel = item.summary_source === 'model' ? 'Model summary' : item.summary_source === 'heuristic' ? 'Fallback summary' : 'No summary yet';
           const detailLines = [
             cleanHistoryLabel(item.summary),
             item.last_message && item.last_message !== item.summary ? cleanHistoryLabel(item.last_message) : '',
             `${item.message_count} messages`,
+            summarySourceLabel,
           ].filter(Boolean);
 
           return (

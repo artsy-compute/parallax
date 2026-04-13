@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
@@ -53,6 +54,7 @@ class RequestHandler:
         self.stubs = {}
         self.chat_memory = ChatMemoryService()
         self.active_requests: dict[str, ActiveRequestRecord] = {}
+        self.summary_tasks: dict[str, asyncio.Task] = {}
 
     def set_scheduler_manage(self, scheduler_manage):
         self.scheduler_manage = scheduler_manage
@@ -114,6 +116,64 @@ class RequestHandler:
         record.status = 'completed'
         record.updated_at = time.time()
         self.active_requests.pop(str(request_id), None)
+
+    def _schedule_summary_refresh(self, conversation_id: Optional[str], model_name: Optional[str]) -> None:
+        if not conversation_id or not self.chat_memory.model_summary_enabled:
+            return
+
+        existing = self.summary_tasks.get(conversation_id)
+        if existing is not None and not existing.done():
+            existing.cancel()
+
+        task = asyncio.create_task(self._refresh_conversation_summary(conversation_id, model_name))
+        self.summary_tasks[conversation_id] = task
+
+        def _cleanup(done_task: asyncio.Task):
+            self.summary_tasks.pop(conversation_id, None)
+            try:
+                done_task.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning('Conversation summary refresh failed for %s: %s', conversation_id, exc, exc_info=True)
+
+        task.add_done_callback(_cleanup)
+
+    async def _refresh_conversation_summary(self, conversation_id: str, model_name: Optional[str]) -> None:
+        await asyncio.sleep(0.25)
+        messages = self.chat_memory.build_summary_generation_messages(conversation_id)
+        if not messages:
+            self.chat_memory.store_summary(conversation_id, '', source='none')
+            return
+
+        summary_request = {
+            'model': model_name or 'default',
+            'messages': messages,
+            'stream': False,
+            'max_tokens': self.chat_memory.model_summary_max_tokens,
+            'sampling_params': {
+                'temperature': 0.1,
+                'top_k': 1,
+            },
+            '_disable_chat_memory': True,
+            '_summary_request': True,
+        }
+        summary_request_id = f'summary-{uuid.uuid4()}'
+        response = await self._forward_request(summary_request, summary_request_id, int(time.time()))
+        if isinstance(response, Response) and response.status_code == 200:
+            try:
+                payload = response.body.decode()
+            except Exception:
+                payload = ''
+            summary_text = self._extract_nonstream_content(payload)
+            cleaned_summary = self.chat_memory.store_summary(conversation_id, summary_text, source='model')
+            if cleaned_summary:
+                logger.info('Stored model-written summary for conversation %s', conversation_id)
+                return
+
+        fallback_summary = self.chat_memory.refresh_summary(conversation_id)
+        if fallback_summary:
+            logger.info('Stored heuristic fallback summary for conversation %s after model summary failure', conversation_id)
 
     async def _resolve_routing_table(self, request_id: str, received_ts: int) -> Optional[list[str]]:
         attempts = 0
@@ -251,6 +311,7 @@ class RequestHandler:
                                     self.chat_memory.save_assistant_message(
                                         conversation_id, assistant_text, str(request_id)
                                     )
+                                    self._schedule_summary_refresh(conversation_id, request_data.get('model'))
                                 self._complete_active_request(str(request_id))
                                 return
                             except Exception as e:
@@ -309,6 +370,7 @@ class RequestHandler:
                         self.chat_memory.save_assistant_message(
                             conversation_id, assistant_text, str(request_id)
                         )
+                        self._schedule_summary_refresh(conversation_id, request_data.get('model'))
                         self._append_request_output(str(request_id), assistant_text, emitted_any_bytes=True)
                     self._complete_active_request(str(request_id))
                     logger.debug(f"Non-stream response completed for {request_id}")

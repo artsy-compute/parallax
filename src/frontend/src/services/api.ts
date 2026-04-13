@@ -47,6 +47,7 @@ export interface ChatHistorySummary {
   readonly conversation_id: string;
   readonly title: string;
   readonly summary: string;
+  readonly summary_source?: 'none' | 'model' | 'heuristic';
   readonly message_count: number;
   readonly created_at: number;
   readonly updated_at: number;
@@ -63,6 +64,7 @@ export interface ChatHistoryMessage {
 export interface ChatHistoryDetail {
   readonly conversation_id: string;
   readonly summary_text: string;
+  readonly summary_source?: 'none' | 'model' | 'heuristic';
   readonly created_at?: number;
   readonly updated_at?: number;
   readonly messages: readonly ChatHistoryMessage[];

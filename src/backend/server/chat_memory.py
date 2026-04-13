@@ -42,6 +42,9 @@ class ChatMemoryService:
         self.prompt_overhead_tokens = int(os.environ.get('PARALLAX_CHAT_MEMORY_PROMPT_OVERHEAD_TOKENS', '96'))
         self.max_memory_fraction = float(os.environ.get('PARALLAX_CHAT_MEMORY_MAX_MEMORY_FRACTION', '0.35'))
         self.min_recent_message_count = int(os.environ.get('PARALLAX_CHAT_MEMORY_MIN_RECENT_MESSAGES', '2'))
+        self.model_summary_enabled = os.environ.get('PARALLAX_CHAT_MEMORY_MODEL_SUMMARY', '1').lower() not in {'0', 'false', 'no'}
+        self.model_summary_max_tokens = int(os.environ.get('PARALLAX_CHAT_MEMORY_MODEL_SUMMARY_MAX_TOKENS', '256'))
+        self.summary_source_char_budget = int(os.environ.get('PARALLAX_CHAT_MEMORY_SUMMARY_SOURCE_CHARS', '6000'))
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
@@ -57,6 +60,7 @@ class ChatMemoryService:
                 CREATE TABLE IF NOT EXISTS conversations (
                     conversation_id TEXT PRIMARY KEY,
                     summary_text TEXT NOT NULL DEFAULT '',
+                    summary_source TEXT NOT NULL DEFAULT 'none',
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
                 );
@@ -74,6 +78,10 @@ class ChatMemoryService:
                     ON messages(conversation_id, created_at, id);
                 """
             )
+            columns = {row['name'] for row in conn.execute("PRAGMA table_info(conversations)").fetchall()}
+            if 'summary_source' not in columns:
+                conn.execute("ALTER TABLE conversations ADD COLUMN summary_source TEXT NOT NULL DEFAULT 'none'")
+            conn.commit()
 
     def _tokenize(self, text: str) -> List[str]:
         return [tok.lower() for tok in _WORD_RE.findall(text or '') if len(tok) >= 3]
@@ -218,8 +226,8 @@ class ChatMemoryService:
         with self._lock, self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO conversations (conversation_id, summary_text, created_at, updated_at)
-                VALUES (?, '', ?, ?)
+                INSERT INTO conversations (conversation_id, summary_text, summary_source, created_at, updated_at)
+                VALUES (?, '', 'none', ?, ?)
                 ON CONFLICT(conversation_id) DO UPDATE SET updated_at=excluded.updated_at
                 """,
                 (conversation_id, now, now),
@@ -278,7 +286,6 @@ class ChatMemoryService:
                 (time.time(), conversation_id),
             )
             conn.commit()
-        self.refresh_summary(conversation_id)
 
     def _load_messages(self, conversation_id: str) -> List[sqlite3.Row]:
         with self._lock, self._connect() as conn:
@@ -293,30 +300,79 @@ class ChatMemoryService:
             )
             return list(cur.fetchall())
 
-    def refresh_summary(self, conversation_id: str) -> str:
+    def _older_summary_rows(self, conversation_id: str) -> List[sqlite3.Row]:
         rows = self._load_messages(conversation_id)
         older_rows = rows[:-self.recent_message_count] if len(rows) > self.recent_message_count else []
-        if not older_rows:
-            summary = ''
-        else:
-            selected = older_rows[-self.summary_message_limit :]
-            lines = []
-            current_chars = 0
-            for row in selected:
-                prefix = 'User' if row['role'] == 'user' else 'Assistant' if row['role'] == 'assistant' else 'System'
-                line = f'- {prefix}: {self._compact_text(row["content"], 200)}'
-                if current_chars + len(line) + 1 > self.summary_char_budget:
-                    break
-                lines.append(line)
-                current_chars += len(line) + 1
-            summary = 'Approximate summary of earlier conversation:\n' + '\n'.join(lines)
+        return older_rows[-self.summary_message_limit :]
+
+    def _build_heuristic_summary_from_rows(self, rows: List[sqlite3.Row]) -> str:
+        if not rows:
+            return ''
+        lines = []
+        current_chars = 0
+        for row in rows:
+            prefix = 'User' if row['role'] == 'user' else 'Assistant' if row['role'] == 'assistant' else 'System'
+            line = f'- {prefix}: {self._compact_text(row["content"], 200)}'
+            if current_chars + len(line) + 1 > self.summary_char_budget:
+                break
+            lines.append(line)
+            current_chars += len(line) + 1
+        if not lines:
+            return ''
+        return 'Approximate summary of earlier conversation:\n' + '\n'.join(lines)
+
+    def store_summary(self, conversation_id: str, summary: str, source: str = 'heuristic') -> str:
+        cleaned = self._clean_history_text(summary or '', self.summary_char_budget)
         with self._lock, self._connect() as conn:
             conn.execute(
-                'UPDATE conversations SET summary_text=?, updated_at=? WHERE conversation_id=?',
-                (summary, time.time(), conversation_id),
+                'UPDATE conversations SET summary_text=?, summary_source=?, updated_at=? WHERE conversation_id=?',
+                (cleaned, 'model' if source == 'model' else 'heuristic', time.time(), conversation_id),
             )
             conn.commit()
-        return summary
+        return cleaned
+
+    def refresh_summary(self, conversation_id: str) -> str:
+        summary = self._build_heuristic_summary_from_rows(self._older_summary_rows(conversation_id))
+        return self.store_summary(conversation_id, summary, source='heuristic' if summary else 'none')
+
+    def build_summary_generation_messages(self, conversation_id: str) -> Optional[List[Dict[str, str]]]:
+        rows = self._older_summary_rows(conversation_id)
+        if not rows:
+            return None
+
+        transcript_lines = []
+        current_chars = 0
+        for row in rows:
+            prefix = 'User' if row['role'] == 'user' else 'Assistant' if row['role'] == 'assistant' else 'System'
+            line = f'{prefix}: {self._compact_text(row["content"], 500)}'
+            if current_chars + len(line) + 1 > self.summary_source_char_budget:
+                break
+            transcript_lines.append(line)
+            current_chars += len(line) + 1
+
+        if not transcript_lines:
+            return None
+
+        existing_summary = self._load_summary(conversation_id)
+        prompt_parts = []
+        if existing_summary:
+            prompt_parts.append('Existing summary (update or replace it if needed):\n' + existing_summary)
+        prompt_parts.append('Conversation excerpt to summarize:\n' + '\n'.join(transcript_lines))
+
+        return [
+            {
+                'role': 'system',
+                'content': (
+                    'Write a compact working-memory summary of earlier conversation turns. '
+                    'Preserve stable user preferences, facts, constraints, unresolved tasks, and decisions. '
+                    'Use concise bullet points. Do not mention every turn. Do not include XML or markdown headings.'
+                ),
+            },
+            {
+                'role': 'user',
+                'content': '\n\n'.join(prompt_parts),
+            },
+        ]
 
     def _load_summary(self, conversation_id: str) -> str:
         with self._lock, self._connect() as conn:
@@ -326,6 +382,15 @@ class ChatMemoryService:
             )
             row = cur.fetchone()
             return row['summary_text'] if row and row['summary_text'] else ''
+
+    def _load_summary_source(self, conversation_id: str) -> str:
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                'SELECT summary_source FROM conversations WHERE conversation_id=?',
+                (conversation_id,),
+            )
+            row = cur.fetchone()
+            return row['summary_source'] if row and row['summary_source'] else 'none'
 
     def _retrieve_relevant_snippets(self, conversation_id: str, query: str) -> List[str]:
         query_tokens = set(self._tokenize(query))
@@ -367,7 +432,7 @@ class ChatMemoryService:
         with self._lock, self._connect() as conn:
             cur = conn.execute(
                 """
-                SELECT c.conversation_id, c.summary_text, c.created_at, c.updated_at,
+                SELECT c.conversation_id, c.summary_text, c.summary_source, c.created_at, c.updated_at,
                        COUNT(m.id) AS message_count,
                        COALESCE(
                          (
@@ -380,7 +445,7 @@ class ChatMemoryService:
                        ) AS last_message
                 FROM conversations c
                 LEFT JOIN messages m ON m.conversation_id = c.conversation_id
-                GROUP BY c.conversation_id, c.summary_text, c.created_at, c.updated_at
+                GROUP BY c.conversation_id, c.summary_text, c.summary_source, c.created_at, c.updated_at
                 ORDER BY c.updated_at DESC
                 LIMIT ?
                 """,
@@ -412,6 +477,7 @@ class ChatMemoryService:
                     'conversation_id': row['conversation_id'],
                     'title': title,
                     'summary': summary,
+                    'summary_source': row['summary_source'] or 'none',
                     'message_count': int(row['message_count'] or 0),
                     'created_at': float(row['created_at']),
                     'updated_at': float(row['updated_at']),
@@ -423,12 +489,12 @@ class ChatMemoryService:
     def get_conversation(self, conversation_id: str) -> Dict:
         with self._lock, self._connect() as conn:
             cur = conn.execute(
-                'SELECT conversation_id, summary_text, created_at, updated_at FROM conversations WHERE conversation_id=?',
+                'SELECT conversation_id, summary_text, summary_source, created_at, updated_at FROM conversations WHERE conversation_id=?',
                 (conversation_id,),
             )
             conversation = cur.fetchone()
             if conversation is None:
-                return {'conversation_id': conversation_id, 'messages': [], 'summary_text': ''}
+                return {'conversation_id': conversation_id, 'messages': [], 'summary_text': '', 'summary_source': 'none'}
             cur = conn.execute(
                 """
                 SELECT client_message_id, role, content, created_at
@@ -442,6 +508,7 @@ class ChatMemoryService:
         return {
             'conversation_id': conversation['conversation_id'],
             'summary_text': conversation['summary_text'] or '',
+            'summary_source': conversation['summary_source'] or 'none',
             'created_at': float(conversation['created_at']),
             'updated_at': float(conversation['updated_at']),
             'messages': [
@@ -469,10 +536,12 @@ class ChatMemoryService:
         return True
 
     def prepare_request(self, request_data: Dict) -> Tuple[Dict, Optional[str]]:
-        conversation_id = request_data.get('conversation_id')
-        messages = request_data.get('messages') or []
         sanitized = dict(request_data)
-        if not conversation_id or not isinstance(messages, list):
+        disable_chat_memory = bool(sanitized.pop('_disable_chat_memory', False))
+        sanitized.pop('_summary_request', None)
+        conversation_id = sanitized.get('conversation_id')
+        messages = sanitized.get('messages') or []
+        if disable_chat_memory or not conversation_id or not isinstance(messages, list):
             sanitized['messages'] = [
                 {'role': m.get('role'), 'content': m.get('content')}
                 for m in messages
