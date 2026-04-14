@@ -187,14 +187,14 @@ After updating the firewall/security group settings to allow these ports, restar
 
 > Q: When running on macOS, I encounter the error: `error sending packet on iface address No route to host (os error 65) address=192.168.xxx.xxx`. What does this mean and how can I fix it?
 
-A: On macOS, you need to allow your terminal or IDE (such as Terminal, iTerm2, VS Code, Cursor, etc.) access to the local network in order for Parallax to work correctly. If the application prompts you for network access the first time you run Parallax, click "Allow." If you have already denied access, follow these steps to enable it:
+A: On macOS, you need to allow the process that launches Parallax to access the local network. This is commonly your terminal or IDE (such as Terminal, iTerm2, VS Code, Cursor, etc.), but if you start a node remotely over SSH it may instead run under `sshd-session`. If macOS prompts you with `Allow "sshd-session" to find devices on local networks?`, click `Allow`. If you have already denied access, follow these steps to enable it:
 
 1. Open System Settings from the Apple menu.
 2. Click on Privacy & Security in the sidebar.
 3. Click on Local Network.
-4. For each app listed, turn the ability to access your local network on or off using the toggle switch.
+4. For each relevant app or service listed, turn the ability to access your local network on using the toggle switch.
 
-This will ensure Parallax has the proper network permissions for local communication.
+This will ensure Parallax has the proper network permissions for local communication. If a node can join successfully from a local interactive shell but fails when started via Node Management over SSH, check whether `sshd-session` has Local Network permission on the remote Mac.
 
 > Q: When running the scheduler on Windows, nodes on other PCs cannot detect the scheduler ID over the local network. Why can't other machines join the cluster?
 

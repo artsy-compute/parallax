@@ -107,6 +107,34 @@ export interface NodeInfo {
   readonly diskUsedGb?: number;
   readonly diskTotalGb?: number;
   readonly diskUsedPercent?: number;
+  readonly lifecycle?: {
+    readonly summary?: string;
+    readonly management?: {
+      readonly mode?: string;
+      readonly last_action_state?: string;
+      readonly last_action_message?: string;
+      readonly checked_at?: number;
+    };
+    readonly process?: {
+      readonly state?: string;
+      readonly pid?: string;
+      readonly source?: string;
+      readonly message?: string;
+      readonly checked_at?: number;
+    };
+    readonly scheduler?: {
+      readonly membership?: string;
+      readonly node_id?: string | null;
+      readonly status?: string | null;
+      readonly joined?: boolean;
+    };
+    readonly serving?: {
+      readonly state?: string;
+      readonly start_layer?: number | null;
+      readonly end_layer?: number | null;
+      readonly total_layers?: number | null;
+    };
+  };
   readonly inventoryTarget?: string;
   readonly configuredOnly?: boolean;
 }
@@ -280,6 +308,7 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
               disk_used_gb,
               disk_total_gb,
               disk_used_percent,
+              lifecycle,
             }: any) => ({
               id: node_id,
               hostname: hostname || '',
@@ -298,6 +327,7 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
               diskUsedGb: typeof disk_used_gb === 'number' ? disk_used_gb : undefined,
               diskTotalGb: typeof disk_total_gb === 'number' ? disk_total_gb : undefined,
               diskUsedPercent: typeof disk_used_percent === 'number' ? disk_used_percent : undefined,
+              lifecycle,
             }),
           );
 

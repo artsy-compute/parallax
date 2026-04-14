@@ -150,6 +150,34 @@ export interface NodeOverviewHost {
     readonly message?: string;
     readonly checked_at?: number;
   };
+  readonly lifecycle?: {
+    readonly summary?: string;
+    readonly management?: {
+      readonly mode?: string;
+      readonly last_action_state?: string;
+      readonly last_action_message?: string;
+      readonly checked_at?: number;
+    };
+    readonly process?: {
+      readonly state?: string;
+      readonly pid?: string;
+      readonly source?: string;
+      readonly message?: string;
+      readonly checked_at?: number;
+    };
+    readonly scheduler?: {
+      readonly membership?: string;
+      readonly node_id?: string | null;
+      readonly status?: string | null;
+      readonly joined?: boolean;
+    };
+    readonly serving?: {
+      readonly state?: string;
+      readonly start_layer?: number | null;
+      readonly end_layer?: number | null;
+      readonly total_layers?: number | null;
+    };
+  };
   readonly actions: {
     readonly can_ping: boolean;
     readonly can_start: boolean;

@@ -98,21 +98,52 @@ const formatUsageStat = (used?: number | null, total?: number | null, percent?: 
 
 const HostRow = ({ host, onPing, onLogs, onStart, onStop, onRestart, pingState, actionState }: { host: NodeOverviewHost; onPing: (sshTarget: string) => Promise<void>; onLogs: (sshTarget: string) => Promise<void>; onStart: (sshTarget: string) => Promise<void>; onStop: (sshTarget: string) => Promise<void>; onRestart: (sshTarget: string) => Promise<void>; pingState?: string; actionState?: string }) => {
   const runtime = host.runtime || {};
+  const lifecycle = host.lifecycle || {};
+  const lifecycleProcess = lifecycle.process || {};
+  const lifecycleScheduler = lifecycle.scheduler || {};
+  const lifecycleServing = lifecycle.serving || {};
+  const lifecycleManagement = lifecycle.management || {};
   const hostProcess = host.host_process || { running: host.joined, confirmed_running: host.joined, source: host.joined ? 'joined' : 'unknown', message: host.joined ? 'Node is joined to the scheduler' : 'Remote process status unavailable' };
-  const layerText = typeof runtime.start_layer === 'number' || typeof runtime.end_layer === 'number' || typeof runtime.total_layers === 'number'
-    ? `[${typeof runtime.start_layer === 'number' ? runtime.start_layer : '?'}, ${typeof runtime.end_layer === 'number' ? runtime.end_layer : '?'})${typeof runtime.total_layers === 'number' ? ` of ${runtime.total_layers}` : ''}`
+  const layerStart = typeof lifecycleServing.start_layer === 'number' ? lifecycleServing.start_layer : runtime.start_layer;
+  const layerEnd = typeof lifecycleServing.end_layer === 'number' ? lifecycleServing.end_layer : runtime.end_layer;
+  const totalLayers = typeof lifecycleServing.total_layers === 'number' ? lifecycleServing.total_layers : runtime.total_layers;
+  const layerText = typeof layerStart === 'number' || typeof layerEnd === 'number' || typeof totalLayers === 'number'
+    ? `[${typeof layerStart === 'number' ? layerStart : '?'}, ${typeof layerEnd === 'number' ? layerEnd : '?'})${typeof totalLayers === 'number' ? ` of ${totalLayers}` : ''}`
     : 'Not assigned';
-  const processChip = host.joined
-    ? { label: 'Process joined', color: 'success' as const }
-    : hostProcess.running
-      ? (hostProcess.confirmed_running
+  const processState = String(lifecycleProcess.state || '');
+  const schedulerMembership = String(lifecycleScheduler.membership || '');
+  const servingState = String(lifecycleServing.state || '');
+  const processChip = schedulerMembership === 'joined' && servingState === 'active'
+    ? { label: 'Serving', color: 'success' as const }
+    : schedulerMembership === 'joined'
+      ? { label: 'Joined', color: 'success' as const }
+      : processState === 'starting' || schedulerMembership === 'joining'
+        ? { label: 'Joining', color: 'info' as const }
+        : processState === 'running'
           ? { label: 'Process running', color: 'warning' as const }
-          : { label: 'Start pending', color: 'info' as const })
-      : { label: 'Process stopped', color: 'default' as const };
+          : processState === 'unknown'
+            ? { label: 'Process unknown', color: 'warning' as const }
+            : { label: 'Process stopped', color: 'default' as const };
+  const schedulerChip = schedulerMembership === 'joined'
+    ? { label: 'Scheduler joined', color: 'success' as const }
+    : schedulerMembership === 'joining'
+      ? { label: 'Scheduler joining', color: 'info' as const }
+      : schedulerMembership === 'leaving'
+        ? { label: 'Scheduler leaving', color: 'warning' as const }
+        : { label: 'Scheduler not joined', color: 'warning' as const };
   const system = host.system || {};
+  const isActionRunning = !!actionState?.startsWith('running:');
+  const canPing = !!host.ssh_target && host.actions.can_ping;
+  const lifecycleAllowsStart = processState === 'stopped' || processState === 'unknown';
+  const lifecycleAllowsStop = processState === 'running' || processState === 'starting' || schedulerMembership === 'joined' || schedulerMembership === 'joining';
+  const canStart = !!host.ssh_target && !isActionRunning && (host.actions.can_start || lifecycleAllowsStart);
+  const canStop = !!host.ssh_target && !isActionRunning && (host.actions.can_stop || lifecycleAllowsStop);
+  const canRestart = !!host.ssh_target && !isActionRunning && (host.actions.can_restart || lifecycleAllowsStop);
   const details = [
     { label: 'SSH', value: host.ssh_target || 'Unavailable' },
     { label: 'Host', value: runtime.hostname || host.hostname_hint || 'Unknown' },
+    { label: 'Lifecycle', value: String(lifecycle.summary || 'Unknown') },
+    { label: 'Management', value: String(lifecycleManagement.mode || 'unknown') },
     { label: 'Layers', value: layerText },
     { label: 'GPU', value: `${runtime.gpu_num ? `${runtime.gpu_num}x ` : ''}${runtime.gpu_name || 'Unknown'}${runtime.gpu_memory ? ` ${runtime.gpu_memory}GB` : ''}` },
     { label: 'CPU', value: typeof system.cpu_percent === 'number' ? `${system.cpu_percent.toFixed(0)}%` : 'Unknown' },
@@ -156,14 +187,14 @@ const HostRow = ({ host, onPing, onLogs, onStart, onStop, onRestart, pingState, 
                 <HardwareIcon gpuName={runtime.gpu_name} />
               </Box>
               <Typography variant='body1' sx={{ fontWeight: 600 }}>{host.display_name}</Typography>
-              <StatusChip label={host.joined ? 'Joined' : 'Not joined'} color={host.joined ? 'success' : 'warning'} />
               <StatusChip label={processChip.label} color={processChip.color} />
+              <StatusChip label={schedulerChip.label} color={schedulerChip.color} />
               <StatusChip label={host.inventory_source === 'configured' ? 'Configured host' : 'Live node'} color={host.inventory_source === 'configured' ? 'info' : 'default'} />
               {runtime.status && <StatusChip label={`Runtime: ${runtime.status}`} color={runtime.status === 'available' ? 'success' : 'default'} />}
             </Stack>
             <Typography variant='caption' color='text.secondary'>
-              {hostProcess.message || (hostProcess.running ? 'Node process detected on remote host' : 'No remote node process detected')}
-              {hostProcess.pid ? ` (pid ${hostProcess.pid})` : ''}
+              {String(lifecycle.summary || lifecycleProcess.message || hostProcess.message || (hostProcess.running ? 'Node process detected on remote host' : 'No remote node process detected'))}
+              {(lifecycleProcess.pid || hostProcess.pid) ? ` (pid ${String(lifecycleProcess.pid || hostProcess.pid)})` : ''}
             </Typography>
             <Box
               sx={{
@@ -188,7 +219,7 @@ const HostRow = ({ host, onPing, onLogs, onStart, onStop, onRestart, pingState, 
                 <IconButton
                   size='small'
                   color='primary'
-                  disabled={!host.actions.can_ping || pingState === 'running' || !!actionState?.startsWith('running:')}
+                  disabled={!canPing || pingState === 'running' || isActionRunning}
                   onClick={() => onPing(host.ssh_target)}
                 >
                   <IconPlugConnected size={16} />
@@ -196,13 +227,13 @@ const HostRow = ({ host, onPing, onLogs, onStart, onStop, onRestart, pingState, 
               </span>
             </Tooltip>
             <Tooltip title={actionState === 'running:start' ? 'Starting node' : 'Start node'}>
-              <span><IconButton size='small' color='success' disabled={!host.actions.can_start || !!actionState?.startsWith('running:')} onClick={() => onStart(host.ssh_target)}><IconPlayerPlay size={16} /></IconButton></span>
+              <span><IconButton size='small' color='success' disabled={!canStart} onClick={() => onStart(host.ssh_target)}><IconPlayerPlay size={16} /></IconButton></span>
             </Tooltip>
             <Tooltip title={actionState === 'running:stop' ? 'Stopping node' : 'Stop node'}>
-              <span><IconButton size='small' color='warning' disabled={!host.actions.can_stop || !!actionState?.startsWith('running:')} onClick={() => onStop(host.ssh_target)}><IconSquareFilled size={14} /></IconButton></span>
+              <span><IconButton size='small' color='warning' disabled={!canStop} onClick={() => onStop(host.ssh_target)}><IconSquareFilled size={14} /></IconButton></span>
             </Tooltip>
             <Tooltip title={actionState === 'running:restart' ? 'Restarting node' : 'Restart node'}>
-              <span><IconButton size='small' color='secondary' disabled={!host.actions.can_restart || !!actionState?.startsWith('running:')} onClick={() => onRestart(host.ssh_target)}><IconRotateClockwise2 size={16} /></IconButton></span>
+              <span><IconButton size='small' color='secondary' disabled={!canRestart} onClick={() => onRestart(host.ssh_target)}><IconRotateClockwise2 size={16} /></IconButton></span>
             </Tooltip>
             <Tooltip title='Open remote logs'>
               <span><IconButton size='small' disabled={!host.ssh_target} onClick={() => onLogs(host.ssh_target)}><IconFileText size={16} /></IconButton></span>
@@ -274,6 +305,36 @@ export default function PageNodes() {
                 can_stop: false,
                 can_restart: false,
               },
+              lifecycle: {
+                ...host.lifecycle,
+                summary: 'Stopped',
+                management: {
+                  ...host.lifecycle?.management,
+                  last_action_state: 'action',
+                  last_action_message: 'Node stopped',
+                  checked_at: Date.now() / 1000,
+                },
+                process: {
+                  ...host.lifecycle?.process,
+                  state: 'stopped',
+                  pid: '',
+                  source: 'action',
+                  message: 'Node stopped',
+                  checked_at: Date.now() / 1000,
+                },
+                scheduler: {
+                  ...host.lifecycle?.scheduler,
+                  membership: 'leaving',
+                  joined: false,
+                  status: 'waiting',
+                },
+                serving: {
+                  ...host.lifecycle?.serving,
+                  state: 'unassigned',
+                  start_layer: null,
+                  end_layer: null,
+                },
+              },
             };
           }
           if (action === 'start' || action === 'restart') {
@@ -292,6 +353,32 @@ export default function PageNodes() {
                 can_start: false,
                 can_stop: false,
                 can_restart: false,
+              },
+              lifecycle: {
+                ...host.lifecycle,
+                summary: 'Joining scheduler',
+                management: {
+                  ...host.lifecycle?.management,
+                  last_action_state: 'action_pending',
+                  last_action_message: action === 'start' ? 'Node start requested' : 'Node restarted',
+                  checked_at: Date.now() / 1000,
+                },
+                process: {
+                  ...host.lifecycle?.process,
+                  state: 'starting',
+                  source: 'action_pending',
+                  message: action === 'start' ? 'Node start requested' : 'Node restarted',
+                  checked_at: Date.now() / 1000,
+                },
+                scheduler: {
+                  ...host.lifecycle?.scheduler,
+                  membership: 'joining',
+                  joined: false,
+                },
+                serving: {
+                  ...host.lifecycle?.serving,
+                  state: 'unassigned',
+                },
               },
             };
           }

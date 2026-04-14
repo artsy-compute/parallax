@@ -3,6 +3,7 @@ import subprocess
 import time
 from typing import Any
 
+from backend.server.node_lifecycle import build_node_lifecycle
 from backend.server.static_config import get_node_join_command
 from parallax.cli import PUBLIC_INITIAL_PEERS, PUBLIC_RELAY_SERVERS
 from parallax_utils.logging_config import get_logger
@@ -193,6 +194,16 @@ exit 0
                     ssh_target,
                     str(item.get('parallax_path') or ''),
                 )
+            lifecycle = build_node_lifecycle(
+                management_mode='ssh_managed' if can_remote_manage else ('unmanaged' if not ssh_target else 'manual'),
+                process_status=process_status,
+                scheduler_joined=bool(live_match),
+                scheduler_node_id=live_match.get('node_id') if live_match else None,
+                runtime_status=live_match.get('status') if live_match else None,
+                serving_start_layer=live_match.get('start_layer') if live_match else None,
+                serving_end_layer=live_match.get('end_layer') if live_match else None,
+                serving_total_layers=live_match.get('total_layers') if live_match else None,
+            )
             hosts.append({
                 'id': str(item.get('ssh_target') or hostname_hint or item.get('line_number') or len(hosts)),
                 'display_name': str(item.get('ssh_target') or item.get('hostname_hint') or 'Configured host'),
@@ -226,6 +237,7 @@ exit 0
                     'disk_used_percent': live_match.get('disk_used_percent') if live_match else None,
                 },
                 'host_process': process_status,
+                'lifecycle': lifecycle,
                 'actions': {
                     'can_ping': bool(item.get('ssh_target')),
                     'can_start': can_remote_manage and not bool(process_status.get('running')),
@@ -239,6 +251,24 @@ exit 0
             node_id = str(node.get('node_id') or '')
             if node_id and node_id in matched_live_node_ids:
                 continue
+            process_status = {
+                'running': True,
+                'confirmed_running': True,
+                'pid': '',
+                'source': 'joined',
+                'message': 'Node is joined to the scheduler',
+                'checked_at': time.time(),
+            }
+            lifecycle = build_node_lifecycle(
+                management_mode='unmanaged',
+                process_status=process_status,
+                scheduler_joined=True,
+                scheduler_node_id=node.get('node_id'),
+                runtime_status=node.get('status'),
+                serving_start_layer=node.get('start_layer'),
+                serving_end_layer=node.get('end_layer'),
+                serving_total_layers=node.get('total_layers'),
+            )
             hosts.append({
                 'id': node_id or str(len(hosts)),
                 'display_name': str(node.get('hostname') or node_id or 'Live node'),
@@ -270,14 +300,8 @@ exit 0
                     'disk_total_gb': node.get('disk_total_gb'),
                     'disk_used_percent': node.get('disk_used_percent'),
                 },
-                'host_process': {
-                    'running': True,
-                    'confirmed_running': True,
-                    'pid': '',
-                    'source': 'joined',
-                    'message': 'Node is joined to the scheduler',
-                    'checked_at': time.time(),
-                },
+                'host_process': process_status,
+                'lifecycle': lifecycle,
                 'actions': {
                     'can_ping': False,
                     'can_start': False,

@@ -7,6 +7,7 @@ from typing import List
 from lattica import Lattica
 
 from backend.server.constants import NODE_STATUS_AVAILABLE, NODE_STATUS_WAITING
+from backend.server.node_lifecycle import build_node_lifecycle
 from backend.server.rpc_connection_handler import RPCConnectionHandler
 from backend.server.static_config import get_model_info, get_node_join_command
 from parallax.cli import PUBLIC_INITIAL_PEERS, PUBLIC_RELAY_SERVERS
@@ -413,6 +414,14 @@ class SchedulerManage:
         return [self.build_node_info(node) for node in self.scheduler.node_manager.nodes]
 
     def build_node_info(self, node):
+        process_status = {
+            "running": True,
+            "confirmed_running": True,
+            "pid": "",
+            "source": "heartbeat",
+            "message": "Node is joined to the scheduler",
+            "checked_at": time.time(),
+        }
         return {
             "node_id": node.node_id,
             "hostname": node.hardware.hostname,
@@ -431,6 +440,16 @@ class SchedulerManage:
             "disk_used_gb": node.disk_used_gb,
             "disk_total_gb": node.disk_total_gb,
             "disk_used_percent": node.disk_used_percent,
+            "lifecycle": build_node_lifecycle(
+                management_mode="scheduler_observed",
+                process_status=process_status,
+                scheduler_joined=True,
+                scheduler_node_id=node.node_id,
+                runtime_status=NODE_STATUS_AVAILABLE if node.is_active else NODE_STATUS_WAITING,
+                serving_start_layer=node.start_layer,
+                serving_end_layer=node.end_layer,
+                serving_total_layers=node.model_info.num_layers if node.model_info is not None else None,
+            ),
         }
 
     def _start_scheduler(self, model_name, init_nodes_num):
