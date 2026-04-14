@@ -101,6 +101,34 @@ const STATUS_ICON_MAP: Record<NodeStatus, typeof IconCheck> = {
   failed: IconX,
 };
 
+
+const normalizeNodeHostname = (value: string) => {
+  let text = (value || '').trim().toLowerCase();
+  if (!text) {
+    return '';
+  }
+  if (text.includes('@')) {
+    text = text.split('@', 2)[1] || text;
+  }
+  if (text.startsWith('[')) {
+    const closing = text.indexOf(']');
+    if (closing > 0) {
+      text = text.slice(1, closing);
+    }
+  }
+  const colonCount = (text.match(/:/g) || []).length;
+  if (colonCount === 1) {
+    const [host, port] = text.split(':');
+    if (/^\d+$/.test(port || '')) {
+      text = host || text;
+    }
+  }
+  if (text.includes('.')) {
+    text = text.split('.')[0] || text;
+  }
+  return text.trim();
+};
+
 const DashRoot = styled(Box)(({ theme }) => {
   const { spacing } = theme;
   return {
@@ -277,7 +305,22 @@ export const NodeList: FC<NodeListProps & StackProps> = ({ variant = 'list', ...
   ] = useCluster();
   const [{ status: chatStatus }] = useChat();
 
-  const { length: nodesNumber } = nodeInfoList;
+  const configuredHostnames = new Set(
+    configuredNodeHosts
+      .map((host) => normalizeNodeHostname(host.hostnameHint || host.sshTarget || ''))
+      .filter(Boolean),
+  );
+  const visibleLiveNodes = nodeInfoList.filter((node) => {
+    const hostname = normalizeNodeHostname(node.hostname || '');
+    if (!hostname) {
+      return true;
+    }
+    return !configuredHostnames.has(hostname) || !configuredNodeHosts.some((host) => {
+      const hostName = normalizeNodeHostname(host.hostnameHint || host.sshTarget || '');
+      return hostName === hostname && !host.joined;
+    });
+  });
+  const { length: nodesNumber } = visibleLiveNodes;
   const configuredWaitingNodes = configuredNodeHosts
     .filter((host) => !host.joined)
     .map<NodeInfo>((host, index) => ({
@@ -303,7 +346,7 @@ export const NodeList: FC<NodeListProps & StackProps> = ({ variant = 'list', ...
   return (
     <NodeListRoot {...rest}>
       <List variant={variant}>
-        {nodeInfoList.map((node, index) => [
+        {visibleLiveNodes.map((node, index) => [
           renderDash(`${node.id}-dash`),
           <Node key={node.id} variant={variant} node={node} />,
 

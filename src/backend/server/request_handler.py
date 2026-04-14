@@ -334,7 +334,22 @@ class RequestHandler:
                                     self._mark_request_routed(str(request_id), fresh_routing)
                                     continue
                                 self._fail_active_request(str(request_id), e)
-                                raise
+                                logger.warning(
+                                    'Ending streamed request %s after forwarding error: %s',
+                                    request_id,
+                                    e,
+                                )
+                                error_chunk = {
+                                    'id': str(request_id),
+                                    'object': 'chat.completion.error',
+                                    'created': time.time(),
+                                    'error': {
+                                        'message': 'The active node disconnected while serving this request. You can retry from the current conversation.',
+                                        'code': 'peer_disconnected',
+                                    },
+                                }
+                                yield f"data: {json.dumps(error_chunk, separators=(',', ':'))}\n\n".encode('utf-8')
+                                return
                             finally:
                                 if last_chunk is not None:
                                     tps, ttft, input_tokens, output_tokens = get_request_metrics(

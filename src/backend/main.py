@@ -306,6 +306,52 @@ async def nodes_logs(raw_request: Request) -> JSONResponse:
     )
 
 
+
+@app.post("/nodes/start")
+async def nodes_start(raw_request: Request) -> JSONResponse:
+    if node_management is None:
+        return JSONResponse(
+            content={"type": "node_start", "data": {"ok": False, "message": "Node management is not initialized"}},
+            status_code=503,
+        )
+    request_data = await raw_request.json()
+    result = node_management.start_host(str(request_data.get("ssh_target") or ""))
+    return JSONResponse(
+        content={"type": "node_start", "data": result},
+        status_code=200 if result.get("ok") else 409,
+    )
+
+
+@app.post("/nodes/stop")
+async def nodes_stop(raw_request: Request) -> JSONResponse:
+    if node_management is None:
+        return JSONResponse(
+            content={"type": "node_stop", "data": {"ok": False, "message": "Node management is not initialized"}},
+            status_code=503,
+        )
+    request_data = await raw_request.json()
+    result = node_management.stop_host(str(request_data.get("ssh_target") or ""))
+    return JSONResponse(
+        content={"type": "node_stop", "data": result},
+        status_code=200 if result.get("ok") else 409,
+    )
+
+
+@app.post("/nodes/restart")
+async def nodes_restart(raw_request: Request) -> JSONResponse:
+    if node_management is None:
+        return JSONResponse(
+            content={"type": "node_restart", "data": {"ok": False, "message": "Node management is not initialized"}},
+            status_code=503,
+        )
+    request_data = await raw_request.json()
+    result = node_management.restart_host(str(request_data.get("ssh_target") or ""))
+    return JSONResponse(
+        content={"type": "node_restart", "data": result},
+        status_code=200 if result.get("ok") else 409,
+    )
+
+
 @app.post("/cluster/rebalance")
 async def cluster_rebalance() -> JSONResponse:
     if scheduler_manage is None:

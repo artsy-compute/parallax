@@ -6,14 +6,14 @@ import {
   IconBrandApple,
   IconCpu,
   IconFileText,
-  IconPlayerPause,
+  IconSquareFilled,
   IconPlayerPlay,
   IconPlugConnected,
   IconRefresh,
   IconRotateClockwise2,
 } from '@tabler/icons-react';
 import { DrawerLayout } from '../components/common';
-import { getNodeLogs, getNodesOverview, pingNodeHost, type NodeOverviewHost, type NodesOverview } from '../services/api';
+import { getNodeLogs, getNodesOverview, pingNodeHost, restartNodeHost, startNodeHost, stopNodeHost, type NodeOverviewHost, type NodesOverview } from '../services/api';
 
 const SummaryCard = ({ label, value }: { label: string; value: number }) => (
   <Paper variant='outlined' sx={{ p: 2, borderRadius: 2, minWidth: 0, flex: 1 }}>
@@ -86,11 +86,19 @@ const LogContent = ({ content }: { content: string }) => {
   );
 };
 
-const HostRow = ({ host, onPing, onLogs, pingState }: { host: NodeOverviewHost; onPing: (sshTarget: string) => Promise<void>; onLogs: (sshTarget: string) => Promise<void>; pingState?: string }) => {
+const HostRow = ({ host, onPing, onLogs, onStart, onStop, onRestart, pingState, actionState }: { host: NodeOverviewHost; onPing: (sshTarget: string) => Promise<void>; onLogs: (sshTarget: string) => Promise<void>; onStart: (sshTarget: string) => Promise<void>; onStop: (sshTarget: string) => Promise<void>; onRestart: (sshTarget: string) => Promise<void>; pingState?: string; actionState?: string }) => {
   const runtime = host.runtime || {};
+  const hostProcess = host.host_process || { running: host.joined, confirmed_running: host.joined, source: host.joined ? 'joined' : 'unknown', message: host.joined ? 'Node is joined to the scheduler' : 'Remote process status unavailable' };
   const layerText = typeof runtime.start_layer === 'number' || typeof runtime.end_layer === 'number' || typeof runtime.total_layers === 'number'
     ? `[${typeof runtime.start_layer === 'number' ? runtime.start_layer : '?'}, ${typeof runtime.end_layer === 'number' ? runtime.end_layer : '?'})${typeof runtime.total_layers === 'number' ? ` of ${runtime.total_layers}` : ''}`
     : 'Not assigned';
+  const processChip = host.joined
+    ? { label: 'Process joined', color: 'success' as const }
+    : hostProcess.running
+      ? (hostProcess.confirmed_running
+          ? { label: 'Process running', color: 'warning' as const }
+          : { label: 'Start pending', color: 'info' as const })
+      : { label: 'Process stopped', color: 'default' as const };
   const details = [
     { label: 'SSH', value: host.ssh_target || 'Unavailable' },
     { label: 'Host', value: runtime.hostname || host.hostname_hint || 'Unknown' },
@@ -135,9 +143,14 @@ const HostRow = ({ host, onPing, onLogs, pingState }: { host: NodeOverviewHost; 
               </Box>
               <Typography variant='body1' sx={{ fontWeight: 600 }}>{host.display_name}</Typography>
               <StatusChip label={host.joined ? 'Joined' : 'Not joined'} color={host.joined ? 'success' : 'warning'} />
+              <StatusChip label={processChip.label} color={processChip.color} />
               <StatusChip label={host.inventory_source === 'configured' ? 'Configured host' : 'Live node'} color={host.inventory_source === 'configured' ? 'info' : 'default'} />
               {runtime.status && <StatusChip label={`Runtime: ${runtime.status}`} color={runtime.status === 'available' ? 'success' : 'default'} />}
             </Stack>
+            <Typography variant='caption' color='text.secondary'>
+              {hostProcess.message || (hostProcess.running ? 'Node process detected on remote host' : 'No remote node process detected')}
+              {hostProcess.pid ? ` (pid ${hostProcess.pid})` : ''}
+            </Typography>
             <Box
               sx={{
                 display: 'grid',
@@ -161,21 +174,21 @@ const HostRow = ({ host, onPing, onLogs, pingState }: { host: NodeOverviewHost; 
                 <IconButton
                   size='small'
                   color='primary'
-                  disabled={!host.actions.can_ping || pingState === 'running'}
+                  disabled={!host.actions.can_ping || pingState === 'running' || !!actionState?.startsWith('running:')}
                   onClick={() => onPing(host.ssh_target)}
                 >
                   <IconPlugConnected size={16} />
                 </IconButton>
               </span>
             </Tooltip>
-            <Tooltip title='Start node (not wired yet)'>
-              <span><IconButton size='small' disabled><IconPlayerPlay size={16} /></IconButton></span>
+            <Tooltip title={actionState === 'running:start' ? 'Starting node' : 'Start node'}>
+              <span><IconButton size='small' color='success' disabled={!host.actions.can_start || !!actionState?.startsWith('running:')} onClick={() => onStart(host.ssh_target)}><IconPlayerPlay size={16} /></IconButton></span>
             </Tooltip>
-            <Tooltip title='Stop node (not wired yet)'>
-              <span><IconButton size='small' disabled><IconPlayerPause size={16} /></IconButton></span>
+            <Tooltip title={actionState === 'running:stop' ? 'Stopping node' : 'Stop node'}>
+              <span><IconButton size='small' color='warning' disabled={!host.actions.can_stop || !!actionState?.startsWith('running:')} onClick={() => onStop(host.ssh_target)}><IconSquareFilled size={14} /></IconButton></span>
             </Tooltip>
-            <Tooltip title='Restart node (not wired yet)'>
-              <span><IconButton size='small' disabled><IconRotateClockwise2 size={16} /></IconButton></span>
+            <Tooltip title={actionState === 'running:restart' ? 'Restarting node' : 'Restart node'}>
+              <span><IconButton size='small' color='secondary' disabled={!host.actions.can_restart || !!actionState?.startsWith('running:')} onClick={() => onRestart(host.ssh_target)}><IconRotateClockwise2 size={16} /></IconButton></span>
             </Tooltip>
             <Tooltip title='Open remote logs'>
               <span><IconButton size='small' disabled={!host.ssh_target} onClick={() => onLogs(host.ssh_target)}><IconFileText size={16} /></IconButton></span>
@@ -185,6 +198,11 @@ const HostRow = ({ host, onPing, onLogs, pingState }: { host: NodeOverviewHost; 
         {pingState && pingState !== 'running' && (
           <Alert severity={pingState.startsWith('ok:') ? 'success' : 'warning'} sx={{ '& .MuiAlert-message': { fontSize: '0.8125rem' }, py: 0 }}>
             {pingState.startsWith('ok:') ? pingState.slice(3) : pingState.startsWith('err:') ? pingState.slice(4) : pingState}
+          </Alert>
+        )}
+        {actionState && !actionState.startsWith('running:') && (
+          <Alert severity={actionState.startsWith('ok:') ? 'success' : 'warning'} sx={{ '& .MuiAlert-message': { fontSize: '0.8125rem' }, py: 0 }}>
+            {actionState.startsWith('ok:') ? actionState.slice(3) : actionState.startsWith('err:') ? actionState.slice(4) : actionState}
           </Alert>
         )}
       </Stack>
@@ -197,6 +215,7 @@ export default function PageNodes() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [pingStates, setPingStates] = useState<Record<string, string>>({});
+  const [actionStates, setActionStates] = useState<Record<string, string>>({});
   const [logsDialog, setLogsDialog] = useState<{ open: boolean; host: string; source: string; content: string; loading: boolean; error: string }>({
     open: false,
     host: '',
@@ -239,6 +258,28 @@ export default function PageNodes() {
     }
   };
 
+  const runHostAction = async (
+    sshTarget: string,
+    action: 'start' | 'stop' | 'restart',
+    runner: (sshTarget: string) => Promise<{ ok: boolean; message: string }>,
+  ) => {
+    if (!sshTarget) return;
+    setActionStates((prev) => ({ ...prev, [sshTarget]: `running:${action}` }));
+    try {
+      const result = await runner(sshTarget);
+      setActionStates((prev) => ({ ...prev, [sshTarget]: `${result.ok ? 'ok' : 'err'}:${result.message}` }));
+      window.setTimeout(() => {
+        loadOverview();
+      }, action === 'start' || action === 'restart' ? 1500 : 800);
+    } catch (err: any) {
+      setActionStates((prev) => ({ ...prev, [sshTarget]: `err:${err?.message || `${action} failed`}` }));
+    }
+  };
+
+  const onStart = async (sshTarget: string) => runHostAction(sshTarget, 'start', startNodeHost);
+  const onStop = async (sshTarget: string) => runHostAction(sshTarget, 'stop', stopNodeHost);
+  const onRestart = async (sshTarget: string) => runHostAction(sshTarget, 'restart', restartNodeHost);
+
   const onLogs = async (sshTarget: string) => {
     if (!sshTarget) return;
     setLogsDialog({ open: true, host: sshTarget, source: '', content: '', loading: true, error: '' });
@@ -266,6 +307,19 @@ export default function PageNodes() {
 
   const summary = overview?.summary || { configured_hosts: 0, joined_hosts: 0, unjoined_configured_hosts: 0, live_only_hosts: 0 };
   const hosts = overview?.hosts || [];
+  const configuredHostnames = new Set(
+    hosts
+      .filter((host) => host.inventory_source === 'configured')
+      .map((host) => (host.hostname_hint || host.runtime?.hostname || '').trim().toLowerCase())
+      .filter(Boolean),
+  );
+  const visibleHosts = hosts.filter((host) => {
+    if (host.inventory_source !== 'live_only') {
+      return true;
+    }
+    const hostname = (host.hostname_hint || host.runtime?.hostname || '').trim().toLowerCase();
+    return !hostname || !configuredHostnames.has(hostname);
+  });
 
   return (
     <DrawerLayout contentWidth='wide'>
@@ -289,23 +343,27 @@ export default function PageNodes() {
         </Stack>
 
         <Alert severity='info' sx={{ '& .MuiAlert-message': { fontSize: '0.8125rem' } }}>
-          Start, stop, restart, and system metrics are placeholders for now.
+          Joined state updates live from the scheduler. Remote process status is SSH-probed on a cached interval so Start is disabled when a node process is already running.
         </Alert>
 
         {error && <Alert severity='warning'>{error}</Alert>}
         {loading && !overview && <Typography variant='body2' color='text.secondary'>Loading node overview...</Typography>}
 
         <Stack sx={{ gap: 1 }}>
-          {hosts.map((host) => (
+          {visibleHosts.map((host) => (
             <HostRow
               key={host.id}
               host={host}
               onPing={onPing}
               onLogs={onLogs}
+              onStart={onStart}
+              onStop={onStop}
+              onRestart={onRestart}
               pingState={host.ssh_target ? pingStates[host.ssh_target] : ''}
+              actionState={host.ssh_target ? actionStates[host.ssh_target] : ''}
             />
           ))}
-          {!loading && hosts.length === 0 && (
+          {!loading && visibleHosts.length === 0 && (
             <Paper variant='outlined' sx={{ p: 2, borderRadius: 2 }}>
               <Typography variant='body2' color='text.secondary'>No configured hosts or live nodes found.</Typography>
             </Paper>

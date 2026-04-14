@@ -139,6 +139,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
   const noProgressTimeoutRef = useConst<{ current: ReturnType<typeof setTimeout> | null }>(() => ({ current: null }));
   const timedOutBeforeFirstTokenRef = useConst<{ current: boolean }>(() => ({ current: false }));
   const timedOutDuringGenerationRef = useConst<{ current: boolean }>(() => ({ current: false }));
+  const streamEndedWithErrorRef = useConst<{ current: boolean }>(() => ({ current: false }));
 
   const clearFirstTokenTimeout = useRefCallback(() => {
     if (firstTokenTimeoutRef.current) {
@@ -240,6 +241,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
         debugLog('SSE OPEN');
         timedOutBeforeFirstTokenRef.current = false;
         timedOutDuringGenerationRef.current = false;
+        streamEndedWithErrorRef.current = false;
         clearFirstTokenTimeout();
         clearNoProgressTimeout();
         firstTokenTimeoutRef.current = setTimeout(() => {
@@ -255,6 +257,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
         clearNoProgressTimeout();
         const timedOutBeforeFirstToken = timedOutBeforeFirstTokenRef.current;
         const timedOutDuringGeneration = timedOutDuringGenerationRef.current;
+        const streamEndedWithError = streamEndedWithErrorRef.current;
         setMessages((prev) => {
           const lastMessage = prev[prev.length - 1];
           if (!lastMessage) {
@@ -270,7 +273,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
             ...prev.slice(0, -1),
             {
               ...lastMessage,
-              status: (timedOutBeforeFirstToken || timedOutDuringGeneration) ? 'error' : 'done',
+              status: (timedOutBeforeFirstToken || timedOutDuringGeneration || streamEndedWithError) ? 'error' : 'done',
             },
           ];
         });
@@ -285,9 +288,10 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
             message: 'Generation stalled after it started. You can retry the request or shorten the prompt.',
           });
         }
-        setStatus(timedOutBeforeFirstToken || timedOutDuringGeneration ? 'error' : 'closed');
+        setStatus(timedOutBeforeFirstToken || timedOutDuringGeneration || streamEndedWithError ? 'error' : 'closed');
         timedOutBeforeFirstTokenRef.current = false;
         timedOutDuringGenerationRef.current = false;
+        streamEndedWithErrorRef.current = false;
         refreshHistory();
       },
       onError: (error) => {
@@ -343,7 +347,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
         //   usage: null,
         // };
         const {
-          data: { id, object, model, created, choices, usage, input_truncation, prompt_budget },
+          data: { id, object, model, created, choices, usage, input_truncation, prompt_budget, error },
         } = message;
         if (input_truncation?.truncated) {
           setInputTruncationNotice({
@@ -370,6 +374,28 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
             outputTokensReduced: prompt_budget.output_tokens_reduced || 0,
             adaptedOutputBudget: !!prompt_budget.adapted_output_budget,
           });
+        }
+        if (object === 'chat.completion.error') {
+          streamEndedWithErrorRef.current = true;
+          setMessages((prev) => {
+            const lastMessage = prev[prev.length - 1];
+            if (!lastMessage) {
+              return prev;
+            }
+            return [
+              ...prev.slice(0, -1),
+              {
+                ...lastMessage,
+                status: 'error',
+              },
+            ];
+          });
+          setRequestHealthNotice({
+            severity: 'error',
+            message: error?.message || 'The active node disconnected while serving this request. You can retry from the current conversation.',
+          });
+          setStatus('error');
+          return;
         }
         if (object === 'chat.completion.chunk' && choices?.length > 0) {
           if (choices[0].delta.content) {

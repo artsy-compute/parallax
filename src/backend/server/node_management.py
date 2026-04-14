@@ -1,15 +1,20 @@
+import shlex
 import subprocess
 import time
 from typing import Any
 
+from backend.server.static_config import get_node_join_command
 from parallax_utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 
 class NodeManagementService:
+    PROCESS_STATUS_TTL_SEC = 20.0
+
     def __init__(self, scheduler_manage=None):
         self.scheduler_manage = scheduler_manage
+        self._process_status_cache: dict[str, dict[str, Any]] = {}
 
     def set_scheduler_manage(self, scheduler_manage) -> None:
         self.scheduler_manage = scheduler_manage
@@ -56,6 +61,84 @@ class NodeManagementService:
                 return item
         return None
 
+    def _cached_process_status(self, ssh_target: str) -> dict[str, Any] | None:
+        target = (ssh_target or '').strip()
+        cached = self._process_status_cache.get(target)
+        if not cached:
+            return None
+        checked_at = float(cached.get('checked_at') or 0.0)
+        if (time.time() - checked_at) > self.PROCESS_STATUS_TTL_SEC:
+            return None
+        return cached
+
+    def _store_process_status(self, ssh_target: str, status: dict[str, Any]) -> dict[str, Any]:
+        payload = {
+            'running': bool(status.get('running')),
+            'confirmed_running': bool(status.get('confirmed_running', status.get('running'))),
+            'pid': str(status.get('pid') or ''),
+            'source': str(status.get('source') or 'none'),
+            'message': str(status.get('message') or ''),
+            'checked_at': float(status.get('checked_at') or time.time()),
+        }
+        self._process_status_cache[(ssh_target or '').strip()] = payload
+        return payload
+
+    def _probe_host_process(self, ssh_target: str, parallax_path: str) -> dict[str, Any]:
+        cached = self._cached_process_status(ssh_target)
+        if cached is not None:
+            return cached
+
+        pid_file, _ = self._node_action_paths(parallax_path)
+        quoted_pid = shlex.quote(pid_file)
+        remote_command = f"""bash -lc '
+set +e
+if [ -f {quoted_pid} ]; then
+  pid=$(cat {quoted_pid} 2>/dev/null || true)
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    echo "__PARALLAX_NODE_PROCESS__:running:pidfile:$pid"
+    exit 0
+  fi
+  rm -f {quoted_pid}
+fi
+echo "__PARALLAX_NODE_PROCESS__:stopped"
+exit 0
+'"""
+        result = self._run_ssh_command((ssh_target or '').strip(), remote_command, timeout_sec=8)
+        stdout = str(result.get('stdout') or '')
+        marker = '__PARALLAX_NODE_PROCESS__:'
+        checked_at = time.time()
+        if marker in stdout:
+            line = next((ln for ln in stdout.splitlines() if ln.startswith(marker)), '')
+            status = line[len(marker):].strip()
+            if status.startswith('running:'):
+                parts = status.split(':', 2)
+                source = parts[1] if len(parts) > 1 else 'unknown'
+                pid = parts[2] if len(parts) > 2 else ''
+                return self._store_process_status(ssh_target, {
+                    'running': True,
+                    'confirmed_running': True,
+                    'pid': pid,
+                    'source': source or 'unknown',
+                    'message': 'Node process detected via pid file',
+                    'checked_at': checked_at,
+                })
+            return self._store_process_status(ssh_target, {
+                'running': False,
+                'confirmed_running': False,
+                'pid': '',
+                'source': 'none',
+                'message': 'No remote node process detected',
+                'checked_at': checked_at,
+            })
+        return self._store_process_status(ssh_target, {
+            'running': False,
+            'confirmed_running': False,
+            'pid': '',
+            'source': 'probe_error',
+            'message': str(result.get('message') or 'SSH process probe failed'),
+            'checked_at': checked_at,
+        })
+
     def get_overview(self) -> dict[str, Any]:
         live_nodes = self._live_nodes()
         configured_hosts = self._configured_hosts()
@@ -76,6 +159,20 @@ class NodeManagementService:
                     live_match = candidate
                     matched_live_node_ids.add(node_id)
                     break
+            can_remote_manage = bool(item.get('ssh_target')) and bool(item.get('parallax_path'))
+            process_status = {
+                'running': bool(live_match),
+                'confirmed_running': bool(live_match),
+                'pid': '',
+                'source': 'joined' if live_match else 'unknown',
+                'message': 'Node is joined to the scheduler' if live_match else 'Remote process status unavailable',
+                'checked_at': time.time() if live_match else 0.0,
+            }
+            if can_remote_manage and not live_match:
+                process_status = self._probe_host_process(
+                    str(item.get('ssh_target') or ''),
+                    str(item.get('parallax_path') or ''),
+                )
             hosts.append({
                 'id': str(item.get('ssh_target') or hostname_hint or item.get('line_number') or len(hosts)),
                 'display_name': str(item.get('ssh_target') or item.get('hostname_hint') or 'Configured host'),
@@ -104,12 +201,13 @@ class NodeManagementService:
                     'ram': None,
                     'disk': None,
                 },
+                'host_process': process_status,
                 'actions': {
                     'can_ping': bool(item.get('ssh_target')),
-                    'can_start': False,
-                    'can_stop': False,
-                    'can_restart': False,
-                    'can_tail_logs': bool(item.get('ssh_target')) and bool(item.get('parallax_path')),
+                    'can_start': can_remote_manage and not bool(process_status.get('running')),
+                    'can_stop': can_remote_manage and bool(process_status.get('confirmed_running')),
+                    'can_restart': can_remote_manage and bool(process_status.get('confirmed_running')),
+                    'can_tail_logs': can_remote_manage,
                 },
             })
 
@@ -143,6 +241,14 @@ class NodeManagementService:
                     'cpu': None,
                     'ram': None,
                     'disk': None,
+                },
+                'host_process': {
+                    'running': True,
+                    'confirmed_running': True,
+                    'pid': '',
+                    'source': 'joined',
+                    'message': 'Node is joined to the scheduler',
+                    'checked_at': time.time(),
                 },
                 'actions': {
                     'can_ping': False,
@@ -198,6 +304,183 @@ class NodeManagementService:
             'return_code': proc.returncode,
         }
 
+    def _require_configured_host(self, ssh_target: str) -> tuple[str, dict[str, Any] | None, str]:
+        target = (ssh_target or '').strip()
+        if not target:
+            return target, None, 'ssh_target is required'
+        configured = self._configured_host_for_target(target)
+        if configured is None:
+            return target, None, 'ssh_target is not present in the configured node inventory'
+        parallax_path = str(configured.get('parallax_path') or '').strip()
+        if not parallax_path:
+            return target, None, 'Configured host is missing PARALLAX_PATH'
+        return target, configured, ''
+
+    def _join_command(self) -> str:
+        if self.scheduler_manage is None:
+            return ''
+        scheduler_addr = self.scheduler_manage.get_peer_id()
+        is_local_network = self.scheduler_manage.get_is_local_network()
+        payload = get_node_join_command(scheduler_addr, is_local_network)
+        if isinstance(payload, dict):
+            return str(payload.get('command') or '').strip()
+        if isinstance(payload, str):
+            return payload.strip()
+        return ''
+
+    @staticmethod
+    def _node_action_paths(parallax_path: str) -> tuple[str, str]:
+        base = parallax_path.rstrip('/')
+        return f'{base}/logs/parallax-node.pid', f'{base}/logs/parallax-node-manager.log'
+
+    def _run_node_action(self, ssh_target: str, action: str) -> dict[str, Any]:
+        target, configured, error = self._require_configured_host(ssh_target)
+        if configured is None:
+            return {'ok': False, 'message': error, 'ssh_target': target, 'action': action}
+
+        parallax_path = str(configured.get('parallax_path') or '').strip()
+        pid_file, manager_log = self._node_action_paths(parallax_path)
+        quoted_path = shlex.quote(parallax_path)
+        quoted_pid = shlex.quote(pid_file)
+        quoted_manager_log = shlex.quote(manager_log)
+
+        if action == 'start':
+            join_command = self._join_command()
+            if not join_command:
+                return {'ok': False, 'message': 'Scheduler is not ready to provide a join command', 'ssh_target': target, 'action': action}
+            remote_command = f"""bash -lc '
+set -e
+cd {quoted_path}
+mkdir -p logs
+if [ ! -f venv/bin/activate ]; then
+  echo "Missing venv/bin/activate" >&2
+  exit 2
+fi
+if [ -f {quoted_pid} ]; then
+  pid=$(cat {quoted_pid} 2>/dev/null || true)
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    echo "__PARALLAX_NODE_ACTION__:already_running:$pid"
+    exit 0
+  fi
+  rm -f {quoted_pid}
+fi
+if command -v setsid >/dev/null 2>&1; then
+  nohup setsid bash -lc "cd {quoted_path} && . venv/bin/activate && exec {join_command}" >> {quoted_manager_log} 2>&1 < /dev/null &
+else
+  nohup bash -lc "cd {quoted_path} && . venv/bin/activate && exec {join_command}" >> {quoted_manager_log} 2>&1 < /dev/null &
+fi
+pid=$!
+echo "$pid" > {quoted_pid}
+echo "__PARALLAX_NODE_ACTION__:started:$pid"
+'"""
+            result = self._run_ssh_command(target, remote_command, timeout_sec=20)
+        elif action in ('stop', 'restart'):
+            join_command = self._join_command() if action == 'restart' else ''
+            if action == 'restart' and not join_command:
+                return {'ok': False, 'message': 'Scheduler is not ready to provide a join command', 'ssh_target': target, 'action': action}
+            finish_block = ""
+            if action == 'restart':
+                finish_block = f"""
+if [ ! -f venv/bin/activate ]; then
+  echo "Missing venv/bin/activate" >&2
+  exit 2
+fi
+if command -v setsid >/dev/null 2>&1; then
+  nohup setsid bash -lc "cd {quoted_path} && . venv/bin/activate && exec {join_command}" >> {quoted_manager_log} 2>&1 < /dev/null &
+else
+  nohup bash -lc "cd {quoted_path} && . venv/bin/activate && exec {join_command}" >> {quoted_manager_log} 2>&1 < /dev/null &
+fi
+new_pid=$!
+echo "$new_pid" > {quoted_pid}
+echo "__PARALLAX_NODE_ACTION__:restarted:$new_pid"
+"""
+            else:
+                finish_block = """
+if [ -n "$stopped_pid" ]; then
+  echo "__PARALLAX_NODE_ACTION__:stopped:$stopped_pid"
+else
+  echo "__PARALLAX_NODE_ACTION__:not_running"
+fi
+"""
+            remote_command = f"""bash -lc '
+set -e
+cd {quoted_path}
+mkdir -p logs
+stopped_pid=""
+if [ -f {quoted_pid} ]; then
+  pid=$(cat {quoted_pid} 2>/dev/null || true)
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill -TERM -- -"$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+    sleep 1
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL -- -"$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
+    fi
+    stopped_pid="$pid"
+  fi
+  rm -f {quoted_pid}
+fi
+{finish_block}
+'"""
+            result = self._run_ssh_command(target, remote_command, timeout_sec=25)
+        else:
+            return {'ok': False, 'message': f'Unsupported node action: {action}', 'ssh_target': target, 'action': action}
+
+        stdout = str(result.get('stdout') or '')
+        marker = '__PARALLAX_NODE_ACTION__:'
+        if marker in stdout:
+            line = next((ln for ln in stdout.splitlines() if ln.startswith(marker)), '')
+            status = line[len(marker):].strip() if line else ''
+            if status.startswith('started:'):
+                result['message'] = f"Node start requested (pid {status.split(':', 1)[1]})"
+            elif status.startswith('restarted:'):
+                result['message'] = f"Node restarted (pid {status.split(':', 1)[1]})"
+            elif status.startswith('stopped:'):
+                result['message'] = f"Node stopped ({status.split(':', 1)[1]})"
+            elif status == 'not_running':
+                result['message'] = 'Node is not running'
+            elif status.startswith('already_running:'):
+                result['message'] = f"Node is already running (pid {status.split(':', 1)[1]})"
+        checked_at = time.time()
+        if action == 'start':
+            if '__PARALLAX_NODE_ACTION__:started:' in stdout or '__PARALLAX_NODE_ACTION__:already_running:' in stdout:
+                pid = ''
+                for prefix in ('__PARALLAX_NODE_ACTION__:started:', '__PARALLAX_NODE_ACTION__:already_running:'):
+                    if prefix in stdout:
+                        line = next((ln for ln in stdout.splitlines() if ln.startswith(prefix)), '')
+                        pid = line.split(':', 2)[-1].strip() if line else ''
+                        break
+                self._store_process_status(target, {
+                    'running': True,
+                    'pid': pid,
+                    'confirmed_running': False,
+                    'source': 'action_pending',
+                    'message': result.get('message') or 'Node start requested',
+                    'checked_at': checked_at,
+                })
+        elif action == 'restart':
+            if '__PARALLAX_NODE_ACTION__:restarted:' in stdout:
+                line = next((ln for ln in stdout.splitlines() if ln.startswith('__PARALLAX_NODE_ACTION__:restarted:')), '')
+                self._store_process_status(target, {
+                    'running': True,
+                    'pid': line.split(':', 2)[-1].strip() if line else '',
+                    'confirmed_running': False,
+                    'source': 'action_pending',
+                    'message': result.get('message') or 'Node restarted',
+                    'checked_at': checked_at,
+                })
+        elif action == 'stop':
+            if '__PARALLAX_NODE_ACTION__:stopped:' in stdout or '__PARALLAX_NODE_ACTION__:not_running' in stdout:
+                self._store_process_status(target, {
+                    'running': False,
+                    'pid': '',
+                    'confirmed_running': False,
+                    'source': 'action',
+                    'message': result.get('message') or 'Node stopped',
+                    'checked_at': checked_at,
+                })
+        result['action'] = action
+        return result
+
     def ping_host(self, ssh_target: str) -> dict[str, Any]:
         target = (ssh_target or '').strip()
         if not target:
@@ -212,6 +495,14 @@ class NodeManagementService:
             result['message'] = result['message'].replace('SSH command failed:', 'SSH ping failed:', 1).strip()
         return result
 
+    def start_host(self, ssh_target: str) -> dict[str, Any]:
+        return self._run_node_action(ssh_target, 'start')
+
+    def stop_host(self, ssh_target: str) -> dict[str, Any]:
+        return self._run_node_action(ssh_target, 'stop')
+
+    def restart_host(self, ssh_target: str) -> dict[str, Any]:
+        return self._run_node_action(ssh_target, 'restart')
 
     def tail_logs(self, ssh_target: str, lines: int = 200) -> dict[str, Any]:
         target = (ssh_target or '').strip()

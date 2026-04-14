@@ -2,9 +2,18 @@ import { createHttpStreamFactory } from './http-stream';
 
 export const API_BASE_URL = import.meta.env.DEV ? '/proxy-api' : '';
 
+const parseJsonResponse = async (response: Response) => {
+  const raw = await response.text();
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error(raw || `HTTP ${response.status}`);
+  }
+};
+
 export const getModelList = async (): Promise<readonly any[]> => {
   const response = await fetch(`${API_BASE_URL}/model/list`, { method: 'GET' });
-  const message = await response.json();
+  const message = await parseJsonResponse(response);
   if (message.type !== 'model_list') {
     throw new Error(`Invalid message type: ${message.type}.`);
   }
@@ -20,7 +29,7 @@ export const initScheduler = async (params: {
     method: 'POST',
     body: JSON.stringify(params),
   });
-  const message = await response.json();
+  const message = await parseJsonResponse(response);
   if (message.type !== 'scheduler_init') {
     throw new Error(`Invalid message type: ${message.type}.`);
   }
@@ -35,7 +44,7 @@ export const createStreamClusterStatus = createHttpStreamFactory({
 
 export const rebalanceCluster = async (): Promise<{ ok: boolean; message: string }> => {
   const response = await fetch(`${API_BASE_URL}/cluster/rebalance`, { method: 'POST' });
-  const message = await response.json();
+  const message = await parseJsonResponse(response);
   if (message.type !== 'cluster_rebalance') {
     throw new Error(`Invalid message type: ${message.type}.`);
   }
@@ -72,7 +81,7 @@ export interface ChatHistoryDetail {
 
 export const getChatHistoryList = async (): Promise<readonly ChatHistorySummary[]> => {
   const response = await fetch(`${API_BASE_URL}/chat/history`, { method: 'GET' });
-  const message = await response.json();
+  const message = await parseJsonResponse(response);
   if (message.type !== 'chat_history_list') {
     throw new Error(`Invalid message type: ${message.type}.`);
   }
@@ -83,7 +92,7 @@ export const getChatHistoryDetail = async (
   conversationId: string,
 ): Promise<ChatHistoryDetail> => {
   const response = await fetch(`${API_BASE_URL}/chat/history/${conversationId}`, { method: 'GET' });
-  const message = await response.json();
+  const message = await parseJsonResponse(response);
   if (message.type !== 'chat_history_detail') {
     throw new Error(`Invalid message type: ${message.type}.`);
   }
@@ -94,7 +103,7 @@ export const deleteChatHistoryConversation = async (
   conversationId: string,
 ): Promise<{ deleted: boolean; conversation_id: string }> => {
   const response = await fetch(`${API_BASE_URL}/chat/history/${conversationId}`, { method: 'DELETE' });
-  const message = await response.json();
+  const message = await parseJsonResponse(response);
   if (message.type !== 'chat_history_delete') {
     throw new Error(`Invalid message type: ${message.type}.`);
   }
@@ -129,6 +138,14 @@ export interface NodeOverviewHost {
     readonly ram?: unknown;
     readonly disk?: unknown;
   };
+  readonly host_process?: {
+    readonly running: boolean;
+    readonly confirmed_running?: boolean;
+    readonly pid?: string;
+    readonly source?: string;
+    readonly message?: string;
+    readonly checked_at?: number;
+  };
   readonly actions: {
     readonly can_ping: boolean;
     readonly can_start: boolean;
@@ -150,7 +167,7 @@ export interface NodesOverview {
 
 export const getNodesOverview = async (): Promise<NodesOverview> => {
   const response = await fetch(`${API_BASE_URL}/nodes/overview`, { method: 'GET' });
-  const message = await response.json();
+  const message = await parseJsonResponse(response);
   if (message.type !== 'nodes_overview') {
     throw new Error(`Invalid message type: ${message.type}.`);
   }
@@ -162,7 +179,7 @@ export const pingNodeHost = async (sshTarget: string): Promise<{ ok: boolean; me
     method: 'POST',
     body: JSON.stringify({ ssh_target: sshTarget }),
   });
-  const message = await response.json();
+  const message = await parseJsonResponse(response);
   if (message.type !== 'node_ping') {
     throw new Error(`Invalid message type: ${message.type}.`);
   }
@@ -170,12 +187,32 @@ export const pingNodeHost = async (sshTarget: string): Promise<{ ok: boolean; me
 };
 
 
+const postNodeAction = async (
+  path: string,
+  expectedType: string,
+  sshTarget: string,
+): Promise<{ ok: boolean; message: string; ssh_target: string; action?: string; latency_ms?: number; return_code?: number }> => {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: 'POST',
+    body: JSON.stringify({ ssh_target: sshTarget }),
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== expectedType) {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  return message.data;
+};
+
+export const startNodeHost = async (sshTarget: string) => postNodeAction('/nodes/start', 'node_start', sshTarget);
+export const stopNodeHost = async (sshTarget: string) => postNodeAction('/nodes/stop', 'node_stop', sshTarget);
+export const restartNodeHost = async (sshTarget: string) => postNodeAction('/nodes/restart', 'node_restart', sshTarget);
+
 export const getNodeLogs = async (sshTarget: string, lines = 200): Promise<{ ok: boolean; message: string; ssh_target: string; source?: string; content: string; stderr?: string; latency_ms?: number; return_code?: number }> => {
   const response = await fetch(`${API_BASE_URL}/nodes/logs`, {
     method: 'POST',
     body: JSON.stringify({ ssh_target: sshTarget, lines }),
   });
-  const message = await response.json();
+  const message = await parseJsonResponse(response);
   if (message.type !== 'node_logs') {
     throw new Error(`Invalid message type: ${message.type}.`);
   }
