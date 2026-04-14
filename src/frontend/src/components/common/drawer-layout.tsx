@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FC, type PropsWithChildren } from 'react';
+import { Link as RouterLink } from 'react-router-dom';
 import {
   Box,
   Button,
@@ -456,6 +457,21 @@ export const DrawerLayout: FC<PropsWithChildren> = ({ children }) => {
                 Start new nodes with this command and watch them appear above.
               </Typography>
               <JoinCommand />
+            </Stack>
+            <Stack sx={{ gap: 1 }}>
+              <Typography variant='body1'>Node management</Typography>
+              <Typography variant='body2' color='text.disabled'>
+                Open the dedicated node management page for configured hosts, ping, and runtime overview.
+              </Typography>
+              <Button
+                component={RouterLink}
+                to='/nodes'
+                variant='outlined'
+                onClick={() => setClusterSettingsOpen(false)}
+                sx={{ alignSelf: 'flex-start' }}
+              >
+                Open Node Management
+              </Button>
             </Stack>
           </Stack>
         }

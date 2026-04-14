@@ -151,6 +151,8 @@ const Node: FC<{ variant: NodeListVariant; node?: NodeInfo }> = ({ variant, node
     endLayer,
     totalLayers,
     approxRemainingContext,
+    inventoryTarget,
+    configuredOnly,
   } = node || { status: 'waiting' };
   const { palette } = useTheme();
   const { main, lighter } =
@@ -192,17 +194,28 @@ const Node: FC<{ variant: NodeListVariant; node?: NodeInfo }> = ({ variant, node
           {(node && (
             <>
               <Typography variant='body1' sx={{ fontWeight: 500 }}>
-                {[
-                  (gpuNumber && gpuNumber > 1 && `${gpuNumber}x`) || '',
-                  gpuName,
-                  (gpuMemory && `${gpuMemory}GB`) || '',
-                ]
-                  .filter(Boolean)
-                  .join(' ')}
+                {configuredOnly ?
+                  (inventoryTarget || hostname || 'Configured node host')
+                : [
+                    (gpuNumber && gpuNumber > 1 && `${gpuNumber}x`) || '',
+                    gpuName,
+                    (gpuMemory && `${gpuMemory}GB`) || '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
               </Typography>
-              {hostname && (
+              {configuredOnly ? (
+                <Typography variant='caption' color='text.secondary'>
+                  Configured host{hostname ? `: ${hostname}` : ''}
+                </Typography>
+              ) : hostname && (
                 <Typography variant='caption' color='text.secondary'>
                   Host: {hostname}
+                </Typography>
+              )}
+              {configuredOnly && inventoryTarget && hostname && inventoryTarget !== hostname && (
+                <Typography variant='caption' color='text.disabled'>
+                  SSH target: {inventoryTarget}
                 </Typography>
               )}
               {(typeof startLayer === 'number'
@@ -258,14 +271,25 @@ export interface NodeListProps {
 export const NodeList: FC<NodeListProps & StackProps> = ({ variant = 'list', ...rest }) => {
   const [
     {
-      clusterInfo: { status: clusterStatus, initNodesNumber },
+      clusterInfo: { status: clusterStatus, initNodesNumber, configuredNodeHosts },
       nodeInfoList,
     },
   ] = useCluster();
   const [{ status: chatStatus }] = useChat();
 
   const { length: nodesNumber } = nodeInfoList;
-  // const nodesNumber = 0;
+  const configuredWaitingNodes = configuredNodeHosts
+    .filter((host) => !host.joined)
+    .map<NodeInfo>((host, index) => ({
+      id: `configured:${host.sshTarget}:${index}`,
+      hostname: host.hostnameHint || host.sshTarget,
+      inventoryTarget: host.sshTarget,
+      configuredOnly: true,
+      status: 'waiting',
+      gpuNumber: 0,
+      gpuName: '',
+      gpuMemory: 0,
+    }));
 
   const generating = chatStatus === 'generating';
   let dashIndex = 0;
@@ -291,6 +315,11 @@ export const NodeList: FC<NodeListProps & StackProps> = ({ variant = 'list', ...
 
           // renderDash(`${node.id}-dash-mock-2`),
           // <Node key={`${node.id}-mock-2`} variant={variant} node={node} />,
+        ])}
+
+        {configuredWaitingNodes.map((node) => [
+          renderDash(`${node.id}-dash`),
+          <Node key={node.id} variant={variant} node={node} />,
         ])}
 
         {clusterStatus !== 'idle'

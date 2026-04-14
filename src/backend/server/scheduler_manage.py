@@ -42,6 +42,7 @@ class SchedulerManage:
         weight_refit_mode: str = "disk",
         profile: str = DEFAULT_RUNTIME_PROFILE,
         scheduler_heartbeat_timeout_sec: float | None = None,
+        nodes_host_file: str | None = None,
     ):
         """Initialize the manager with networking bootstrap parameters."""
         self.initial_peers = initial_peers
@@ -55,6 +56,8 @@ class SchedulerManage:
         self.weight_refit_mode = weight_refit_mode
         self.profile = profile or DEFAULT_RUNTIME_PROFILE
         self.scheduler_heartbeat_timeout_sec = scheduler_heartbeat_timeout_sec
+        self.nodes_host_file = nodes_host_file
+        self.configured_node_hosts = self._load_nodes_host_file(nodes_host_file)
         self.model_name = None
         self.init_nodes_num = None
         self.scheduler = None
@@ -62,6 +65,88 @@ class SchedulerManage:
         self.lattica = None
         self.stubs = {}
         self.is_local_network = False
+
+
+    @staticmethod
+    def _parse_inventory_entry(raw_value: str) -> tuple[str, str]:
+        stripped = (raw_value or '').strip()
+        if not stripped:
+            return '', ''
+        if ':' not in stripped:
+            return stripped, ''
+        ssh_target, parallax_path = stripped.rsplit(':', 1)
+        return ssh_target.strip(), parallax_path.strip()
+
+    @staticmethod
+    def _normalize_inventory_hostname(target: str) -> str:
+        value = (target or '').strip()
+        if not value:
+            return ''
+        if '@' in value:
+            value = value.split('@', 1)[1]
+        if value.startswith('['):
+            closing = value.find(']')
+            if closing > 0:
+                return value[1:closing].strip().lower()
+        if value.count(':') == 1:
+            host, _, port = value.partition(':')
+            if port.isdigit():
+                value = host
+        return value.strip().lower()
+
+    def _load_nodes_host_file(self, nodes_host_file: str | None) -> list[dict]:
+        if not nodes_host_file:
+            return []
+        path = Path(nodes_host_file).expanduser()
+        if not path.exists():
+            logger.warning('Nodes host file does not exist: %s', path)
+            return []
+
+        configured_hosts: list[dict] = []
+        seen_targets: set[str] = set()
+        try:
+            for line_number, raw_line in enumerate(path.read_text().splitlines(), start=1):
+                stripped = raw_line.strip()
+                if not stripped or stripped.startswith('#'):
+                    continue
+                entry = stripped.split()[0]
+                ssh_target, parallax_path = self._parse_inventory_entry(entry)
+                if not ssh_target:
+                    continue
+                if ssh_target in seen_targets:
+                    continue
+                seen_targets.add(ssh_target)
+                configured_hosts.append(
+                    {
+                        'ssh_target': ssh_target,
+                        'parallax_path': parallax_path,
+                        'hostname_hint': self._normalize_inventory_hostname(ssh_target),
+                        'line_number': line_number,
+                    }
+                )
+        except Exception as exc:
+            logger.warning('Failed to load nodes host file %s: %s', path, exc)
+            return []
+
+        logger.info('Loaded %d configured node host(s) from %s', len(configured_hosts), path)
+        return configured_hosts
+
+    def get_configured_node_hosts(self) -> list[dict]:
+        live_hostnames = {
+            str(node.hardware.hostname or '').strip().lower()
+            for node in (self.scheduler.node_manager.nodes if self.scheduler else [])
+            if getattr(node.hardware, 'hostname', None)
+        }
+        return [
+            {
+                'ssh_target': host['ssh_target'],
+                'hostname_hint': host['hostname_hint'],
+                'line_number': host['line_number'],
+                'parallax_path': host.get('parallax_path', ''),
+                'joined': bool(host['hostname_hint']) and host['hostname_hint'] in live_hostnames,
+            }
+            for host in self.configured_node_hosts
+        ]
 
     def persist_runtime_config(self, model_name, init_nodes_num, is_local_network) -> None:
         data = {
@@ -219,6 +304,7 @@ class SchedulerManage:
                     self.get_peer_id(), self.is_local_network
                 ),
                 "node_list": self.get_node_list(),
+                "configured_node_hosts": self.get_configured_node_hosts(),
                 "need_more_nodes": self.need_more_nodes(),
                 "topology_change_advisory": self.get_topology_change_advisory(),
                 "max_running_request": (

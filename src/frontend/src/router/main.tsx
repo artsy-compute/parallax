@@ -7,10 +7,12 @@ import { useConstCallback, useRefCallback } from '../hooks';
 const PATH_SETUP = '/setup';
 const PATH_JOIN = '/join';
 const PATH_CHAT = '/chat';
+const PATH_NODES = '/nodes';
 
 const PageSetup = lazy(() => import('../pages/setup'));
 const PageJoin = lazy(() => import('../pages/join'));
 const PageChat = lazy(() => import('../pages/chat'));
+const PageNodes = lazy(() => import('../pages/nodes'));
 
 const debugLog = (...args: any[]) => {
   console.log('%c router.tsx ', 'color: white; background: purple;', ...args);
@@ -42,7 +44,7 @@ export const MainRouter = () => {
     if (status === 'idle' && pathname.startsWith(PATH_CHAT)) {
       return lazyNavigate(PATH_SETUP);
     }
-    if (status === 'available' && !pathname.startsWith(PATH_CHAT)) {
+    if (status === 'available' && !pathname.startsWith(PATH_CHAT) && !pathname.startsWith(PATH_NODES)) {
       return lazyNavigate(PATH_CHAT);
     }
   }, [navigate, pathname, status]);
@@ -69,6 +71,14 @@ export const MainRouter = () => {
       element: (
         <Suspense fallback={<div>Loading...</div>}>
           <PageChat />
+        </Suspense>
+      ),
+    },
+    {
+      path: PATH_NODES,
+      element: (
+        <Suspense fallback={<div>Loading...</div>}>
+          <PageNodes />
         </Suspense>
       ),
     },

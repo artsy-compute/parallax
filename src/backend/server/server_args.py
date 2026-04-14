@@ -23,6 +23,7 @@ def parse_args() -> argparse.Namespace:
     # Scheduler configuration
     parser.add_argument("--host", type=str, default="localhost", help="Host to listen on")
     parser.add_argument("--port", type=int, default=3001, help="Port to listen on")
+    parser.add_argument("--log-file", type=str, default=None, help="Optional path to write scheduler logs to a file")
     parser.add_argument(
         "--log-level",
         type=str,
@@ -59,6 +60,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Override scheduler heartbeat timeout in seconds.",
+    )
+    parser.add_argument(
+        "--nodes-host-file",
+        type=str,
+        default=None,
+        help="Optional file listing SSH-reachable node hosts to track alongside live joined nodes.",
     )
 
     # Weight refit configuration

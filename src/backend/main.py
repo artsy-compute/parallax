@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from backend.server.node_management import NodeManagementService
 from backend.server.request_handler import RequestHandler
 from backend.server.scheduler_manage import SchedulerManage
 from backend.server.server_args import parse_args
@@ -22,7 +23,7 @@ from backend.server.static_config import (
 )
 from parallax_utils.ascii_anime import display_parallax_run
 from parallax_utils.file_util import get_project_root
-from parallax_utils.logging_config import get_logger, set_log_level
+from parallax_utils.logging_config import get_logger, set_log_file, set_log_level
 from parallax_utils.version_check import check_latest_release
 
 app = FastAPI()
@@ -38,6 +39,7 @@ app.add_middleware(
 logger = get_logger(__name__)
 
 scheduler_manage = None
+node_management = None
 request_handler = RequestHandler()
 
 FRONTEND_DIR = get_project_root() / "src" / "frontend"
@@ -258,6 +260,52 @@ async def cluster_status_json() -> JSONResponse:
     return JSONResponse(content=scheduler_manage.get_cluster_status(), status_code=200)
 
 
+@app.get("/nodes/overview")
+async def nodes_overview() -> JSONResponse:
+    if node_management is None:
+        return JSONResponse(
+            content={"type": "nodes_overview", "data": {"summary": {}, "hosts": []}},
+            status_code=503,
+        )
+    return JSONResponse(
+        content={"type": "nodes_overview", "data": node_management.get_overview()},
+        status_code=200,
+    )
+
+
+@app.post("/nodes/ping")
+async def nodes_ping(raw_request: Request) -> JSONResponse:
+    if node_management is None:
+        return JSONResponse(
+            content={"type": "node_ping", "data": {"ok": False, "message": "Node management is not initialized"}},
+            status_code=503,
+        )
+    request_data = await raw_request.json()
+    result = node_management.ping_host(str(request_data.get("ssh_target") or ""))
+    return JSONResponse(
+        content={"type": "node_ping", "data": result},
+        status_code=200 if result.get("ok") else 409,
+    )
+
+
+@app.post("/nodes/logs")
+async def nodes_logs(raw_request: Request) -> JSONResponse:
+    if node_management is None:
+        return JSONResponse(
+            content={"type": "node_logs", "data": {"ok": False, "message": "Node management is not initialized", "content": ""}},
+            status_code=503,
+        )
+    request_data = await raw_request.json()
+    result = node_management.tail_logs(
+        str(request_data.get("ssh_target") or ""),
+        int(request_data.get("lines") or 200),
+    )
+    return JSONResponse(
+        content={"type": "node_logs", "data": result},
+        status_code=200 if result.get("ok") else 409,
+    )
+
+
 @app.post("/cluster/rebalance")
 async def cluster_rebalance() -> JSONResponse:
     if scheduler_manage is None:
@@ -350,6 +398,7 @@ app.mount(
 
 if __name__ == "__main__":
     args = parse_args()
+    set_log_file(args.log_file)
     set_log_level(args.log_level)
     logger.info(f"args: {args}")
 
@@ -378,8 +427,10 @@ if __name__ == "__main__":
         weight_refit_mode=args.weight_refit_mode,
         profile=args.profile,
         scheduler_heartbeat_timeout_sec=args.scheduler_heartbeat_timeout_sec,
+        nodes_host_file=args.nodes_host_file,
     )
 
+    node_management = NodeManagementService(scheduler_manage)
     request_handler.set_scheduler_manage(scheduler_manage)
 
     model_name = args.model_name

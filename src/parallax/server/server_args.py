@@ -26,6 +26,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     # HTTP server configuration
+    parser.add_argument("--log-file", type=str, default=None, help="Optional path to write node logs to a file")
     parser.add_argument("--host", type=str, default="localhost", help="Host of the HTTP server.")
     parser.add_argument("--port", type=int, default=3000, help="Port of the HTTP server")
     parser.add_argument(

@@ -100,3 +100,84 @@ export const deleteChatHistoryConversation = async (
   }
   return message.data;
 };
+
+
+export interface NodeOverviewHost {
+  readonly id: string;
+  readonly display_name: string;
+  readonly ssh_target: string;
+  readonly hostname_hint: string;
+  readonly inventory_source: 'configured' | 'live_only';
+  readonly joined: boolean;
+  readonly ssh_reachable: boolean | null;
+  readonly last_ping_ok: boolean | null;
+  readonly last_ping_message: string;
+  readonly runtime: {
+    readonly node_id?: string | null;
+    readonly status?: string | null;
+    readonly hostname?: string | null;
+    readonly gpu_name?: string | null;
+    readonly gpu_memory?: number | null;
+    readonly gpu_num?: number | null;
+    readonly start_layer?: number | null;
+    readonly end_layer?: number | null;
+    readonly total_layers?: number | null;
+    readonly approx_remaining_context?: number | null;
+  };
+  readonly system: {
+    readonly cpu?: unknown;
+    readonly ram?: unknown;
+    readonly disk?: unknown;
+  };
+  readonly actions: {
+    readonly can_ping: boolean;
+    readonly can_start: boolean;
+    readonly can_stop: boolean;
+    readonly can_restart: boolean;
+    readonly can_tail_logs: boolean;
+  };
+}
+
+export interface NodesOverview {
+  readonly summary: {
+    readonly configured_hosts: number;
+    readonly joined_hosts: number;
+    readonly unjoined_configured_hosts: number;
+    readonly live_only_hosts: number;
+  };
+  readonly hosts: readonly NodeOverviewHost[];
+}
+
+export const getNodesOverview = async (): Promise<NodesOverview> => {
+  const response = await fetch(`${API_BASE_URL}/nodes/overview`, { method: 'GET' });
+  const message = await response.json();
+  if (message.type !== 'nodes_overview') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  return message.data;
+};
+
+export const pingNodeHost = async (sshTarget: string): Promise<{ ok: boolean; message: string; ssh_target: string; latency_ms?: number; return_code?: number }> => {
+  const response = await fetch(`${API_BASE_URL}/nodes/ping`, {
+    method: 'POST',
+    body: JSON.stringify({ ssh_target: sshTarget }),
+  });
+  const message = await response.json();
+  if (message.type !== 'node_ping') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  return message.data;
+};
+
+
+export const getNodeLogs = async (sshTarget: string, lines = 200): Promise<{ ok: boolean; message: string; ssh_target: string; source?: string; content: string; stderr?: string; latency_ms?: number; return_code?: number }> => {
+  const response = await fetch(`${API_BASE_URL}/nodes/logs`, {
+    method: 'POST',
+    body: JSON.stringify({ ssh_target: sshTarget, lines }),
+  });
+  const message = await response.json();
+  if (message.type !== 'node_logs') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  return message.data;
+};

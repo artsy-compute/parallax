@@ -14,3 +14,5 @@ build/
 hosts.json
 
 src/frontend/dist/*
+
+logs/

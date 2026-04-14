@@ -61,6 +61,12 @@ export interface ClusterInfo {
     readonly standbyNodes: number;
     readonly activeNodes: number;
   };
+  readonly configuredNodeHosts: readonly {
+    readonly sshTarget: string;
+    readonly hostnameHint: string;
+    readonly lineNumber: number;
+    readonly joined: boolean;
+  }[];
 }
 
 const INITIAL_CLUSTER_INFO: ClusterInfo = {
@@ -78,6 +84,7 @@ const INITIAL_CLUSTER_INFO: ClusterInfo = {
     standbyNodes: 0,
     activeNodes: 0,
   },
+  configuredNodeHosts: [],
 };
 
 export type NodeStatus = 'waiting' | 'available' | 'failed';
@@ -93,6 +100,8 @@ export interface NodeInfo {
   readonly endLayer?: number;
   readonly totalLayers?: number;
   readonly approxRemainingContext?: number;
+  readonly inventoryTarget?: string;
+  readonly configuredOnly?: boolean;
 }
 
 // Configs
@@ -209,6 +218,7 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
             model_name,
             node_join_command,
             node_list,
+            configured_node_hosts,
             need_more_nodes,
             topology_change_advisory,
           },
@@ -229,6 +239,12 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
               standbyNodes: topology_change_advisory?.standby_nodes || 0,
               activeNodes: topology_change_advisory?.active_nodes || 0,
             },
+            configuredNodeHosts: Array.isArray(configured_node_hosts) ? configured_node_hosts.map((item: any) => ({
+              sshTarget: item?.ssh_target || '',
+              hostnameHint: item?.hostname_hint || '',
+              lineNumber: item?.line_number || 0,
+              joined: !!item?.joined,
+            })) : [],
           };
           if (JSON.stringify(next) !== JSON.stringify(prev)) {
             debugLog('setClusterInfo', next);

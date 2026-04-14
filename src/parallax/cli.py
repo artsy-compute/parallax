@@ -11,9 +11,11 @@ import argparse
 import base64
 import json
 import os
+from pathlib import Path
 import signal
 import subprocess
 import sys
+import time
 
 import requests
 
@@ -163,6 +165,18 @@ def _execute_with_graceful_shutdown(cmd: list[str], env: dict[str, str] | None =
         sys.exit(0)
 
 
+
+
+def _default_log_file(kind: str) -> str:
+    project_root = get_project_root()
+    logs_dir = Path(project_root) / 'logs'
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    if kind == 'run':
+        filename = 'parallax-scheduler.log'
+    else:
+        filename = f'parallax-node-{int(time.time())}-{os.getpid()}.log'
+    return str(logs_dir / filename)
+
 def _get_relay_params():
     return [
         "--relay-servers",
@@ -213,6 +227,9 @@ def run_command(args, passthrough_args: list[str] | None = None):
     # Build the command to run the backend main.py
     passthrough_args = passthrough_args or []
     cmd = [sys.executable, str(backend_main)]
+    log_file = args.log_file or _find_flag_value(passthrough_args, ["--log-file"]) or _default_log_file("run")
+    env = os.environ.copy()
+    env["PARALLAX_LOG_FILE"] = log_file
     if not _flag_present(passthrough_args, ["--port"]):
         cmd.extend(["--port", "3001"])
 
@@ -229,12 +246,16 @@ def run_command(args, passthrough_args: list[str] | None = None):
 
     if args.profile:
         cmd.extend(["--profile", args.profile])
+    if not _flag_present(passthrough_args, ["--log-file"]):
+        cmd.extend(["--log-file", log_file])
+    if args.nodes_host_file:
+        cmd.extend(["--nodes-host-file", args.nodes_host_file])
 
     # Append any passthrough args (unrecognized by this CLI) directly to the command
     if passthrough_args:
         cmd.extend(passthrough_args)
 
-    _execute_with_graceful_shutdown(cmd)
+    _execute_with_graceful_shutdown(cmd, env=env)
 
 
 def join_command(args, passthrough_args: list[str] | None = None):
@@ -254,6 +275,8 @@ def join_command(args, passthrough_args: list[str] | None = None):
     # Set environment variable for the subprocess
     env = os.environ.copy()
     env["SGLANG_ENABLE_JIT_DEEPGEMM"] = "0"
+    log_file = args.log_file or _find_flag_value(passthrough_args, ["--log-file"]) or _default_log_file("join")
+    env["PARALLAX_LOG_FILE"] = log_file
 
     # Build the command to run the launch.py script
     passthrough_args = passthrough_args or []
@@ -282,6 +305,8 @@ def join_command(args, passthrough_args: list[str] | None = None):
 
     if args.profile:
         cmd.extend(["--profile", args.profile])
+    if not _flag_present(passthrough_args, ["--log-file"]):
+        cmd.extend(["--log-file", log_file])
 
     # Append any passthrough args (unrecognized by this CLI) directly to the command
     if passthrough_args:
@@ -412,6 +437,11 @@ Examples:
         "-u", "--skip-upload", action="store_true", help="Skip upload package info"
     )
     run_parser.add_argument(
+        "--log-file",
+        type=str,
+        help="Optional path to write scheduler logs to a file",
+    )
+    run_parser.add_argument(
         "--build-frontend",
         action="store_true",
         help="Build frontend assets on startup if the local frontend build is stale",
@@ -420,6 +450,11 @@ Examples:
         "--profile",
         default="auto",
         help="Runtime recovery profile name. Defaults to auto-detect.",
+    )
+    run_parser.add_argument(
+        "--nodes-host-file",
+        type=str,
+        help="Optional file listing SSH-reachable node hosts to track alongside live joined nodes.",
     )
 
     # Add 'join' command parser
@@ -438,6 +473,11 @@ Examples:
     )
     join_parser.add_argument(
         "-u", "--skip-upload", action="store_true", help="Skip upload package info"
+    )
+    join_parser.add_argument(
+        "--log-file",
+        type=str,
+        help="Optional path to write node logs to a file",
     )
     join_parser.add_argument(
         "--profile",
