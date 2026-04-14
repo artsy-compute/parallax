@@ -437,43 +437,66 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
         color='primary'
         titleIcon={<IconSettings />}
         title='Cluster Settings'
+        fullWidth
+        maxWidth='md'
         content={
           <Stack sx={{ gap: 4.5 }}>
             <Stack sx={{ gap: 1 }}>
-              <Typography variant='body1'>Model</Typography>
-              <Typography variant='body2' color='text.disabled'>
-                Choose the model hosted by the scheduler and review its memory requirement.
-              </Typography>
+              <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75 }}>
+                <Typography variant='body1'>Model</Typography>
+                <Tooltip
+                  title='Choose the model hosted by the scheduler and review its memory requirement.'
+                  placement='right'
+                  slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
+                >
+                  <IconButton size='small' sx={{ color: 'text.secondary', p: 0.25 }}>
+                    <IconInfoCircle size={16} />
+                  </IconButton>
+                </Tooltip>
+              </Stack>
               <ModelSelect autoCommit />
             </Stack>
             <Stack sx={{ gap: 1 }}>
-              <Typography variant='body1'>Live nodes</Typography>
-              <Typography variant='body2' color='text.disabled'>
-                Check current node status and verify the cluster is healthy.
-              </Typography>
+              <Stack direction='row' sx={{ alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
+                <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75 }}>
+                  <Typography variant='body1'>Live nodes</Typography>
+                  <Tooltip
+                    title='Check current node status, verify the cluster is healthy, or open the full node management page.'
+                    placement='right'
+                    slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
+                  >
+                    <IconButton size='small' sx={{ color: 'text.secondary', p: 0.25 }}>
+                      <IconInfoCircle size={16} />
+                    </IconButton>
+                  </Tooltip>
+                </Stack>
+                <Button
+                  component={RouterLink}
+                  to='/nodes'
+                  variant='text'
+                  size='small'
+                  onClick={() => setClusterSettingsOpen(false)}
+                  sx={{ alignSelf: 'center', minWidth: 0, px: 0.5 }}
+                >
+                  Node Management
+                </Button>
+              </Stack>
               <NodeList sx={{ maxHeight: '18rem' }} />
             </Stack>
             <Stack sx={{ gap: 1 }}>
-              <Typography variant='body1'>Add nodes</Typography>
-              <Typography variant='body2' color='text.disabled'>
-                Start new nodes with this command and watch them appear above.
-              </Typography>
+              <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75 }}>
+                <Typography variant='body1'>Add nodes</Typography>
+                <Tooltip
+                  title='Start new nodes with this command and watch them appear above.'
+                  placement='right'
+                  slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
+                >
+                  <IconButton size='small' sx={{ color: 'text.secondary', p: 0.25 }}>
+                    <IconInfoCircle size={16} />
+                  </IconButton>
+                </Tooltip>
+              </Stack>
               <JoinCommand />
-            </Stack>
-            <Stack sx={{ gap: 1 }}>
-              <Typography variant='body1'>Node management</Typography>
-              <Typography variant='body2' color='text.disabled'>
-                Open the dedicated node management page for configured hosts, ping, and runtime overview.
-              </Typography>
-              <Button
-                component={RouterLink}
-                to='/nodes'
-                variant='outlined'
-                onClick={() => setClusterSettingsOpen(false)}
-                sx={{ alignSelf: 'flex-start' }}
-              >
-                Open Node Management
-              </Button>
             </Stack>
           </Stack>
         }

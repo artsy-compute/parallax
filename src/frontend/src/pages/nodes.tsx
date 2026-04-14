@@ -98,7 +98,20 @@ const HostRow = ({ host, onPing, onLogs, pingState }: { host: NodeOverviewHost; 
     { label: 'GPU', value: `${runtime.gpu_num ? `${runtime.gpu_num}x ` : ''}${runtime.gpu_name || 'Unknown'}${runtime.gpu_memory ? ` ${runtime.gpu_memory}GB` : ''}` },
   ];
   return (
-    <Paper variant='outlined' sx={{ p: 1.5, borderRadius: 2 }}>
+    <Paper
+      variant='outlined'
+      sx={{
+        p: 1.5,
+        borderRadius: 2,
+        transition: 'background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease',
+        '&:hover': {
+          bgcolor: 'rgba(255,255,255,0.72)',
+          borderColor: 'primary.light',
+          boxShadow: '0 6px 18px rgba(15, 23, 42, 0.08)',
+          transform: 'translateY(-1px)',
+        },
+      }}
+    >
       <Stack sx={{ gap: 1 }}>
         <Stack direction={{ xs: 'column', lg: 'row' }} sx={{ justifyContent: 'space-between', gap: 1.25, alignItems: { lg: 'flex-start' } }}>
           <Stack sx={{ gap: 0.75, minWidth: 0, flex: 1 }}>
