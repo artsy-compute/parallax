@@ -34,6 +34,24 @@ PUBLIC_INITIAL_PEERS = [
     "/dns4/bootstrap-lattica-eu.gradient.network/tcp/18080/p2p/12D3KooWCNuEF4ro95VA4Lgq4NvjdWfJFoTcvWsBA7Z6VkBByPtN",
 ]
 
+def _looks_like_peer_id(value: str | None) -> bool:
+    text = str(value or '').strip()
+    return text.startswith('12D3Koo') or text.startswith('Qm')
+
+
+def _should_use_public_relay(scheduler_addr: str | None, use_relay: bool) -> bool:
+    if use_relay:
+        return True
+    text = str(scheduler_addr or '').strip()
+    if not text or text == 'auto':
+        return False
+    if text.startswith('/'):
+        return False
+    if _looks_like_peer_id(text):
+        return False
+    return True
+
+
 PUBLIC_RELAY_SERVERS = [
     "/dns4/relay-lattica.gradient.network/udp/18080/quic-v1/p2p/12D3KooWDaqDAsFupYvffBDxjHHuWmEAJE4sMDCXiuZiB8aG8rjf",
     "/dns4/relay-lattica.gradient.network/tcp/18080/p2p/12D3KooWDaqDAsFupYvffBDxjHHuWmEAJE4sMDCXiuZiB8aG8rjf",
@@ -295,9 +313,7 @@ def join_command(args, passthrough_args: list[str] | None = None):
     cmd.extend(["--scheduler-addr", args.scheduler_addr])
 
     # Relay logic based on effective scheduler address
-    if args.use_relay or (
-        args.scheduler_addr != "auto" and not str(args.scheduler_addr).startswith("/")
-    ):
+    if _should_use_public_relay(args.scheduler_addr, args.use_relay):
         cmd.extend(_get_relay_params())
         logger.info(
             "Using public relay server to help nodes and the scheduler establish a connection (remote mode). Your IP address will be reported to the relay server to help establish the connection."
@@ -334,9 +350,7 @@ def chat_command(args, passthrough_args: list[str] | None = None):
     cmd.extend(["--scheduler-addr", args.scheduler_addr])
 
     # Relay logic based on effective scheduler address
-    if args.use_relay or (
-        args.scheduler_addr != "auto" and not str(args.scheduler_addr).startswith("/")
-    ):
+    if _should_use_public_relay(args.scheduler_addr, args.use_relay):
         cmd.extend(_get_relay_params())
         logger.info(
             "Using public relay server to help chat client and the scheduler establish a connection (remote mode). Your IP address will be reported to the relay server to help establish the connection."

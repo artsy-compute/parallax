@@ -37,6 +37,7 @@ class SchedulerManage:
         host_maddrs: List[str] = [],
         announce_maddrs: List[str] = [],
         http_port: int = 3001,
+        scheduler_host: str = "",
         use_hfcache: bool = False,
         enable_weight_refit: bool = False,
         weight_refit_mode: str = "disk",
@@ -51,6 +52,7 @@ class SchedulerManage:
         self.host_maddrs = host_maddrs
         self.announce_maddrs = announce_maddrs
         self.http_port = http_port
+        self.scheduler_host = scheduler_host
         self.use_hfcache = use_hfcache
         self.enable_weight_refit = enable_weight_refit
         self.weight_refit_mode = weight_refit_mode
@@ -230,6 +232,97 @@ class SchedulerManage:
             return None
         return self.lattica.peer_id()
 
+    @staticmethod
+    def _append_peer_id_to_maddr(maddr: str, peer_id: str | None) -> str | None:
+        value = (maddr or "").strip()
+        if not value:
+            return None
+        if not peer_id:
+            return value
+        if '/p2p/' in value:
+            return value
+        return f"{value.rstrip('/')}/p2p/{peer_id}"
+
+    @staticmethod
+    def _is_usable_join_maddr(value: str) -> bool:
+        text = (value or '').strip().lower()
+        if not text:
+            return False
+        return not (
+            text.startswith('/ip4/127.')
+            or text.startswith('/ip4/0.0.0.0/')
+            or text.startswith('/ip6/::1/')
+            or text.startswith('/ip6/::/')
+            or '/dns4/localhost/' in text
+            or '/tcp/0/' in text
+            or text.endswith('/tcp/0')
+            or '/udp/0/' in text
+            or text.endswith('/udp/0')
+        )
+
+    def get_join_scheduler_addr(self):
+        peer_id = self.get_peer_id()
+        if peer_id is None:
+            return None
+
+        if self.lattica is not None:
+            try:
+                for addr in self.lattica.get_visible_maddrs() or []:
+                    candidate = self._append_peer_id_to_maddr(addr, peer_id)
+                    if candidate and self._is_usable_join_maddr(candidate):
+                        return candidate
+            except Exception as e:
+                logger.debug('Failed to read visible scheduler maddrs: %s', e)
+            try:
+                for addr in self.lattica.get_peer_addresses(peer_id) or []:
+                    candidate = self._append_peer_id_to_maddr(addr, peer_id)
+                    if candidate and self._is_usable_join_maddr(candidate):
+                        return candidate
+            except Exception as e:
+                logger.debug('Failed to read scheduler peer addresses: %s', e)
+            try:
+                peer_info = self.lattica.get_peer_info(peer_id)
+                if peer_info is not None:
+                    for attr in ('addresses', 'addrs', 'maddrs'):
+                        values = getattr(peer_info, attr, None)
+                        if not values:
+                            continue
+                        for addr in values:
+                            candidate = self._append_peer_id_to_maddr(str(addr), peer_id)
+                            if candidate and self._is_usable_join_maddr(candidate):
+                                return candidate
+            except Exception as e:
+                logger.debug('Failed to read scheduler peer info addresses: %s', e)
+
+        for addr in self.announce_maddrs:
+            candidate = self._append_peer_id_to_maddr(addr, peer_id)
+            if candidate and self._is_usable_join_maddr(candidate):
+                return candidate
+
+        host = (self.scheduler_host or '').strip()
+        if host and host not in {'0.0.0.0', '::', 'localhost'}:
+            prefix = f'/ip4/{host}' if host.replace('.', '').isdigit() and host.count('.') == 3 else f'/dns4/{host}'
+            for addr in self.host_maddrs:
+                value = (addr or '').strip()
+                if not value:
+                    continue
+                if value.startswith('/ip4/0.0.0.0/'):
+                    suffix = value[len('/ip4/0.0.0.0'): ]
+                    candidate = self._append_peer_id_to_maddr(f'{prefix}{suffix}', peer_id)
+                    if candidate and self._is_usable_join_maddr(candidate):
+                        return candidate
+                elif value.startswith('/ip6/::/'):
+                    suffix = value[len('/ip6/::'): ]
+                    candidate = self._append_peer_id_to_maddr(f'{prefix}{suffix}', peer_id)
+                    if candidate and self._is_usable_join_maddr(candidate):
+                        return candidate
+                else:
+                    candidate = self._append_peer_id_to_maddr(value, peer_id)
+                    if candidate and self._is_usable_join_maddr(candidate):
+                        return candidate
+
+        return peer_id
+
     def weight_refit(self, request_data):
         """
         Trigger weight refit on every nodes.
@@ -301,7 +394,7 @@ class SchedulerManage:
                 "model_name": self.model_name,
                 "init_nodes_num": self.init_nodes_num,
                 "node_join_command": get_node_join_command(
-                    self.get_peer_id(), self.is_local_network
+                    self.get_join_scheduler_addr(), self.is_local_network
                 ),
                 "node_list": self.get_node_list(),
                 "configured_node_hosts": self.get_configured_node_hosts(),
@@ -331,6 +424,13 @@ class SchedulerManage:
             "end_layer": node.end_layer,
             "total_layers": node.model_info.num_layers if node.model_info is not None else None,
             "approx_remaining_context": node.approx_remaining_context,
+            "cpu_percent": node.cpu_percent,
+            "ram_used_gb": node.ram_used_gb,
+            "ram_total_gb": node.ram_total_gb,
+            "ram_used_percent": node.ram_used_percent,
+            "disk_used_gb": node.disk_used_gb,
+            "disk_total_gb": node.disk_total_gb,
+            "disk_used_percent": node.disk_used_percent,
         }
 
     def _start_scheduler(self, model_name, init_nodes_num):

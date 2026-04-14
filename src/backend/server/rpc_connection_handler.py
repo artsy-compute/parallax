@@ -158,6 +158,13 @@ class RPCConnectionHandler(ConnectionHandler):
                 new_rtt_to_nodes=node.rtt_to_nodes,
                 is_active=node.is_active,
                 last_refit_time=node.last_refit_time,
+                cpu_percent=node.cpu_percent,
+                ram_used_gb=node.ram_used_gb,
+                ram_total_gb=node.ram_total_gb,
+                ram_used_percent=node.ram_used_percent,
+                disk_used_gb=node.disk_used_gb,
+                disk_total_gb=node.disk_total_gb,
+                disk_used_percent=node.disk_used_percent,
             )
             # Return current layer allocation to node. If scheduler is still rebuilding after restart,
             # wait briefly so heartbeats can converge into a full pipeline before responding with {}.
@@ -274,6 +281,17 @@ class RPCConnectionHandler(ConnectionHandler):
             node.approx_remaining_context = node_json.get("approx_remaining_context")
         if node_json.get("rtt_to_nodes", None) is not None:
             node.rtt_to_nodes = node_json.get("rtt_to_nodes")
+        for field in (
+            'cpu_percent',
+            'ram_used_gb',
+            'ram_total_gb',
+            'ram_used_percent',
+            'disk_used_gb',
+            'disk_total_gb',
+            'disk_used_percent',
+        ):
+            if node_json.get(field, None) is not None:
+                setattr(node, field, node_json.get(field))
         return node
 
     def build_hardware(self, hardware_json):

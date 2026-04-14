@@ -102,7 +102,7 @@ class Scheduler:
         # Event queues for main loop orchestration (thread-safe)
         self._pending_joins: "queue.Queue[Node]" = queue.Queue()
         self._pending_leaves: "queue.Queue[str]" = queue.Queue()
-        self._pending_node_updates: "queue.Queue[Tuple[str, Optional[int], Optional[float], Optional[int], Optional[Dict[str, float]], Optional[bool], Optional[bool]]]" = (queue.Queue())
+        self._pending_node_updates: "queue.Queue[Tuple]" = (queue.Queue())
         self._pending_rebalances: "queue.Queue[str]" = queue.Queue()
 
         # Concurrency controls
@@ -276,6 +276,13 @@ class Scheduler:
         new_rtt_to_nodes: Optional[Dict[str, float]] = None,
         is_active: Optional[bool] = None,
         last_refit_time: Optional[float] = 0.0,
+        cpu_percent: Optional[float] = None,
+        ram_used_gb: Optional[float] = None,
+        ram_total_gb: Optional[float] = None,
+        ram_used_percent: Optional[float] = None,
+        disk_used_gb: Optional[float] = None,
+        disk_total_gb: Optional[float] = None,
+        disk_used_percent: Optional[float] = None,
     ) -> None:
         """Update the info of a node."""
         if current_requests is not None:
@@ -290,6 +297,20 @@ class Scheduler:
             node.is_active = is_active
         if last_refit_time > 0.0:
             node.last_refit_time = last_refit_time
+        if cpu_percent is not None:
+            node.cpu_percent = float(cpu_percent)
+        if ram_used_gb is not None:
+            node.ram_used_gb = float(ram_used_gb)
+        if ram_total_gb is not None:
+            node.ram_total_gb = float(ram_total_gb)
+        if ram_used_percent is not None:
+            node.ram_used_percent = float(ram_used_percent)
+        if disk_used_gb is not None:
+            node.disk_used_gb = float(disk_used_gb)
+        if disk_total_gb is not None:
+            node.disk_total_gb = float(disk_total_gb)
+        if disk_used_percent is not None:
+            node.disk_used_percent = float(disk_used_percent)
         node.last_heartbeat = time.time()
 
     # Async-style event enqueuers for main loop
@@ -326,6 +347,13 @@ class Scheduler:
         new_rtt_to_nodes: Optional[Dict[str, float]] = None,
         is_active: Optional[bool] = None,
         last_refit_time: Optional[float] = 0.0,
+        cpu_percent: Optional[float] = None,
+        ram_used_gb: Optional[float] = None,
+        ram_total_gb: Optional[float] = None,
+        ram_used_percent: Optional[float] = None,
+        disk_used_gb: Optional[float] = None,
+        disk_total_gb: Optional[float] = None,
+        disk_used_percent: Optional[float] = None,
     ) -> None:
         """Enqueue a node update event."""
         self._pending_node_updates.put(
@@ -337,6 +365,13 @@ class Scheduler:
                 new_rtt_to_nodes,
                 is_active,
                 last_refit_time,
+                cpu_percent,
+                ram_used_gb,
+                ram_total_gb,
+                ram_used_percent,
+                disk_used_gb,
+                disk_total_gb,
+                disk_used_percent,
             )
         )
         self._wake_event.set()
@@ -635,9 +670,11 @@ class Scheduler:
         """Apply pending node stats updates from the queue."""
         while True:
             try:
-                node_id, cur, lat, approx_ctx, rtts, is_active, last_refit_time = (
-                    self._pending_node_updates.get_nowait()
-                )
+                (
+                    node_id, cur, lat, approx_ctx, rtts, is_active, last_refit_time,
+                    cpu_percent, ram_used_gb, ram_total_gb, ram_used_percent,
+                    disk_used_gb, disk_total_gb, disk_used_percent,
+                ) = self._pending_node_updates.get_nowait()
             except queue.Empty:
                 break
             node = self.node_manager.get(node_id)
@@ -652,6 +689,13 @@ class Scheduler:
                 new_rtt_to_nodes=rtts,
                 is_active=is_active,
                 last_refit_time=last_refit_time,
+                cpu_percent=cpu_percent,
+                ram_used_gb=ram_used_gb,
+                ram_total_gb=ram_total_gb,
+                ram_used_percent=ram_used_percent,
+                disk_used_gb=disk_used_gb,
+                disk_total_gb=disk_total_gb,
+                disk_used_percent=disk_used_percent,
             )
 
     def _process_joins(self) -> None:

@@ -27,7 +27,7 @@ from parallax.p2p.proto import forward_pb2
 from parallax.p2p.utils import AsyncWorker
 from parallax.server.server_info import detect_node_hardware
 from parallax.utils.shared_state import SharedState
-from parallax.utils.utils import get_zmq_socket
+from parallax.utils.utils import get_host_usage_snapshot, get_zmq_socket
 from parallax.utils.weight_refit_utils import (
     calculate_cid_manual,
     concat_weight_partition,
@@ -1124,6 +1124,9 @@ class GradientServer:
                 info["layer_latency_ms"] = metrics.get("layer_latency_ms")
             if metrics.get("approx_remaining_context") is not None:
                 info["approx_remaining_context"] = metrics.get("approx_remaining_context")
+            host_metrics = get_host_usage_snapshot()
+            if host_metrics:
+                info.update(host_metrics)
             # In update mode, always include current allocation
             if not self.manual_layer_assignment:
                 info["start_layer"] = self.block_start_index
@@ -1137,9 +1140,12 @@ class GradientServer:
         self.status = ServerState.OFFLINE
         # Sync final status to shared state
         self._sync_to_shared_state()
-        if self.scheduler_addr is not None:
+        if self.scheduler_addr is not None and self.scheduler_stub is not None and self.lattica is not None:
             logger.info(f"Leave scheduler: {self.lattica.peer_id()}")
-            self.scheduler_stub.node_leave(self.get_node_info(is_update=True))
+            try:
+                self.scheduler_stub.node_leave(self.get_node_info(is_update=True))
+            except Exception as e:
+                logger.warning("Failed to send node_leave during shutdown: %s", e)
 
         if self.announcer is not None:
             self.announcer.join()

@@ -100,6 +100,13 @@ export interface NodeInfo {
   readonly endLayer?: number;
   readonly totalLayers?: number;
   readonly approxRemainingContext?: number;
+  readonly cpuPercent?: number;
+  readonly ramUsedGb?: number;
+  readonly ramTotalGb?: number;
+  readonly ramUsedPercent?: number;
+  readonly diskUsedGb?: number;
+  readonly diskTotalGb?: number;
+  readonly diskUsedPercent?: number;
   readonly inventoryTarget?: string;
   readonly configuredOnly?: boolean;
 }
@@ -266,6 +273,13 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
               end_layer,
               total_layers,
               approx_remaining_context,
+              cpu_percent,
+              ram_used_gb,
+              ram_total_gb,
+              ram_used_percent,
+              disk_used_gb,
+              disk_total_gb,
+              disk_used_percent,
             }: any) => ({
               id: node_id,
               hostname: hostname || '',
@@ -277,6 +291,13 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
               endLayer: typeof end_layer === 'number' ? end_layer : undefined,
               totalLayers: typeof total_layers === 'number' ? total_layers : undefined,
               approxRemainingContext: approx_remaining_context,
+              cpuPercent: typeof cpu_percent === 'number' ? cpu_percent : undefined,
+              ramUsedGb: typeof ram_used_gb === 'number' ? ram_used_gb : undefined,
+              ramTotalGb: typeof ram_total_gb === 'number' ? ram_total_gb : undefined,
+              ramUsedPercent: typeof ram_used_percent === 'number' ? ram_used_percent : undefined,
+              diskUsedGb: typeof disk_used_gb === 'number' ? disk_used_gb : undefined,
+              diskTotalGb: typeof disk_total_gb === 'number' ? disk_total_gb : undefined,
+              diskUsedPercent: typeof disk_used_percent === 'number' ? disk_used_percent : undefined,
             }),
           );
 

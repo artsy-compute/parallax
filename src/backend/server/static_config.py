@@ -93,9 +93,9 @@ MODELS = {
     # ======================================= End ========================================#
 }
 
-NODE_JOIN_COMMAND_LOCAL_NETWORK = """parallax join"""
+NODE_JOIN_COMMAND_LOCAL_NETWORK = """parallax join --scheduler-addr {scheduler_addr} --profile auto --max-num-tokens-per-batch 4096 --max-sequence-length 7168 --max-batch-size 8 --kv-block-size 32"""
 
-NODE_JOIN_COMMAND_PUBLIC_NETWORK = """parallax join -s {scheduler_addr} """
+NODE_JOIN_COMMAND_PUBLIC_NETWORK = """parallax join --scheduler-addr {scheduler_addr} --profile auto --max-num-tokens-per-batch 4096 --max-sequence-length 7168 --max-batch-size 8 --kv-block-size 32 -r"""
 
 
 def get_model_info(model_name, use_hfcache: bool = False):

@@ -33,12 +33,22 @@ class RuntimeProfileError(RuntimeError):
     pass
 
 
+def _looks_like_peer_id(value: Optional[str]) -> bool:
+    text = str(value or '').strip()
+    return text.startswith('12D3Koo') or text.startswith('Qm')
+
+
 def infer_is_local_network(*, scheduler_addr: Optional[str], relay_servers: Optional[list[str]]) -> bool:
     if relay_servers:
         return False
     if scheduler_addr is None or scheduler_addr == "auto":
         return True
-    return str(scheduler_addr).startswith("/")
+    value = str(scheduler_addr).strip()
+    if value.startswith("/"):
+        return True
+    if _looks_like_peer_id(value):
+        return True
+    return False
 
 
 def detect_runtime_profile_name(*, is_local_network: Optional[bool] = None) -> str:

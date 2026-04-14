@@ -86,6 +86,16 @@ const LogContent = ({ content }: { content: string }) => {
   );
 };
 
+const formatUsageStat = (used?: number | null, total?: number | null, percent?: number | null, unit = 'GB') => {
+  if (typeof used === 'number' && typeof total === 'number' && typeof percent === 'number') {
+    return `${used.toFixed(1)}/${total.toFixed(1)} ${unit} (${percent.toFixed(0)}%)`;
+  }
+  if (typeof percent === 'number') {
+    return `${percent.toFixed(0)}%`;
+  }
+  return 'Unknown';
+};
+
 const HostRow = ({ host, onPing, onLogs, onStart, onStop, onRestart, pingState, actionState }: { host: NodeOverviewHost; onPing: (sshTarget: string) => Promise<void>; onLogs: (sshTarget: string) => Promise<void>; onStart: (sshTarget: string) => Promise<void>; onStop: (sshTarget: string) => Promise<void>; onRestart: (sshTarget: string) => Promise<void>; pingState?: string; actionState?: string }) => {
   const runtime = host.runtime || {};
   const hostProcess = host.host_process || { running: host.joined, confirmed_running: host.joined, source: host.joined ? 'joined' : 'unknown', message: host.joined ? 'Node is joined to the scheduler' : 'Remote process status unavailable' };
@@ -99,11 +109,15 @@ const HostRow = ({ host, onPing, onLogs, onStart, onStop, onRestart, pingState, 
           ? { label: 'Process running', color: 'warning' as const }
           : { label: 'Start pending', color: 'info' as const })
       : { label: 'Process stopped', color: 'default' as const };
+  const system = host.system || {};
   const details = [
     { label: 'SSH', value: host.ssh_target || 'Unavailable' },
     { label: 'Host', value: runtime.hostname || host.hostname_hint || 'Unknown' },
     { label: 'Layers', value: layerText },
     { label: 'GPU', value: `${runtime.gpu_num ? `${runtime.gpu_num}x ` : ''}${runtime.gpu_name || 'Unknown'}${runtime.gpu_memory ? ` ${runtime.gpu_memory}GB` : ''}` },
+    { label: 'CPU', value: typeof system.cpu_percent === 'number' ? `${system.cpu_percent.toFixed(0)}%` : 'Unknown' },
+    { label: 'RAM', value: formatUsageStat(system.ram_used_gb, system.ram_total_gb, system.ram_used_percent) },
+    { label: 'Disk', value: formatUsageStat(system.disk_used_gb, system.disk_total_gb, system.disk_used_percent) },
   ];
   return (
     <Paper
@@ -225,6 +239,68 @@ export default function PageNodes() {
     error: '',
   });
 
+  const applyOptimisticHostAction = (sshTarget: string, action: 'start' | 'stop' | 'restart') => {
+    setOverview((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        hosts: prev.hosts.map((host) => {
+          if (host.ssh_target !== sshTarget) {
+            return host;
+          }
+          if (action === 'stop') {
+            return {
+              ...host,
+              joined: false,
+              runtime: {
+                ...host.runtime,
+                status: 'waiting',
+                start_layer: null,
+                end_layer: null,
+                approx_remaining_context: null,
+              },
+              host_process: {
+                ...host.host_process,
+                running: false,
+                confirmed_running: false,
+                pid: '',
+                source: 'action',
+                message: 'Node stopped',
+                checked_at: Date.now() / 1000,
+              },
+              actions: {
+                ...host.actions,
+                can_start: true,
+                can_stop: false,
+                can_restart: false,
+              },
+            };
+          }
+          if (action === 'start' || action === 'restart') {
+            return {
+              ...host,
+              host_process: {
+                ...host.host_process,
+                running: true,
+                confirmed_running: false,
+                source: 'action_pending',
+                message: action === 'start' ? 'Node start requested' : 'Node restarted',
+                checked_at: Date.now() / 1000,
+              },
+              actions: {
+                ...host.actions,
+                can_start: false,
+                can_stop: false,
+                can_restart: false,
+              },
+            };
+          }
+          return host;
+        }),
+      };
+    });
+  };
+
   const loadOverview = async () => {
     try {
       setLoading(true);
@@ -267,6 +343,9 @@ export default function PageNodes() {
     setActionStates((prev) => ({ ...prev, [sshTarget]: `running:${action}` }));
     try {
       const result = await runner(sshTarget);
+      if (result.ok) {
+        applyOptimisticHostAction(sshTarget, action);
+      }
       setActionStates((prev) => ({ ...prev, [sshTarget]: `${result.ok ? 'ok' : 'err'}:${result.message}` }));
       window.setTimeout(() => {
         loadOverview();
@@ -343,7 +422,7 @@ export default function PageNodes() {
         </Stack>
 
         <Alert severity='info' sx={{ '& .MuiAlert-message': { fontSize: '0.8125rem' } }}>
-          Joined state updates live from the scheduler. Remote process status is SSH-probed on a cached interval so Start is disabled when a node process is already running.
+          CPU, RAM, and disk usage now come from native node heartbeat updates. Process status still uses the managed pid-file check so Start stays disabled when the managed node process is already running.
         </Alert>
 
         {error && <Alert severity='warning'>{error}</Alert>}

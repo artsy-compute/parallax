@@ -4,6 +4,7 @@ import time
 from typing import Any
 
 from backend.server.static_config import get_node_join_command
+from parallax.cli import PUBLIC_INITIAL_PEERS, PUBLIC_RELAY_SERVERS
 from parallax_utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -11,6 +12,7 @@ logger = get_logger(__name__)
 
 class NodeManagementService:
     PROCESS_STATUS_TTL_SEC = 20.0
+    ACTION_OVERRIDE_TTL_SEC = 15.0
 
     def __init__(self, scheduler_manage=None):
         self.scheduler_manage = scheduler_manage
@@ -68,6 +70,18 @@ class NodeManagementService:
             return None
         checked_at = float(cached.get('checked_at') or 0.0)
         if (time.time() - checked_at) > self.PROCESS_STATUS_TTL_SEC:
+            return None
+        return cached
+
+    def _recent_action_override(self, ssh_target: str) -> dict[str, Any] | None:
+        cached = self._cached_process_status(ssh_target)
+        if not cached:
+            return None
+        source = str(cached.get('source') or '')
+        if source not in {'action', 'action_pending'}:
+            return None
+        checked_at = float(cached.get('checked_at') or 0.0)
+        if (time.time() - checked_at) > self.ACTION_OVERRIDE_TTL_SEC:
             return None
         return cached
 
@@ -152,6 +166,8 @@ exit 0
         hosts: list[dict[str, Any]] = []
         for item in configured_hosts:
             hostname_hint = self._normalize_hostname(str(item.get('hostname_hint') or ''))
+            ssh_target = str(item.get('ssh_target') or '')
+            action_override = self._recent_action_override(ssh_target)
             live_match = None
             for candidate in live_by_hostname.get(hostname_hint, []):
                 node_id = str(candidate.get('node_id') or '')
@@ -159,6 +175,8 @@ exit 0
                     live_match = candidate
                     matched_live_node_ids.add(node_id)
                     break
+            if action_override and not bool(action_override.get('running')):
+                live_match = None
             can_remote_manage = bool(item.get('ssh_target')) and bool(item.get('parallax_path'))
             process_status = {
                 'running': bool(live_match),
@@ -168,15 +186,17 @@ exit 0
                 'message': 'Node is joined to the scheduler' if live_match else 'Remote process status unavailable',
                 'checked_at': time.time() if live_match else 0.0,
             }
-            if can_remote_manage and not live_match:
+            if action_override is not None:
+                process_status = action_override
+            elif can_remote_manage and not live_match:
                 process_status = self._probe_host_process(
-                    str(item.get('ssh_target') or ''),
+                    ssh_target,
                     str(item.get('parallax_path') or ''),
                 )
             hosts.append({
                 'id': str(item.get('ssh_target') or hostname_hint or item.get('line_number') or len(hosts)),
                 'display_name': str(item.get('ssh_target') or item.get('hostname_hint') or 'Configured host'),
-                'ssh_target': str(item.get('ssh_target') or ''),
+                'ssh_target': ssh_target,
                 'hostname_hint': str(item.get('hostname_hint') or ''),
                 'parallax_path': str(item.get('parallax_path') or ''),
                 'inventory_source': 'configured',
@@ -197,9 +217,13 @@ exit 0
                     'approx_remaining_context': live_match.get('approx_remaining_context') if live_match else None,
                 },
                 'system': {
-                    'cpu': None,
-                    'ram': None,
-                    'disk': None,
+                    'cpu_percent': live_match.get('cpu_percent') if live_match else None,
+                    'ram_used_gb': live_match.get('ram_used_gb') if live_match else None,
+                    'ram_total_gb': live_match.get('ram_total_gb') if live_match else None,
+                    'ram_used_percent': live_match.get('ram_used_percent') if live_match else None,
+                    'disk_used_gb': live_match.get('disk_used_gb') if live_match else None,
+                    'disk_total_gb': live_match.get('disk_total_gb') if live_match else None,
+                    'disk_used_percent': live_match.get('disk_used_percent') if live_match else None,
                 },
                 'host_process': process_status,
                 'actions': {
@@ -238,9 +262,13 @@ exit 0
                     'approx_remaining_context': node.get('approx_remaining_context'),
                 },
                 'system': {
-                    'cpu': None,
-                    'ram': None,
-                    'disk': None,
+                    'cpu_percent': node.get('cpu_percent'),
+                    'ram_used_gb': node.get('ram_used_gb'),
+                    'ram_total_gb': node.get('ram_total_gb'),
+                    'ram_used_percent': node.get('ram_used_percent'),
+                    'disk_used_gb': node.get('disk_used_gb'),
+                    'disk_total_gb': node.get('disk_total_gb'),
+                    'disk_used_percent': node.get('disk_used_percent'),
                 },
                 'host_process': {
                     'running': True,
@@ -316,17 +344,63 @@ exit 0
             return target, None, 'Configured host is missing PARALLAX_PATH'
         return target, configured, ''
 
-    def _join_command(self) -> str:
+    def _join_command(self) -> tuple[str, str]:
         if self.scheduler_manage is None:
-            return ''
-        scheduler_addr = self.scheduler_manage.get_peer_id()
+            return '', 'Scheduler is not initialized'
+        scheduler_addr = str(self.scheduler_manage.get_join_scheduler_addr() or '').strip()
         is_local_network = self.scheduler_manage.get_is_local_network()
         payload = get_node_join_command(scheduler_addr, is_local_network)
         if isinstance(payload, dict):
-            return str(payload.get('command') or '').strip()
+            return str(payload.get('command') or '').strip(), ''
         if isinstance(payload, str):
-            return payload.strip()
-        return ''
+            return payload.strip(), ''
+        return '', 'Scheduler is not ready to provide a join command'
+
+    @staticmethod
+    def _wrap_remote_login_shell(script: str) -> str:
+        quoted_script = shlex.quote(str(script or '').strip())
+        return f"""__parallax_shell="${{SHELL:-}}"
+if [ -z "$__parallax_shell" ] || [ ! -x "$__parallax_shell" ]; then
+  __parallax_shell=$(getent passwd "$(id -un 2>/dev/null || whoami)" 2>/dev/null | awk -F: 'NR==1{{print $7}}')
+fi
+if [ -z "$__parallax_shell" ] || [ ! -x "$__parallax_shell" ]; then
+  __parallax_shell=$(dscl . -read "/Users/$(id -un 2>/dev/null || whoami)" UserShell 2>/dev/null | awk 'NR==1{{print $2}}')
+fi
+if [ -z "$__parallax_shell" ] || [ ! -x "$__parallax_shell" ]; then
+  __parallax_shell=/bin/bash
+fi
+exec "$__parallax_shell" -lc {quoted_script}"""
+
+    @staticmethod
+    def _render_remote_join_command(join_command: str) -> str:
+        tokens = shlex.split(str(join_command or '').strip())
+        if not tokens:
+            return ''
+        if len(tokens) < 2 or tokens[0] != 'parallax' or tokens[1] != 'join':
+            return shlex.join(tokens)
+
+        passthrough = list(tokens[2:])
+        use_relay = False
+        filtered_args: list[str] = []
+        i = 0
+        while i < len(passthrough):
+            token = passthrough[i]
+            if token in {'-r', '--use-relay'}:
+                use_relay = True
+                i += 1
+                continue
+            filtered_args.append(token)
+            i += 1
+
+        launch_tokens = ['./venv/bin/python', 'src/parallax/launch.py', *filtered_args]
+        if use_relay:
+            launch_tokens.extend([
+                '--relay-servers',
+                *PUBLIC_RELAY_SERVERS,
+                '--initial-peers',
+                *PUBLIC_INITIAL_PEERS,
+            ])
+        return shlex.join(launch_tokens)
 
     @staticmethod
     def _node_action_paths(parallax_path: str) -> tuple[str, str]:
@@ -345,17 +419,56 @@ exit 0
         quoted_manager_log = shlex.quote(manager_log)
 
         if action == 'start':
-            join_command = self._join_command()
-            if not join_command:
-                return {'ok': False, 'message': 'Scheduler is not ready to provide a join command', 'ssh_target': target, 'action': action}
-            remote_command = f"""bash -lc '
+            join_command, join_error = self._join_command()
+            remote_join_command = self._render_remote_join_command(join_command)
+            if not join_command or not remote_join_command:
+                return {'ok': False, 'message': join_error or 'Scheduler is not ready to provide a join command', 'ssh_target': target, 'action': action}
+            remote_command = self._wrap_remote_login_shell(f"""
 set -e
 cd {quoted_path}
 mkdir -p logs
+launch_shell="${{SHELL:-}}"
+if [ -z "$launch_shell" ] || [ ! -x "$launch_shell" ]; then
+  launch_shell=/bin/bash
+fi
+{{
+  echo "=== PARALLAX NODE START ENV ==="
+  echo "timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)"
+  echo "user=$(id -un 2>/dev/null || whoami)"
+  echo "shell=${{SHELL:-unset}}"
+  echo "launch_shell=$launch_shell"
+  echo "pwd=$(pwd)"
+  echo "path=$PATH"
+  echo "which_python=$(command -v python 2>/dev/null || true)"
+  echo "which_python3=$(command -v python3 2>/dev/null || true)"
+  echo "which_parallax=$(command -v parallax 2>/dev/null || true)"
+  ls -ld venv venv/bin venv/bin/activate venv/bin/parallax venv/bin/python venv/bin/python3 2>/dev/null || true
+}} >> {quoted_manager_log} 2>&1
 if [ ! -f venv/bin/activate ]; then
   echo "Missing venv/bin/activate" >&2
   exit 2
 fi
+if [ ! -x venv/bin/parallax ]; then
+  echo "Missing executable venv/bin/parallax" >&2
+  exit 2
+fi
+source venv/bin/activate
+if [ "${{VIRTUAL_ENV:-}}" != "$(pwd)/venv" ] && [ "${{VIRTUAL_ENV:-}}" != "$PWD/venv" ]; then
+  echo "Failed to activate expected venv: ${{VIRTUAL_ENV:-unset}}" >&2
+  exit 2
+fi
+if [ "$(command -v python3 2>/dev/null || true)" != "$(pwd)/venv/bin/python3" ] && [ "$(command -v python 2>/dev/null || true)" != "$(pwd)/venv/bin/python" ]; then
+  echo "Activated python is not from venv" >&2
+  exit 2
+fi
+{{
+  echo "=== PARALLAX NODE START ENV AFTER ACTIVATE ==="
+  echo "virtual_env=${{VIRTUAL_ENV:-unset}}"
+  echo "which_python=$(command -v python 2>/dev/null || true)"
+  echo "which_python3=$(command -v python3 2>/dev/null || true)"
+  echo "which_parallax=$(command -v parallax 2>/dev/null || true)"
+  echo "remote_join_command={remote_join_command}"
+}} >> {quoted_manager_log} 2>&1
 if [ -f {quoted_pid} ]; then
   pid=$(cat {quoted_pid} 2>/dev/null || true)
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
@@ -365,19 +478,26 @@ if [ -f {quoted_pid} ]; then
   rm -f {quoted_pid}
 fi
 if command -v setsid >/dev/null 2>&1; then
-  nohup setsid bash -lc "cd {quoted_path} && . venv/bin/activate && exec {join_command}" >> {quoted_manager_log} 2>&1 < /dev/null &
+  nohup setsid "$launch_shell" -lc "cd {quoted_path} && source venv/bin/activate && exec {remote_join_command}" >> {quoted_manager_log} 2>&1 < /dev/null &
 else
-  nohup bash -lc "cd {quoted_path} && . venv/bin/activate && exec {join_command}" >> {quoted_manager_log} 2>&1 < /dev/null &
+  nohup "$launch_shell" -lc "cd {quoted_path} && source venv/bin/activate && exec {remote_join_command}" >> {quoted_manager_log} 2>&1 < /dev/null &
 fi
 pid=$!
+sleep 2
+if ! kill -0 "$pid" 2>/dev/null; then
+  echo "__PARALLAX_NODE_ACTION__:start_failed"
+  tail -n 40 {quoted_manager_log} 2>/dev/null || true
+  exit 1
+fi
 echo "$pid" > {quoted_pid}
 echo "__PARALLAX_NODE_ACTION__:started:$pid"
-'"""
+""")
             result = self._run_ssh_command(target, remote_command, timeout_sec=20)
         elif action in ('stop', 'restart'):
-            join_command = self._join_command() if action == 'restart' else ''
-            if action == 'restart' and not join_command:
-                return {'ok': False, 'message': 'Scheduler is not ready to provide a join command', 'ssh_target': target, 'action': action}
+            join_command, join_error = self._join_command() if action == 'restart' else ('', '')
+            remote_join_command = self._render_remote_join_command(join_command) if action == 'restart' else ''
+            if action == 'restart' and (not join_command or not remote_join_command):
+                return {'ok': False, 'message': join_error or 'Scheduler is not ready to provide a join command', 'ssh_target': target, 'action': action}
             finish_block = ""
             if action == 'restart':
                 finish_block = f"""
@@ -385,12 +505,35 @@ if [ ! -f venv/bin/activate ]; then
   echo "Missing venv/bin/activate" >&2
   exit 2
 fi
+if [ ! -x venv/bin/parallax ]; then
+  echo "Missing executable venv/bin/parallax" >&2
+  exit 2
+fi
+source venv/bin/activate
+if [ "${{VIRTUAL_ENV:-}}" != "$(pwd)/venv" ] && [ "${{VIRTUAL_ENV:-}}" != "$PWD/venv" ]; then
+  echo "Failed to activate expected venv: ${{VIRTUAL_ENV:-unset}}" >&2
+  exit 2
+fi
+if [ "$(command -v python3 2>/dev/null || true)" != "$(pwd)/venv/bin/python3" ] && [ "$(command -v python 2>/dev/null || true)" != "$(pwd)/venv/bin/python" ]; then
+  echo "Activated python is not from venv" >&2
+  exit 2
+fi
+launch_shell="${{SHELL:-}}"
+if [ -z "$launch_shell" ] || [ ! -x "$launch_shell" ]; then
+  launch_shell=/bin/bash
+fi
 if command -v setsid >/dev/null 2>&1; then
-  nohup setsid bash -lc "cd {quoted_path} && . venv/bin/activate && exec {join_command}" >> {quoted_manager_log} 2>&1 < /dev/null &
+  nohup setsid "$launch_shell" -lc "cd {quoted_path} && source venv/bin/activate && exec {remote_join_command}" >> {quoted_manager_log} 2>&1 < /dev/null &
 else
-  nohup bash -lc "cd {quoted_path} && . venv/bin/activate && exec {join_command}" >> {quoted_manager_log} 2>&1 < /dev/null &
+  nohup "$launch_shell" -lc "cd {quoted_path} && source venv/bin/activate && exec {remote_join_command}" >> {quoted_manager_log} 2>&1 < /dev/null &
 fi
 new_pid=$!
+sleep 2
+if ! kill -0 "$new_pid" 2>/dev/null; then
+  echo "__PARALLAX_NODE_ACTION__:restart_failed"
+  tail -n 40 {quoted_manager_log} 2>/dev/null || true
+  exit 1
+fi
 echo "$new_pid" > {quoted_pid}
 echo "__PARALLAX_NODE_ACTION__:restarted:$new_pid"
 """
@@ -402,7 +545,7 @@ else
   echo "__PARALLAX_NODE_ACTION__:not_running"
 fi
 """
-            remote_command = f"""bash -lc '
+            remote_command = self._wrap_remote_login_shell(f"""
 set -e
 cd {quoted_path}
 mkdir -p logs
@@ -420,7 +563,7 @@ if [ -f {quoted_pid} ]; then
   rm -f {quoted_pid}
 fi
 {finish_block}
-'"""
+""")
             result = self._run_ssh_command(target, remote_command, timeout_sec=25)
         else:
             return {'ok': False, 'message': f'Unsupported node action: {action}', 'ssh_target': target, 'action': action}
@@ -440,6 +583,12 @@ fi
                 result['message'] = 'Node is not running'
             elif status.startswith('already_running:'):
                 result['message'] = f"Node is already running (pid {status.split(':', 1)[1]})"
+            elif status == 'start_failed':
+                result['ok'] = False
+                result['message'] = stderr or stdout or 'Node failed to stay running after launch'
+            elif status == 'restart_failed':
+                result['ok'] = False
+                result['message'] = stderr or stdout or 'Node failed to stay running after restart'
         checked_at = time.time()
         if action == 'start':
             if '__PARALLAX_NODE_ACTION__:started:' in stdout or '__PARALLAX_NODE_ACTION__:already_running:' in stdout:

@@ -26,7 +26,7 @@ from typing import Dict, List, Literal, Optional, Set, Tuple
 from parallax_utils.logging_config import get_logger
 from scheduling.model_info import ModelInfo
 from scheduling.node import Node
-from scheduling.node_management import NodeManager
+from scheduling.node_management import NodeManager, NodeState
 
 logger = get_logger(__name__)
 
@@ -181,7 +181,18 @@ class BaseLayerAllocator:
         for layer_id in range(start_layer, end_layer):
             if layer_id in self.layer_to_load:
                 self.layer_to_load[layer_id].remove_node(node)
-        self.node_management.standby([node.node_id])
+        state = self.node_management.state_of(node.node_id)
+        if state == NodeState.ACTIVE:
+            self.node_management.standby([node.node_id])
+        else:
+            logger.debug(
+                "[LayerAllocator] Node %s had allocation [%d, %d) but state=%s; clearing serving state without ACTIVE->STANDBY transition",
+                node.node_id,
+                start_layer,
+                end_layer,
+                state,
+            )
+            node.clear_serving_state()
         self._update_layer_loads_heap()
 
     def reallocate(self, node: Node, start_layer: int, end_layer: int) -> None:

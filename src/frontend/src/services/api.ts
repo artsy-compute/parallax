@@ -134,9 +134,13 @@ export interface NodeOverviewHost {
     readonly approx_remaining_context?: number | null;
   };
   readonly system: {
-    readonly cpu?: unknown;
-    readonly ram?: unknown;
-    readonly disk?: unknown;
+    readonly cpu_percent?: number | null;
+    readonly ram_used_gb?: number | null;
+    readonly ram_total_gb?: number | null;
+    readonly ram_used_percent?: number | null;
+    readonly disk_used_gb?: number | null;
+    readonly disk_total_gb?: number | null;
+    readonly disk_used_percent?: number | null;
   };
   readonly host_process?: {
     readonly running: boolean;

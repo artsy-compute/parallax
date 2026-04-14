@@ -199,6 +199,13 @@ class Node:
     # otherwise, use roofline performance model to estimate
     avg_layer_latency_ms: Optional[float] = None
     approx_remaining_context: Optional[int] = None
+    cpu_percent: Optional[float] = None
+    ram_used_gb: Optional[float] = None
+    ram_total_gb: Optional[float] = None
+    ram_used_percent: Optional[float] = None
+    disk_used_gb: Optional[float] = None
+    disk_total_gb: Optional[float] = None
+    disk_used_percent: Optional[float] = None
     load_compensator: float = 0.05
 
     rtt_to_nodes: Optional[Dict[str, float]] = None

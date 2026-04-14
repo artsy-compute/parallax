@@ -224,13 +224,13 @@ async def scheduler_init(raw_request: Request):
 
 @app.get("/node/join/command")
 async def node_join_command():
-    peer_id = scheduler_manage.get_peer_id()
+    scheduler_addr = scheduler_manage.get_join_scheduler_addr()
     is_local_network = scheduler_manage.get_is_local_network()
 
     return JSONResponse(
         content={
             "type": "node_join_command",
-            "data": get_node_join_command(peer_id, is_local_network),
+            "data": get_node_join_command(scheduler_addr, is_local_network),
         },
         status_code=200,
     )
@@ -468,6 +468,7 @@ if __name__ == "__main__":
         ],
         announce_maddrs=args.announce_maddrs,
         http_port=args.port,
+        scheduler_host=args.host,
         use_hfcache=args.use_hfcache,
         enable_weight_refit=args.enable_weight_refit,
         weight_refit_mode=args.weight_refit_mode,

@@ -2,6 +2,7 @@
 
 import random
 import socket
+from pathlib import Path
 from typing import List
 
 import mlx.core as mx
@@ -54,6 +55,28 @@ def get_current_device():
     if is_mps_available():
         device = "mlx"
     return device
+
+
+def get_host_usage_snapshot(disk_path: str = '/') -> dict:
+    """Best-effort host CPU/RAM/disk usage snapshot for node heartbeats."""
+    try:
+        cpu_percent = float(psutil.cpu_percent(interval=None))
+        vm = psutil.virtual_memory()
+        candidate = Path(disk_path)
+        if not candidate.exists():
+            candidate = Path.home()
+        disk = psutil.disk_usage(str(candidate))
+        return {
+            'cpu_percent': cpu_percent,
+            'ram_used_gb': round((vm.total - vm.available) / 2**30, 2),
+            'ram_total_gb': round(vm.total / 2**30, 2),
+            'ram_used_percent': float(vm.percent),
+            'disk_used_gb': round(disk.used / 2**30, 2),
+            'disk_total_gb': round(disk.total / 2**30, 2),
+            'disk_used_percent': float(disk.percent),
+        }
+    except Exception:
+        return {}
 
 
 def get_device_dtype(dtype_str: str, device: str):
