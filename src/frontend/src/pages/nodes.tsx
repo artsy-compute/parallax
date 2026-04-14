@@ -41,6 +41,51 @@ const HardwareIcon = ({ gpuName }: { gpuName?: string | null }) => {
   return <IconCpu size={18} />;
 };
 
+
+const getLogLineStyle = (line: string) => {
+  const upper = line.toUpperCase();
+  if (upper.includes('[ERROR') || upper.includes(' ERROR ') || upper.startsWith('ERROR')) {
+    return { color: 'error.dark', bgcolor: 'rgba(211, 47, 47, 0.08)' };
+  }
+  if (upper.includes('[WARNING') || upper.includes(' WARNING ') || upper.startsWith('WARNING') || upper.includes('[WARN')) {
+    return { color: 'warning.dark', bgcolor: 'rgba(237, 108, 2, 0.08)' };
+  }
+  if (upper.includes('[INFO') || upper.includes(' INFO ') || upper.startsWith('INFO')) {
+    return { color: 'info.dark', bgcolor: 'rgba(2, 136, 209, 0.06)' };
+  }
+  if (upper.includes('[DEBUG') || upper.includes(' DEBUG ') || upper.startsWith('DEBUG')) {
+    return { color: 'text.secondary', bgcolor: 'rgba(158, 158, 158, 0.05)' };
+  }
+  return { color: 'text.primary', bgcolor: 'transparent' };
+};
+
+const LogContent = ({ content }: { content: string }) => {
+  const lines = String(content || '').replace(/\r/g, '').split('\n');
+  return (
+    <Box sx={{ fontFamily: 'monospace', fontSize: '0.78rem', lineHeight: 1.45 }}>
+      {lines.map((line, index) => {
+        const style = getLogLineStyle(line);
+        return (
+          <Box
+            key={`${index}-${line.slice(0, 24)}`}
+            sx={{
+              px: 0.75,
+              py: 0.125,
+              borderRadius: 0.75,
+              color: style.color,
+              bgcolor: style.bgcolor,
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+            }}
+          >
+            {line || ' '}
+          </Box>
+        );
+      })}
+    </Box>
+  );
+};
+
 const HostRow = ({ host, onPing, onLogs, pingState }: { host: NodeOverviewHost; onPing: (sshTarget: string) => Promise<void>; onLogs: (sshTarget: string) => Promise<void>; pingState?: string }) => {
   const runtime = host.runtime || {};
   const layerText = typeof runtime.start_layer === 'number' || typeof runtime.end_layer === 'number' || typeof runtime.total_layers === 'number'
@@ -274,9 +319,7 @@ export default function PageNodes() {
             )}
             {!logsDialog.loading && !logsDialog.error && (
               <Paper variant='outlined' sx={{ p: 1.5, borderRadius: 2, bgcolor: 'grey.50', maxHeight: '26rem', overflow: 'auto' }}>
-                <Typography component='pre' sx={{ m: 0, fontFamily: 'monospace', fontSize: '0.78rem', whiteSpace: 'pre-wrap' }}>
-                  {logsDialog.content || 'No log content returned.'}
-                </Typography>
+                <LogContent content={logsDialog.content || 'No log content returned.'} />
               </Paper>
             )}
           </Stack>
