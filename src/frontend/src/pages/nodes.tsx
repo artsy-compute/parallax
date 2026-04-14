@@ -1,7 +1,17 @@
 import { useEffect, useState } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
-import { Alert, Box, Button, Chip, Dialog, DialogContent, DialogTitle, Paper, Stack, Typography } from '@mui/material';
-import { IconArrowLeft, IconPlugConnected, IconRefresh } from '@tabler/icons-react';
+import { Alert, Box, Button, Chip, Dialog, DialogContent, DialogTitle, IconButton, Paper, Stack, Tooltip, Typography } from '@mui/material';
+import {
+  IconArrowLeft,
+  IconBrandApple,
+  IconCpu,
+  IconFileText,
+  IconPlayerPause,
+  IconPlayerPlay,
+  IconPlugConnected,
+  IconRefresh,
+  IconRotateClockwise2,
+} from '@tabler/icons-react';
 import { DrawerLayout } from '../components/common';
 import { getNodeLogs, getNodesOverview, pingNodeHost, type NodeOverviewHost, type NodesOverview } from '../services/api';
 
@@ -16,48 +26,110 @@ const StatusChip = ({ label, color = 'default' }: { label: string; color?: 'defa
   <Chip size='small' label={label} color={color === 'default' ? undefined : color} variant={color === 'default' ? 'outlined' : 'filled'} />
 );
 
+
+const HardwareIcon = ({ gpuName }: { gpuName?: string | null }) => {
+  const name = String(gpuName || '').toLowerCase();
+  if (name.includes('apple') || name.includes('m1') || name.includes('m2') || name.includes('m3') || name.includes('m4')) {
+    return <IconBrandApple size={18} />;
+  }
+  if (name.includes('nvidia') || name.includes('rtx') || name.includes('gtx') || name.includes('a100') || name.includes('h100')) {
+    return <Typography component='span' sx={{ fontSize: '0.72rem', fontWeight: 700, lineHeight: 1 }}>NV</Typography>;
+  }
+  if (name.includes('amd') || name.includes('radeon') || name.includes('instinct')) {
+    return <Typography component='span' sx={{ fontSize: '0.72rem', fontWeight: 700, lineHeight: 1 }}>AMD</Typography>;
+  }
+  return <IconCpu size={18} />;
+};
+
 const HostRow = ({ host, onPing, onLogs, pingState }: { host: NodeOverviewHost; onPing: (sshTarget: string) => Promise<void>; onLogs: (sshTarget: string) => Promise<void>; pingState?: string }) => {
   const runtime = host.runtime || {};
   const layerText = typeof runtime.start_layer === 'number' || typeof runtime.end_layer === 'number' || typeof runtime.total_layers === 'number'
     ? `[${typeof runtime.start_layer === 'number' ? runtime.start_layer : '?'}, ${typeof runtime.end_layer === 'number' ? runtime.end_layer : '?'})${typeof runtime.total_layers === 'number' ? ` of ${runtime.total_layers}` : ''}`
     : 'Not assigned';
+  const details = [
+    { label: 'SSH', value: host.ssh_target || 'Unavailable' },
+    { label: 'Host', value: runtime.hostname || host.hostname_hint || 'Unknown' },
+    { label: 'Layers', value: layerText },
+    { label: 'GPU', value: `${runtime.gpu_num ? `${runtime.gpu_num}x ` : ''}${runtime.gpu_name || 'Unknown'}${runtime.gpu_memory ? ` ${runtime.gpu_memory}GB` : ''}` },
+  ];
   return (
-    <Paper variant='outlined' sx={{ p: 2, borderRadius: 2 }}>
-      <Stack direction={{ xs: 'column', md: 'row' }} sx={{ justifyContent: 'space-between', gap: 2 }}>
-        <Stack sx={{ gap: 0.75, minWidth: 0 }}>
-          <Stack direction='row' sx={{ gap: 1, flexWrap: 'wrap', alignItems: 'center' }}>
-            <Typography variant='body1' sx={{ fontWeight: 600 }}>{host.display_name}</Typography>
-            <StatusChip label={host.joined ? 'Joined' : 'Not joined'} color={host.joined ? 'success' : 'warning'} />
-            <StatusChip label={host.inventory_source === 'configured' ? 'Configured host' : 'Live node'} color={host.inventory_source === 'configured' ? 'info' : 'default'} />
-            {runtime.status && <StatusChip label={`Runtime: ${runtime.status}`} color={runtime.status === 'available' ? 'success' : 'default'} />}
+    <Paper variant='outlined' sx={{ p: 1.5, borderRadius: 2 }}>
+      <Stack sx={{ gap: 1 }}>
+        <Stack direction={{ xs: 'column', lg: 'row' }} sx={{ justifyContent: 'space-between', gap: 1.25, alignItems: { lg: 'flex-start' } }}>
+          <Stack sx={{ gap: 0.75, minWidth: 0, flex: 1 }}>
+            <Stack direction='row' sx={{ gap: 0.75, flexWrap: 'wrap', alignItems: 'center' }}>
+              <Box
+                sx={{
+                  width: 24,
+                  height: 24,
+                  borderRadius: 1.25,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  bgcolor: 'rgba(255,255,255,0.6)',
+                  color: 'text.secondary',
+                  border: '1px solid',
+                  borderColor: 'divider',
+                  flex: 'none',
+                }}
+              >
+                <HardwareIcon gpuName={runtime.gpu_name} />
+              </Box>
+              <Typography variant='body1' sx={{ fontWeight: 600 }}>{host.display_name}</Typography>
+              <StatusChip label={host.joined ? 'Joined' : 'Not joined'} color={host.joined ? 'success' : 'warning'} />
+              <StatusChip label={host.inventory_source === 'configured' ? 'Configured host' : 'Live node'} color={host.inventory_source === 'configured' ? 'info' : 'default'} />
+              {runtime.status && <StatusChip label={`Runtime: ${runtime.status}`} color={runtime.status === 'available' ? 'success' : 'default'} />}
+            </Stack>
+            <Box
+              sx={{
+                display: 'grid',
+                gridTemplateColumns: { xs: '1fr', md: 'repeat(2, minmax(0, 1fr))' },
+                columnGap: 1.5,
+                rowGap: 0.35,
+                minWidth: 0,
+              }}
+            >
+              {details.map((item) => (
+                <Typography key={item.label} variant='caption' color='text.secondary' sx={{ minWidth: 0 }}>
+                  <Box component='span' sx={{ color: 'text.disabled' }}>{item.label}: </Box>
+                  <Box component='span' sx={{ color: 'text.primary' }}>{item.value}</Box>
+                </Typography>
+              ))}
+            </Box>
           </Stack>
-          {host.ssh_target && <Typography variant='caption' color='text.secondary'>SSH target: {host.ssh_target}</Typography>}
-          {(runtime.hostname || host.hostname_hint) && <Typography variant='caption' color='text.secondary'>Hostname: {runtime.hostname || host.hostname_hint}</Typography>}
-          <Typography variant='caption' color='text.secondary'>Layers: {layerText}</Typography>
-          <Typography variant='caption' color='text.secondary'>GPU: {runtime.gpu_num ? `${runtime.gpu_num}x ` : ''}{runtime.gpu_name || 'Unknown'}{runtime.gpu_memory ? ` ${runtime.gpu_memory}GB` : ''}</Typography>
-          <Typography variant='caption' color='text.disabled'>CPU / RAM / Disk metrics are not collected yet in this first node-management pass.</Typography>
+          <Stack direction='row' sx={{ gap: 0.25, flexWrap: 'wrap', alignItems: 'center', flex: 'none' }}>
+            <Tooltip title={pingState === 'running' ? 'Pinging node' : 'Ping node over SSH'}>
+              <span>
+                <IconButton
+                  size='small'
+                  color='primary'
+                  disabled={!host.actions.can_ping || pingState === 'running'}
+                  onClick={() => onPing(host.ssh_target)}
+                >
+                  <IconPlugConnected size={16} />
+                </IconButton>
+              </span>
+            </Tooltip>
+            <Tooltip title='Start node (not wired yet)'>
+              <span><IconButton size='small' disabled><IconPlayerPlay size={16} /></IconButton></span>
+            </Tooltip>
+            <Tooltip title='Stop node (not wired yet)'>
+              <span><IconButton size='small' disabled><IconPlayerPause size={16} /></IconButton></span>
+            </Tooltip>
+            <Tooltip title='Restart node (not wired yet)'>
+              <span><IconButton size='small' disabled><IconRotateClockwise2 size={16} /></IconButton></span>
+            </Tooltip>
+            <Tooltip title='Open remote logs'>
+              <span><IconButton size='small' disabled={!host.ssh_target} onClick={() => onLogs(host.ssh_target)}><IconFileText size={16} /></IconButton></span>
+            </Tooltip>
+          </Stack>
         </Stack>
-        <Stack direction='row' sx={{ gap: 1, alignItems: 'flex-start', flexWrap: 'wrap' }}>
-          <Button
-            size='small'
-            variant='outlined'
-            startIcon={<IconPlugConnected size={16} />}
-            disabled={!host.actions.can_ping || pingState === 'running'}
-            onClick={() => onPing(host.ssh_target)}
-          >
-            {pingState === 'running' ? 'Pinging...' : 'Ping'}
-          </Button>
-          <Button size='small' variant='outlined' disabled>Start</Button>
-          <Button size='small' variant='outlined' disabled>Stop</Button>
-          <Button size='small' variant='outlined' disabled>Restart</Button>
-          <Button size='small' variant='outlined' disabled={!host.ssh_target} onClick={() => onLogs(host.ssh_target)}>Logs</Button>
-        </Stack>
+        {pingState && pingState !== 'running' && (
+          <Alert severity={pingState.startsWith('ok:') ? 'success' : 'warning'} sx={{ '& .MuiAlert-message': { fontSize: '0.8125rem' }, py: 0 }}>
+            {pingState.startsWith('ok:') ? pingState.slice(3) : pingState.startsWith('err:') ? pingState.slice(4) : pingState}
+          </Alert>
+        )}
       </Stack>
-      {pingState && pingState !== 'running' && (
-        <Alert severity={pingState.startsWith('ok:') ? 'success' : 'warning'} sx={{ mt: 1.5, '& .MuiAlert-message': { fontSize: '0.8125rem' } }}>
-          {pingState.startsWith('ok:') ? pingState.slice(3) : pingState.startsWith('err:') ? pingState.slice(4) : pingState}
-        </Alert>
-      )}
     </Paper>
   );
 };
@@ -138,12 +210,12 @@ export default function PageNodes() {
   const hosts = overview?.hosts || [];
 
   return (
-    <DrawerLayout>
+    <DrawerLayout contentWidth='wide'>
       <Stack sx={{ gap: 2, minHeight: 0, overflow: 'auto', pb: 2 }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} sx={{ justifyContent: 'space-between', gap: 1, alignItems: { sm: 'center' } }}>
           <Stack sx={{ gap: 0.5 }}>
             <Typography variant='h5'>Node Management</Typography>
-            <Typography variant='body2' color='text.secondary'>Review configured hosts versus live joined nodes. Ping is available now; remote start/stop/restart and logs are the next step.</Typography>
+            <Typography variant='body2' color='text.secondary'>Configured hosts, live nodes, SSH ping, and logs.</Typography>
           </Stack>
           <Stack direction='row' sx={{ gap: 1, flexWrap: 'wrap' }}>
             <Button component={RouterLink} to='/chat' variant='text' startIcon={<IconArrowLeft size={16} />}>Back to chat</Button>
@@ -159,13 +231,13 @@ export default function PageNodes() {
         </Stack>
 
         <Alert severity='info' sx={{ '& .MuiAlert-message': { fontSize: '0.8125rem' } }}>
-          This first node-management page focuses on visibility and SSH ping. CPU/RAM/disk usage, logs, and remote process control are not wired yet.
+          Start, stop, restart, and system metrics are placeholders for now.
         </Alert>
 
         {error && <Alert severity='warning'>{error}</Alert>}
         {loading && !overview && <Typography variant='body2' color='text.secondary'>Loading node overview...</Typography>}
 
-        <Stack sx={{ gap: 1.5 }}>
+        <Stack sx={{ gap: 1 }}>
           {hosts.map((host) => (
             <HostRow
               key={host.id}

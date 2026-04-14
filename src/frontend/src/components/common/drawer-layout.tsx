@@ -71,10 +71,12 @@ const DrawerLayoutContainer = styled(Stack)(({ theme }) => {
   };
 });
 
-const DrawerLayoutContent = styled(Stack)(({ theme }) => {
+const DrawerLayoutContent = styled(Stack, {
+  shouldForwardProp: (prop) => prop !== 'contentWidth',
+})<{ contentWidth?: 'default' | 'wide' }>(({ theme, contentWidth = 'default' }) => {
   const { spacing } = theme;
   return {
-    width: '48.75rem',
+    width: contentWidth === 'wide' ? '72rem' : '48.75rem',
     maxWidth: '100%',
     height: '100%',
     gap: spacing(2),
@@ -84,7 +86,7 @@ const DrawerLayoutContent = styled(Stack)(({ theme }) => {
   };
 });
 
-export const DrawerLayout: FC<PropsWithChildren> = ({ children }) => {
+export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wide' }>> = ({ children, contentWidth = 'default' }) => {
   const [{ type: hostType }] = useHost();
   const theme = useTheme();
   const narrowWindow = useMediaQuery(theme.breakpoints.down('lg'));
@@ -388,7 +390,7 @@ export const DrawerLayout: FC<PropsWithChildren> = ({ children }) => {
             onNodeCountsClick={() => setClusterSettingsOpen(true)}
           />
         </DrawerLayoutHeader>
-        <DrawerLayoutContent>
+        <DrawerLayoutContent contentWidth={contentWidth}>
           {topologyChangeAdvisory.show && (
             <Stack
               direction='row'
