@@ -30,6 +30,47 @@ class RPCConnectionHandler(ConnectionHandler):
         self.scheduler = scheduler
         self.http_port = http_port
 
+    def _expected_model_names(self) -> set[str]:
+        model_info = getattr(self.scheduler, 'model_info', None)
+        names = set()
+        for attr in ('model_name', 'mlx_model_name'):
+            value = getattr(model_info, attr, None)
+            if value:
+                names.add(str(value))
+        return names
+
+    def _should_recover_layer_allocation(self, message: dict) -> bool:
+        if not (message.get('recovery_layer_allocation') and message.get('start_layer') is not None and message.get('end_layer') is not None):
+            return False
+
+        start_layer = int(message.get('start_layer'))
+        end_layer = int(message.get('end_layer'))
+        total_layers = int(getattr(self.scheduler, 'num_layers', 0) or 0)
+        if start_layer < 0 or end_layer <= start_layer or (total_layers > 0 and end_layer > total_layers):
+            logger.info(
+                'Ignoring retained layer allocation [%s, %s) for node %s because it is invalid for current scheduler total_layers=%s',
+                start_layer,
+                end_layer,
+                message.get('node_id'),
+                total_layers,
+            )
+            return False
+
+        message_model_name = str(message.get('model_name') or '').strip()
+        expected_model_names = self._expected_model_names()
+        if expected_model_names and message_model_name and message_model_name not in expected_model_names:
+            logger.info(
+                'Ignoring retained layer allocation [%s, %s) for node %s because heartbeat model %s does not match current scheduler model(s) %s',
+                start_layer,
+                end_layer,
+                message.get('node_id'),
+                message_model_name,
+                sorted(expected_model_names),
+            )
+            return False
+
+        return True
+
     @rpc_stream
     def node_join(self, message):
         # node = {
@@ -48,7 +89,7 @@ class RPCConnectionHandler(ConnectionHandler):
         logger.info(f"receive node_join request: {message}")
         try:
             node = self.build_node(message)
-            if message.get("recovery_layer_allocation") and message.get("start_layer") is not None and message.get("end_layer") is not None:
+            if self._should_recover_layer_allocation(message):
                 node.manual_layer_assignment = True
                 logger.info(
                     "Applying retained layer allocation during node_join recovery for %s: [%s, %s)",
@@ -89,7 +130,7 @@ class RPCConnectionHandler(ConnectionHandler):
             # Check if node exists in scheduler
             if self.scheduler.get_node(node.node_id) is None:
                 # Node not found, automatically join it (e.g., after scheduler restart)
-                if message.get("recovery_layer_allocation") and message.get("start_layer") is not None and message.get("end_layer") is not None:
+                if self._should_recover_layer_allocation(message):
                     node.manual_layer_assignment = True
                     logger.info(
                         "Node %s not found in scheduler; recovering retained allocation [%s, %s) via node_update",
@@ -222,9 +263,8 @@ class RPCConnectionHandler(ConnectionHandler):
             manual_layer_assignment=node_json.get("manual_layer_assignment", False),
             last_refit_time=node_json.get("last_refit_time", 0.0),
         )
-        if node_json.get("start_layer", None) is not None:
+        if self._should_recover_layer_allocation(node_json):
             node.start_layer = node_json.get("start_layer")
-        if node_json.get("end_layer", None) is not None:
             node.end_layer = node_json.get("end_layer")
         if node_json.get("current_requests", None) is not None:
             node.current_requests = node_json.get("current_requests")

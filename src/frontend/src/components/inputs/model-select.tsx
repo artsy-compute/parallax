@@ -149,9 +149,14 @@ const formatRequiredMemory = (vram: number) => (vram > 0 ? `${vram} GB` : '');
 
 const renderOption = (
   { name, displayName, logoUrl, vram }: ModelInfo,
-  { selected, loading }: { selected?: boolean; loading?: boolean },
+  {
+    selected,
+    loading,
+    disabled,
+    disabledReason,
+  }: { selected?: boolean; loading?: boolean; disabled?: boolean; disabledReason?: string },
 ): ReactNode => (
-  <ModelSelectOption key={name} value={name}>
+  <ModelSelectOption key={name} value={name} disabled={disabled}>
     <ModelExtraStatus
       {...(loading && {
         animate: { rotate: 360 },
@@ -167,7 +172,7 @@ const renderOption = (
     <ModelLogo src={logoUrl} />
     <ModelInfoColumn gap={0.125}>
       <ModelDisplayName>{displayName}</ModelDisplayName>
-      <ModelName>{name}</ModelName>
+      <ModelName>{disabled && disabledReason ? disabledReason : name}</ModelName>
     </ModelInfoColumn>
     {vram > 0 && <ModelMemory>{formatRequiredMemory(vram)}</ModelMemory>}
   </ModelSelectOption>
@@ -226,6 +231,8 @@ export const ModelSelect: FC<ModelSelectProps> = ({
   const [canAutoCommit, setCanAutoCommit] = useState(false);
   const activeNodes = nodeInfoList.filter((node) => node.status === 'available').length;
   const inactiveNodes = nodeInfoList.length - activeNodes;
+  const clusterVramGb = nodeInfoList.reduce((total, node) => total + ((node.gpuMemory || 0) * Math.max(1, node.gpuNumber || 1)), 0);
+  const canEvaluateCapacity = clusterVramGb > 0;
 
   const handleNodeCountsClick = useRefCallback((event: MouseEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -273,7 +280,9 @@ export const ModelSelect: FC<ModelSelectProps> = ({
               clusterStatus !== 'idle'
               && name === configModelName
               && configModelName !== clusterModelName;
-            return renderOption(model, { selected, loading });
+            const disabledForCapacity = !selected && canEvaluateCapacity && model.vram > 0 && model.vram > clusterVramGb;
+            const disabledReason = disabledForCapacity ? `Needs ${formatRequiredMemory(model.vram)}; cluster has ${formatRequiredMemory(clusterVramGb)}` : '';
+            return renderOption(model, { selected, loading, disabled: disabledForCapacity, disabledReason });
           })}
         </ModelSelectRoot>
         {showNodeCounts && (

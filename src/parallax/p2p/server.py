@@ -1090,6 +1090,7 @@ class GradientServer:
             "status": self._get_status(),
             "is_active": self._get_status() == ServerState.READY.value,
             "last_refit_time": self.last_refit_time,
+            "model_name": self.model_name,
         }
 
         if self.block_start_index is not None and self.block_end_index is not None:
