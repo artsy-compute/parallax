@@ -16,9 +16,9 @@ import { DrawerLayout } from '../components/common';
 import { getNodeLogs, getNodesOverview, pingNodeHost, restartNodeHost, startNodeHost, stopNodeHost, type NodeOverviewHost, type NodesOverview } from '../services/api';
 
 const SummaryCard = ({ label, value }: { label: string; value: number }) => (
-  <Paper variant='outlined' sx={{ p: 2, borderRadius: 2, minWidth: 0, flex: 1 }}>
-    <Typography variant='caption' color='text.secondary'>{label}</Typography>
-    <Typography variant='h6'>{value}</Typography>
+  <Paper variant='outlined' sx={{ p: 1.5, borderRadius: 2, minWidth: 0, flex: 1 }}>
+    <Typography variant='caption' color='text.secondary' sx={{ fontSize: '0.72rem', letterSpacing: '0.02em' }}>{label}</Typography>
+    <Typography variant='h6' sx={{ fontSize: '1.1rem', lineHeight: 1.15 }}>{value}</Typography>
   </Paper>
 );
 
@@ -325,9 +325,9 @@ export default function PageNodes() {
     <DrawerLayout contentWidth='wide'>
       <Stack sx={{ gap: 2, minHeight: 0, overflow: 'auto', pb: 2 }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} sx={{ justifyContent: 'space-between', gap: 1, alignItems: { sm: 'center' } }}>
-          <Stack sx={{ gap: 0.5 }}>
-            <Typography variant='h5'>Node Management</Typography>
-            <Typography variant='body2' color='text.secondary'>Configured hosts, live nodes, SSH ping, and logs.</Typography>
+          <Stack sx={{ gap: 0.25 }}>
+            <Typography variant='h6' sx={{ fontSize: '1.1rem', fontWeight: 700 }}>Node Management</Typography>
+            <Typography variant='caption' color='text.secondary' sx={{ fontSize: '0.76rem' }}>Configured hosts, live nodes, SSH ping, and logs.</Typography>
           </Stack>
           <Stack direction='row' sx={{ gap: 1, flexWrap: 'wrap' }}>
             <Button component={RouterLink} to='/chat' variant='text' startIcon={<IconArrowLeft size={16} />}>Back to chat</Button>
