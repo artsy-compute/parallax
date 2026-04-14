@@ -20,6 +20,61 @@ export const getModelList = async (): Promise<readonly any[]> => {
   return message.data;
 };
 
+export interface CustomModelRecord {
+  readonly id: string;
+  readonly source_type: 'huggingface' | 'local_path';
+  readonly source_value: string;
+  readonly display_name: string;
+  readonly enabled: boolean;
+  readonly validation_status: string;
+  readonly validation_message: string;
+  readonly detected_model_type?: string;
+  readonly supports_sharding?: boolean | number;
+  readonly vram_gb?: number;
+  readonly metadata_json?: string;
+  readonly created_at?: number;
+  readonly updated_at?: number;
+}
+
+export const getCustomModelList = async (): Promise<readonly CustomModelRecord[]> => {
+  const response = await fetch(`${API_BASE_URL}/model/custom`, { method: 'GET' });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'custom_model_list') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  return message.data;
+};
+
+export const addCustomModel = async (params: {
+  source_type: 'huggingface' | 'local_path';
+  source_value: string;
+  display_name?: string;
+}): Promise<CustomModelRecord> => {
+  const response = await fetch(`${API_BASE_URL}/model/custom`, {
+    method: 'POST',
+    body: JSON.stringify(params),
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'custom_model_add') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const deleteCustomModel = async (modelId: string): Promise<{ deleted: boolean; model_id: string }> => {
+  const response = await fetch(`${API_BASE_URL}/model/custom/${encodeURIComponent(modelId)}`, {
+    method: 'DELETE',
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'custom_model_delete') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  return message.data;
+};
+
 export const initScheduler = async (params: {
   model_name: string;
   init_nodes_num: number;

@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from backend.server.custom_models import CustomModelStore
 from backend.server.node_management import NodeManagementService
 from backend.server.request_handler import RequestHandler
 from backend.server.scheduler_manage import SchedulerManage
@@ -40,6 +41,7 @@ logger = get_logger(__name__)
 
 scheduler_manage = None
 node_management = None
+custom_model_store = CustomModelStore()
 request_handler = RequestHandler()
 
 FRONTEND_DIR = get_project_root() / "src" / "frontend"
@@ -154,10 +156,81 @@ async def weight_refit_timstamp():
 
 @app.get("/model/list")
 async def model_list():
+    static_models = list(get_model_list())
+    custom_models = custom_model_store.list_model_entries()
+    merged_models: list[dict] = []
+    seen_names: set[str] = set()
+    for item in [*static_models, *custom_models]:
+        name = str(item.get("name") or "").strip()
+        if not name or name in seen_names:
+            continue
+        seen_names.add(name)
+        merged_models.append(item)
     return JSONResponse(
         content={
             "type": "model_list",
-            "data": get_model_list(),
+            "data": merged_models,
+        },
+        status_code=200,
+    )
+
+
+@app.get("/model/custom")
+async def custom_model_list():
+    return JSONResponse(
+        content={
+            "type": "custom_model_list",
+            "data": custom_model_store.list_models(),
+        },
+        status_code=200,
+    )
+
+
+@app.post("/model/custom")
+async def custom_model_add(raw_request: Request):
+    request_data = await raw_request.json()
+    try:
+        record = custom_model_store.add_model(
+            source_type=str(request_data.get("source_type") or ""),
+            source_value=str(request_data.get("source_value") or ""),
+            display_name=str(request_data.get("display_name") or ""),
+        )
+    except ValueError as e:
+        return JSONResponse(
+            content={
+                "type": "custom_model_add",
+                "error": str(e),
+            },
+            status_code=400,
+        )
+    except Exception as e:
+        logger.exception("Failed to add custom model: %s", e)
+        return JSONResponse(
+            content={
+                "type": "custom_model_add",
+                "error": str(e),
+            },
+            status_code=500,
+        )
+    return JSONResponse(
+        content={
+            "type": "custom_model_add",
+            "data": record,
+        },
+        status_code=200,
+    )
+
+
+@app.delete("/model/custom/{model_id}")
+async def custom_model_delete(model_id: str):
+    deleted = custom_model_store.delete_model(model_id)
+    return JSONResponse(
+        content={
+            "type": "custom_model_delete",
+            "data": {
+                "deleted": deleted,
+                "model_id": model_id,
+            },
         },
         status_code=200,
     )

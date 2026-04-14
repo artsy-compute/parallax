@@ -1,25 +1,33 @@
 import { useEffect, useRef, useState, type FC, type PropsWithChildren } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
 import {
+  Alert,
   Box,
   Button,
+  Chip,
   Divider,
   IconButton,
+  MenuItem,
   Stack,
   styled,
+  TextField,
   Tooltip,
   Typography,
   useMediaQuery,
   useTheme,
 } from '@mui/material';
 import { useCluster, useHost } from '../../services';
+import { addCustomModel, deleteCustomModel, getCustomModelList, type CustomModelRecord } from '../../services/api';
 import { AlertDialog, useAlertDialog } from '../mui';
 import { IconBrandGradient } from '../brand';
 import {
+  IconCheck,
   IconCirclePlus,
+  IconLoader,
   IconInfoCircle,
   IconLayoutSidebarLeftCollapse,
   IconLayoutSidebarLeftExpand,
+  IconTrash,
   IconSettings,
 } from '@tabler/icons-react';
 import { ConversationHistory, JoinCommand, ModelSelect, NodeList } from '../inputs';
@@ -97,7 +105,7 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
       clusterInfo: { status: clusterStatus, needMoreNodes, topologyChangeAdvisory, modelName: clusterModelName },
       nodeInfoList,
     },
-    { rebalanceTopology },
+    { rebalanceTopology, refreshModelList },
   ] = useCluster();
 
   const [dialogWaiting, { open: openWaiting }] = useAlertDialog({
@@ -215,11 +223,37 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
   }, [narrowWindow]);
 
   const [clusterSettingsOpen, setClusterSettingsOpen] = useState(false);
+  const [customModels, setCustomModels] = useState<readonly CustomModelRecord[]>([]);
+  const [customModelLoading, setCustomModelLoading] = useState(false);
+  const [customModelError, setCustomModelError] = useState('');
+  const [customModelSourceType, setCustomModelSourceType] = useState<'huggingface' | 'local_path'>('huggingface');
+  const [customModelSourceValue, setCustomModelSourceValue] = useState('');
+  const [customModelDisplayName, setCustomModelDisplayName] = useState('');
+  const [customModelSubmitting, setCustomModelSubmitting] = useState(false);
+  const [customModelDeletingId, setCustomModelDeletingId] = useState('');
 
   const activeNodes = nodeInfoList.filter((node) => node.status === 'available').length;
   const inactiveNodes = nodeInfoList.length - activeNodes;
 
   const [rebalancingTopology, setRebalancingTopology] = useState(false);
+
+  const loadCustomModels = async () => {
+    try {
+      setCustomModelLoading(true);
+      setCustomModelError('');
+      setCustomModels(await getCustomModelList());
+    } catch (error) {
+      setCustomModelError(error instanceof Error ? error.message : 'Failed to load custom models');
+    } finally {
+      setCustomModelLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (clusterSettingsOpen && hostType !== 'node') {
+      loadCustomModels();
+    }
+  }, [clusterSettingsOpen, hostType]);
 
   const onClickRebalanceTopology = async () => {
     if (rebalancingTopology) {
@@ -233,6 +267,58 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
     } finally {
       setRebalancingTopology(false);
     }
+  };
+
+  const onAddCustomModel = async () => {
+    if (customModelSubmitting) {
+      return;
+    }
+    try {
+      setCustomModelSubmitting(true);
+      setCustomModelError('');
+      await addCustomModel({
+        source_type: customModelSourceType,
+        source_value: customModelSourceValue.trim(),
+        display_name: customModelDisplayName.trim(),
+      });
+      setCustomModelSourceValue('');
+      setCustomModelDisplayName('');
+      await Promise.all([loadCustomModels(), refreshModelList()]);
+    } catch (error) {
+      setCustomModelError(error instanceof Error ? error.message : 'Failed to add custom model');
+    } finally {
+      setCustomModelSubmitting(false);
+    }
+  };
+
+  const onDeleteCustomModel = async (modelId: string) => {
+    if (!modelId || customModelDeletingId) {
+      return;
+    }
+    try {
+      setCustomModelDeletingId(modelId);
+      setCustomModelError('');
+      await deleteCustomModel(modelId);
+      await Promise.all([loadCustomModels(), refreshModelList()]);
+    } catch (error) {
+      setCustomModelError(error instanceof Error ? error.message : 'Failed to remove custom model');
+    } finally {
+      setCustomModelDeletingId('');
+    }
+  };
+
+  const renderValidationChip = (status: string) => {
+    const normalized = String(status || '').toLowerCase();
+    if (normalized === 'verified') {
+      return <Chip size='small' color='success' icon={<IconCheck size={14} />} label='Verified' />;
+    }
+    if (normalized === 'config_only') {
+      return <Chip size='small' color='warning' label='Config only' />;
+    }
+    if (normalized === 'pending') {
+      return <Chip size='small' color='info' icon={<IconLoader size={14} />} label='Pending' />;
+    }
+    return <Chip size='small' color='default' label={normalized || 'Unknown'} />;
   };
 
   return (
@@ -495,6 +581,112 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
                 </Tooltip>
               </Stack>
               <ModelSelect autoCommit />
+            </Stack>
+            <Stack sx={{ gap: 1.25 }}>
+              <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75 }}>
+                <Typography variant='body1'>Custom Models</Typography>
+                <Tooltip
+                  title='Add Hugging Face repo ids or local model paths. Parallax validates config metadata before listing them in the shared model selector.'
+                  placement='right'
+                  slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
+                >
+                  <IconButton size='small' sx={{ color: 'text.secondary', p: 0.25 }}>
+                    <IconInfoCircle size={16} />
+                  </IconButton>
+                </Tooltip>
+              </Stack>
+              <Typography variant='body2' color='text.secondary'>
+                Supported in this version: Hugging Face repo ids and local filesystem paths. Arbitrary website URLs are intentionally not accepted.
+              </Typography>
+              {customModelError && <Alert severity='warning'>{customModelError}</Alert>}
+              <Stack direction={{ xs: 'column', sm: 'row' }} sx={{ gap: 1 }}>
+                <TextField
+                  select
+                  label='Source'
+                  size='small'
+                  value={customModelSourceType}
+                  onChange={(event) => setCustomModelSourceType(event.target.value as 'huggingface' | 'local_path')}
+                  sx={{ minWidth: { sm: '10rem' } }}
+                >
+                  <MenuItem value='huggingface'>Hugging Face</MenuItem>
+                  <MenuItem value='local_path'>Local path</MenuItem>
+                </TextField>
+                <TextField
+                  label={customModelSourceType === 'huggingface' ? 'Repo id' : 'Absolute path'}
+                  size='small'
+                  fullWidth
+                  value={customModelSourceValue}
+                  onChange={(event) => setCustomModelSourceValue(event.target.value)}
+                  placeholder={customModelSourceType === 'huggingface' ? 'org/model-name' : '/path/to/model'}
+                />
+                <TextField
+                  label='Display name'
+                  size='small'
+                  value={customModelDisplayName}
+                  onChange={(event) => setCustomModelDisplayName(event.target.value)}
+                  placeholder='Optional'
+                  sx={{ minWidth: { sm: '12rem' } }}
+                />
+                <Button
+                  variant='contained'
+                  onClick={onAddCustomModel}
+                  disabled={customModelSubmitting || !customModelSourceValue.trim()}
+                  sx={{ alignSelf: { xs: 'stretch', sm: 'center' }, whiteSpace: 'nowrap' }}
+                >
+                  {customModelSubmitting ? 'Adding...' : 'Add model'}
+                </Button>
+              </Stack>
+              <Stack sx={{ gap: 1, maxHeight: '16rem', overflow: 'auto' }}>
+                {customModelLoading && (
+                  <Typography variant='body2' color='text.secondary'>Loading custom models…</Typography>
+                )}
+                {!customModelLoading && customModels.length === 0 && (
+                  <Typography variant='body2' color='text.secondary'>No custom models added yet.</Typography>
+                )}
+                {customModels.map((model) => (
+                  <Stack
+                    key={model.id}
+                    direction='row'
+                    sx={{
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: 1.5,
+                      px: 1.25,
+                      py: 1,
+                      borderRadius: 2,
+                      border: '1px solid',
+                      borderColor: 'divider',
+                      bgcolor: 'background.paper',
+                    }}
+                  >
+                    <Stack sx={{ minWidth: 0, gap: 0.25 }}>
+                      <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75, flexWrap: 'wrap' }}>
+                        <Typography variant='body2' sx={{ fontWeight: 600 }}>
+                          {model.display_name || model.source_value}
+                        </Typography>
+                        {renderValidationChip(model.validation_status)}
+                        <Chip size='small' variant='outlined' label={model.source_type === 'huggingface' ? 'HF' : 'Local'} />
+                      </Stack>
+                      <Typography variant='caption' color='text.secondary' sx={{ wordBreak: 'break-all' }}>
+                        {model.source_value}
+                      </Typography>
+                      {model.validation_message && (
+                        <Typography variant='caption' color='text.secondary'>
+                          {model.validation_message}
+                        </Typography>
+                      )}
+                    </Stack>
+                    <IconButton
+                      size='small'
+                      color='error'
+                      disabled={customModelDeletingId === model.id}
+                      onClick={() => onDeleteCustomModel(model.id)}
+                    >
+                      <IconTrash size={16} />
+                    </IconButton>
+                  </Stack>
+                ))}
+              </Stack>
             </Stack>
             <Stack sx={{ gap: 1 }}>
               <Stack direction='row' sx={{ alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>

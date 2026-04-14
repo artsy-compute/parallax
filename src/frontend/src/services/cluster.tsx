@@ -37,11 +37,12 @@ export interface ModelInfo {
   readonly name: string;
   readonly displayName: string;
   readonly logoUrl: string;
-
-  /**
-   * The VRAM required for the model in GB.
-   */
   readonly vram: number;
+  readonly custom?: boolean;
+  readonly sourceType?: string;
+  readonly validationStatus?: string;
+  readonly validationMessage?: string;
+  readonly supportsSharding?: boolean;
 }
 
 export type ClusterStatus = 'offline' | 'idle' | 'waiting' | 'available' | 'rebalancing' | 'failed';
@@ -169,6 +170,7 @@ export interface ClusterActions {
   readonly config: ClusterConfigSetters;
   readonly init: () => Promise<void>;
   readonly rebalanceTopology: () => Promise<void>;
+  readonly refreshModelList: () => Promise<void>;
 }
 
 // Implementation
@@ -200,14 +202,19 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
       try {
         const rawList = await getModelList();
         const next: readonly ModelInfo[] = rawList
-          .map(({ name, vram_gb }) => {
+          .map(({ name, display_name, vram_gb, custom, source_type, validation_status, validation_message, supports_sharding }) => {
             name = name || '';
             vram_gb = vram_gb || 0;
             return {
               name,
-              displayName: name,
+              displayName: display_name || name,
               logoUrl: getLogoUrl(name),
               vram: vram_gb,
+              custom: !!custom,
+              sourceType: source_type || '',
+              validationStatus: validation_status || '',
+              validationMessage: validation_message || '',
+              supportsSharding: !!supports_sharding,
             };
           })
           .sort((a, b) => {
@@ -435,6 +442,7 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
       },
       init,
       rebalanceTopology,
+      refreshModelList: updateModelList,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
