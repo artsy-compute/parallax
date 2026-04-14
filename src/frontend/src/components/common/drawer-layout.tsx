@@ -93,8 +93,9 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
 
   const [
     {
-      config: { modelInfo },
-      clusterInfo: { status: clusterStatus, needMoreNodes, topologyChangeAdvisory },
+      config: { modelInfo, modelName: configModelName },
+      clusterInfo: { status: clusterStatus, needMoreNodes, topologyChangeAdvisory, modelName: clusterModelName },
+      nodeInfoList,
     },
     { rebalanceTopology },
   ] = useCluster();
@@ -214,6 +215,9 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
   }, [narrowWindow]);
 
   const [clusterSettingsOpen, setClusterSettingsOpen] = useState(false);
+
+  const activeNodes = nodeInfoList.filter((node) => node.status === 'available').length;
+  const inactiveNodes = nodeInfoList.length - activeNodes;
 
   const [rebalancingTopology, setRebalancingTopology] = useState(false);
 
@@ -382,13 +386,49 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
         )}
       </DrawerLayoutSide>
       <DrawerLayoutContainer>
-        <DrawerLayoutHeader direction='row'>
-          <ModelSelect
-            variant='text'
-            autoCommit
-            showNodeCounts
-            onNodeCountsClick={() => setClusterSettingsOpen(true)}
-          />
+        <DrawerLayoutHeader direction='row' sx={{ alignItems: 'center', justifyContent: 'space-between', gap: 1.5 }}>
+          <Stack sx={{ minWidth: 0, flex: 1 }}>
+            <Typography variant='caption' color='text.secondary'>Cluster model</Typography>
+            <Typography variant='body2' sx={{ fontWeight: 600 }} noWrap>
+              {clusterModelName || configModelName || 'No model selected'}
+            </Typography>
+          </Stack>
+          <Stack direction='row' sx={{ gap: 0.5, flexWrap: 'wrap', alignItems: 'center', justifyContent: 'flex-end', flex: 'none' }}>
+            <Box
+              component='span'
+              sx={{
+                px: 0.75,
+                py: 0.25,
+                borderRadius: 999,
+                bgcolor: 'rgba(46, 125, 50, 0.12)',
+                color: 'success.dark',
+                fontSize: '0.75rem',
+                fontWeight: 600,
+                lineHeight: 1.2,
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {activeNodes} up
+            </Box>
+            {inactiveNodes > 0 && (
+              <Box
+                component='span'
+                sx={{
+                  px: 0.75,
+                  py: 0.25,
+                  borderRadius: 999,
+                  bgcolor: 'rgba(237, 108, 2, 0.12)',
+                  color: 'warning.dark',
+                  fontSize: '0.75rem',
+                  fontWeight: 600,
+                  lineHeight: 1.2,
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {inactiveNodes} down
+              </Box>
+            )}
+          </Stack>
         </DrawerLayoutHeader>
         <DrawerLayoutContent contentWidth={contentWidth}>
           {topologyChangeAdvisory.show && (
