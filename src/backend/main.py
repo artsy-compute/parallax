@@ -9,7 +9,7 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.server.custom_models import CustomModelStore
@@ -55,6 +55,15 @@ _FRONTEND_BUILD_STATUS = {
     "dist_mtime": 0.0,
     "latest_source_mtime": 0.0,
 }
+FRONTEND_DEV_SERVER_URL = os.environ.get("PARALLAX_FRONTEND_DEV_SERVER_URL", "").strip()
+
+
+def _frontend_dev_server_redirect_target(path: str = "/") -> str | None:
+    base = FRONTEND_DEV_SERVER_URL.rstrip("/")
+    if not base:
+        return None
+    normalized_path = path if str(path or "").startswith("/") else f"/{path}"
+    return f"{base}{normalized_path}"
 
 
 def _frontend_source_paths() -> list[Path]:
@@ -376,6 +385,46 @@ async def nodes_overview() -> JSONResponse:
     )
 
 
+@app.get("/nodes/inventory")
+async def nodes_inventory() -> JSONResponse:
+    if scheduler_manage is None:
+        return JSONResponse(
+            content={"type": "nodes_inventory", "data": {"hosts": []}},
+            status_code=503,
+        )
+    return JSONResponse(
+        content={"type": "nodes_inventory", "data": {"hosts": scheduler_manage.get_configured_node_hosts()}},
+        status_code=200,
+    )
+
+
+@app.put("/nodes/inventory")
+async def nodes_inventory_update(raw_request: Request) -> JSONResponse:
+    if scheduler_manage is None:
+        return JSONResponse(
+            content={"type": "nodes_inventory_update", "data": {"ok": False, "message": "Scheduler is not initialized", "hosts": []}},
+            status_code=503,
+        )
+    request_data = await raw_request.json()
+    try:
+        hosts = scheduler_manage.set_configured_node_hosts(list(request_data.get("hosts") or []))
+    except ValueError as e:
+        return JSONResponse(
+            content={"type": "nodes_inventory_update", "data": {"ok": False, "message": str(e), "hosts": []}},
+            status_code=400,
+        )
+    except Exception as e:
+        logger.exception("Failed to update configured node inventory: %s", e)
+        return JSONResponse(
+            content={"type": "nodes_inventory_update", "data": {"ok": False, "message": str(e), "hosts": []}},
+            status_code=500,
+        )
+    return JSONResponse(
+        content={"type": "nodes_inventory_update", "data": {"ok": True, "message": "Configured node inventory updated", "hosts": hosts}},
+        status_code=200,
+    )
+
+
 @app.post("/nodes/ping")
 async def nodes_ping(raw_request: Request) -> JSONResponse:
     if node_management is None:
@@ -512,6 +561,18 @@ async def chat_history_delete(conversation_id: str):
     )
 
 
+@app.delete("/chat/history")
+async def chat_history_delete_all():
+    deleted = request_handler.chat_memory.delete_all_conversations()
+    return JSONResponse(
+        content={
+            "type": "chat_history_delete_all",
+            "data": {"deleted": deleted},
+        },
+        status_code=200,
+    )
+
+
 @app.get("/frontend/build_status")
 async def frontend_build_status():
     return JSONResponse(
@@ -526,6 +587,9 @@ async def frontend_build_status():
 # Disable caching for index.html
 @app.get("/")
 async def serve_index():
+    redirect_target = _frontend_dev_server_redirect_target("/")
+    if redirect_target:
+        return RedirectResponse(url=redirect_target, status_code=307)
     status = check_frontend_build_status()
     response = FileResponse(str(FRONTEND_INDEX_PATH))
     # Disable cache
@@ -536,6 +600,14 @@ async def serve_index():
     if status["reason"]:
         response.headers["X-Parallax-Frontend-Stale-Reason"] = status["reason"]
     return response
+
+
+@app.get("/chat.html")
+async def serve_chat_html():
+    redirect_target = _frontend_dev_server_redirect_target("/chat.html")
+    if redirect_target:
+        return RedirectResponse(url=redirect_target, status_code=307)
+    return FileResponse(str(FRONTEND_DIST_DIR / "chat.html"))
 
 
 # mount the frontend

@@ -650,6 +650,16 @@ class ChatMemoryService:
             conn.commit()
         return True
 
+    def delete_all_conversations(self) -> int:
+        with self._lock, self._connect() as conn:
+            cur = conn.execute('SELECT COUNT(*) AS count FROM conversations')
+            row = cur.fetchone()
+            deleted = int(row['count'] or 0) if row is not None else 0
+            conn.execute('DELETE FROM messages')
+            conn.execute('DELETE FROM conversations')
+            conn.commit()
+        return deleted
+
     def prepare_request(self, request_data: Dict) -> Tuple[Dict, Optional[str]]:
         sanitized = dict(request_data)
         disable_chat_memory = bool(sanitized.pop('_disable_chat_memory', False))

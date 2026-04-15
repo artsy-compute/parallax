@@ -54,7 +54,7 @@ export default function PageJoin() {
       contentStart={
         <Button
           component={RouterLink}
-          to='/setup'
+          to='/settings'
           size='medium'
           color='secondary'
           startIcon={<IconArrowLeft />}

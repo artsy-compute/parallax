@@ -190,6 +190,44 @@ export const deleteChatHistoryConversation = async (
   return message.data;
 };
 
+export const deleteAllChatHistory = async (): Promise<{ deleted: number }> => {
+  const response = await fetch(`${API_BASE_URL}/chat/history`, { method: 'DELETE' });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'chat_history_delete_all') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  return message.data;
+};
+
+export interface ConfiguredNodeInventoryHost {
+  readonly ssh_target: string;
+  readonly hostname_hint: string;
+  readonly line_number: number;
+  readonly parallax_path: string;
+  readonly joined: boolean;
+}
+
+export const getNodesInventory = async (): Promise<{ hosts: readonly ConfiguredNodeInventoryHost[] }> => {
+  const response = await fetch(`${API_BASE_URL}/nodes/inventory`, { method: 'GET' });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'nodes_inventory') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  return message.data;
+};
+
+export const updateNodesInventory = async (hosts: readonly { ssh_target: string; parallax_path: string }[]) => {
+  const response = await fetch(`${API_BASE_URL}/nodes/inventory`, {
+    method: 'PUT',
+    body: JSON.stringify({ hosts }),
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'nodes_inventory_update') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  return message.data as { ok: boolean; message: string; hosts: readonly ConfiguredNodeInventoryHost[] };
+};
+
 
 export interface NodeOverviewHost {
   readonly id: string;
@@ -326,6 +364,15 @@ export const getNodeLogs = async (sshTarget: string, lines = 200): Promise<{ ok:
   });
   const message = await parseJsonResponse(response);
   if (message.type !== 'node_logs') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  return message.data;
+};
+
+export const getFrontendBuildStatus = async (): Promise<any> => {
+  const response = await fetch(`${API_BASE_URL}/frontend/build_status`, { method: 'GET' });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'frontend_build_status') {
     throw new Error(`Invalid message type: ${message.type}.`);
   }
   return message.data;

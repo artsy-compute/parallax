@@ -8,11 +8,13 @@ const PATH_SETUP = '/setup';
 const PATH_JOIN = '/join';
 const PATH_CHAT = '/chat';
 const PATH_NODES = '/nodes';
+const PATH_SETTINGS = '/settings';
 
 const PageSetup = lazy(() => import('../pages/setup'));
 const PageJoin = lazy(() => import('../pages/join'));
 const PageChat = lazy(() => import('../pages/chat'));
 const PageNodes = lazy(() => import('../pages/nodes'));
+const PageSettings = lazy(() => import('../pages/settings'));
 
 const debugLog = (...args: any[]) => {
   console.log('%c router.tsx ', 'color: white; background: purple;', ...args);
@@ -38,13 +40,18 @@ export const MainRouter = () => {
     };
 
     if (pathname === '/') {
-      return lazyNavigate(PATH_SETUP);
+      return lazyNavigate(PATH_SETTINGS);
     }
     debugLog('pathname', pathname, 'cluster status', status);
     if (status === 'idle' && pathname.startsWith(PATH_CHAT)) {
-      return lazyNavigate(PATH_SETUP);
+      return lazyNavigate(PATH_SETTINGS);
     }
-    if (status === 'available' && !pathname.startsWith(PATH_CHAT) && !pathname.startsWith(PATH_NODES)) {
+    if (
+      status === 'available'
+      && !pathname.startsWith(PATH_CHAT)
+      && !pathname.startsWith(PATH_NODES)
+      && !pathname.startsWith(PATH_SETTINGS)
+    ) {
       return lazyNavigate(PATH_CHAT);
     }
   }, [navigate, pathname, status]);
@@ -79,6 +86,22 @@ export const MainRouter = () => {
       element: (
         <Suspense fallback={<div>Loading...</div>}>
           <PageNodes />
+        </Suspense>
+      ),
+    },
+    {
+      path: PATH_SETTINGS,
+      element: (
+        <Suspense fallback={<div>Loading...</div>}>
+          <PageSettings />
+        </Suspense>
+      ),
+    },
+    {
+      path: `${PATH_SETTINGS}/:section`,
+      element: (
+        <Suspense fallback={<div>Loading...</div>}>
+          <PageSettings />
         </Suspense>
       ),
     },

@@ -5,6 +5,9 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react-swc';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const backendHost = process.env.PARALLAX_BACKEND_HOST || 'localhost';
+const backendPort = process.env.PARALLAX_BACKEND_PORT || '3001';
+const backendTarget = `http://${backendHost}:${backendPort}`;
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -20,12 +23,11 @@ export default defineConfig({
   server: {
     proxy: {
       '/proxy-api/v1/chat/completions': {
-        target: 'http://localhost:3001',
-        // target: 'https://ztrxxhzxdt3bn6-3000.proxy.runpod.net',
+        target: backendTarget,
         rewrite: (path) => path.replace(/^\/proxy-api/, ''),
       },
       '/proxy-api': {
-        target: 'http://localhost:3001',
+        target: backendTarget,
         rewrite: (path) => path.replace(/^\/proxy-api/, ''),
       },
     },

@@ -151,6 +151,41 @@ class SchedulerManage:
             for host in self.configured_node_hosts
         ]
 
+    def set_configured_node_hosts(self, hosts: list[dict]) -> list[dict]:
+        if not self.nodes_host_file:
+            raise ValueError("Scheduler was not started with --nodes-host-file; configured node inventory cannot be persisted")
+
+        path = Path(self.nodes_host_file).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        normalized_hosts: list[dict] = []
+        seen_targets: set[str] = set()
+        for index, raw_host in enumerate(hosts or [], start=1):
+            ssh_target = str((raw_host or {}).get('ssh_target') or '').strip()
+            parallax_path = str((raw_host or {}).get('parallax_path') or '').strip()
+            if not ssh_target:
+                continue
+            if ssh_target in seen_targets:
+                continue
+            seen_targets.add(ssh_target)
+            normalized_hosts.append(
+                {
+                    'ssh_target': ssh_target,
+                    'parallax_path': parallax_path,
+                    'hostname_hint': self._normalize_inventory_hostname(ssh_target),
+                    'line_number': index,
+                }
+            )
+
+        lines = [
+            f"{item['ssh_target']}:{item['parallax_path']}" if item.get('parallax_path') else item['ssh_target']
+            for item in normalized_hosts
+        ]
+        path.write_text('\n'.join(lines) + ('\n' if lines else ''))
+        self.configured_node_hosts = normalized_hosts
+        logger.info('Persisted %d configured node host(s) to %s', len(normalized_hosts), path)
+        return self.get_configured_node_hosts()
+
     def persist_runtime_config(self, model_name, init_nodes_num, is_local_network) -> None:
         data = {
             "model_name": model_name,

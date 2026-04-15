@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -183,6 +184,84 @@ def _execute_with_graceful_shutdown(cmd: list[str], env: dict[str, str] | None =
         sys.exit(0)
 
 
+def _terminate_process_group(sub_process: subprocess.Popen | None, label: str) -> None:
+    if sub_process is None:
+        return
+    try:
+        logger.info("Terminating %s...", label)
+        try:
+            os.killpg(sub_process.pid, signal.SIGINT)
+        except Exception:
+            sub_process.send_signal(signal.SIGINT)
+        try:
+            sub_process.wait(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            logger.info("%s SIGINT timeout; sending SIGTERM...", label)
+        try:
+            os.killpg(sub_process.pid, signal.SIGTERM)
+        except Exception:
+            sub_process.terminate()
+        try:
+            sub_process.wait(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            logger.info("%s SIGTERM timeout; forcing SIGKILL...", label)
+        try:
+            os.killpg(sub_process.pid, signal.SIGKILL)
+        except Exception:
+            sub_process.kill()
+        sub_process.wait()
+    except Exception as e:
+        logger.error("Failed to terminate %s: %s", label, e)
+
+
+def _execute_dev_processes(
+    backend_cmd: list[str],
+    frontend_cmd: list[str],
+    *,
+    backend_env: dict[str, str] | None = None,
+    frontend_env: dict[str, str] | None = None,
+    frontend_cwd: str | None = None,
+) -> None:
+    logger.info("Running backend command: %s", " ".join(backend_cmd))
+    logger.info("Running frontend command: %s", " ".join(frontend_cmd))
+
+    backend_process = None
+    frontend_process = None
+    try:
+        backend_process = subprocess.Popen(
+            backend_cmd,
+            env=backend_env,
+            start_new_session=True,
+        )
+        frontend_process = subprocess.Popen(
+            frontend_cmd,
+            env=frontend_env,
+            cwd=frontend_cwd,
+            start_new_session=True,
+        )
+        while True:
+            backend_rc = backend_process.poll()
+            frontend_rc = frontend_process.poll()
+            if backend_rc is not None:
+                _terminate_process_group(frontend_process, "frontend dev server")
+                if backend_rc != 0:
+                    logger.error("Backend exited with code %s", backend_rc)
+                sys.exit(backend_rc)
+            if frontend_rc is not None:
+                _terminate_process_group(backend_process, "backend server")
+                if frontend_rc != 0:
+                    logger.error("Frontend dev server exited with code %s", frontend_rc)
+                sys.exit(frontend_rc)
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        logger.info("Received interrupt signal, shutting down dev-run...")
+        _terminate_process_group(frontend_process, "frontend dev server")
+        _terminate_process_group(backend_process, "backend server")
+        sys.exit(0)
+
+
 
 
 def _default_log_file(kind: str) -> str:
@@ -274,6 +353,79 @@ def run_command(args, passthrough_args: list[str] | None = None):
         cmd.extend(passthrough_args)
 
     _execute_with_graceful_shutdown(cmd, env=env)
+
+
+def dev_run_command(args, passthrough_args: list[str] | None = None):
+    """Run the scheduler backend together with the Vite frontend dev server."""
+    if not args.skip_upload:
+        update_package_info()
+
+    check_python_version()
+
+    if shutil.which("npm") is None:
+        logger.error("Error: npm is required for dev-run but was not found on PATH.")
+        sys.exit(1)
+
+    project_root = get_project_root()
+    backend_main = project_root / "src" / "backend" / "main.py"
+    frontend_dir = project_root / "src" / "frontend"
+    package_json = frontend_dir / "package.json"
+
+    if not backend_main.exists():
+        logger.info(f"Error: Backend main.py not found at {backend_main}")
+        sys.exit(1)
+    if not package_json.exists():
+        logger.info(f"Error: frontend package.json not found at {package_json}")
+        sys.exit(1)
+
+    passthrough_args = passthrough_args or []
+    backend_port = _find_flag_value(passthrough_args, ["--port"]) or "3001"
+    frontend_port = str(args.frontend_port or 5173)
+    frontend_host = str(args.frontend_host or "127.0.0.1")
+
+    backend_cmd = [sys.executable, str(backend_main)]
+    log_file = args.log_file or _find_flag_value(passthrough_args, ["--log-file"]) or _default_log_file("run")
+    backend_env = os.environ.copy()
+    backend_env["PARALLAX_LOG_FILE"] = log_file
+
+    if not _flag_present(passthrough_args, ["--port"]):
+        backend_cmd.extend(["--port", backend_port])
+    if args.model_name:
+        backend_cmd.extend(["--model-name", args.model_name])
+    if args.init_nodes_num:
+        backend_cmd.extend(["--init-nodes-num", str(args.init_nodes_num)])
+    if args.use_relay:
+        backend_cmd.extend(_get_relay_params())
+        logger.info(
+            "Using public relay server to help nodes and the scheduler establish a connection (remote mode). Your IP address will be reported to the relay server to help establish the connection."
+        )
+    if args.profile:
+        backend_cmd.extend(["--profile", args.profile])
+    if not _flag_present(passthrough_args, ["--log-file"]):
+        backend_cmd.extend(["--log-file", log_file])
+    if args.nodes_host_file:
+        backend_cmd.extend(["--nodes-host-file", args.nodes_host_file])
+    if passthrough_args:
+        backend_cmd.extend(passthrough_args)
+
+    frontend_cmd = ["npm", "run", "dev", "--", "--host", frontend_host, "--port", frontend_port]
+    frontend_env = os.environ.copy()
+    frontend_env["PARALLAX_BACKEND_HOST"] = "localhost"
+    frontend_env["PARALLAX_BACKEND_PORT"] = str(backend_port)
+    backend_env["PARALLAX_FRONTEND_DEV_SERVER_URL"] = f"http://{frontend_host}:{frontend_port}"
+
+    logger.info("Frontend dev server URL: http://%s:%s", frontend_host, frontend_port)
+    logger.info(
+        "dev-run is active. Open http://localhost:%s/ and the backend will redirect to the live Vite frontend.",
+        backend_port,
+    )
+    _execute_dev_processes(
+        backend_cmd,
+        frontend_cmd,
+        backend_env=backend_env,
+        frontend_env=frontend_env,
+        frontend_cwd=str(frontend_dir),
+    )
 
 
 def join_command(args, passthrough_args: list[str] | None = None):
@@ -430,6 +582,7 @@ Examples:
   parallax run                                                          # Start scheduler with frontend
   parallax run -m {model-name} -n {number-of-worker-nodes}              # Start scheduler without frontend
   parallax run -m Qwen/Qwen3-0.6B -n 2                                  # example
+  parallax dev-run                                                      # Start backend + Vite frontend with live reload
   parallax join                                                         # Join cluster in local network
   parallax join -s {scheduler-address}                                  # Join cluster in public network
   parallax join -s 12D3KooWLX7MWuzi1Txa5LyZS4eTQ2tPaJijheH8faHggB9SxnBu # example
@@ -469,6 +622,45 @@ Examples:
         "--nodes-host-file",
         type=str,
         help="Optional file listing SSH-reachable node hosts to track alongside live joined nodes.",
+    )
+
+    dev_run_parser = subparsers.add_parser(
+        "dev-run", help="Start the scheduler backend together with the Vite frontend dev server"
+    )
+    dev_run_parser.add_argument("-n", "--init-nodes-num", type=int, help="Number of initial nodes")
+    dev_run_parser.add_argument("-m", "--model-name", type=str, help="Model name")
+    dev_run_parser.add_argument(
+        "-r", "--use-relay", action="store_true", help="Use public relay servers"
+    )
+    dev_run_parser.add_argument(
+        "-u", "--skip-upload", action="store_true", help="Skip upload package info"
+    )
+    dev_run_parser.add_argument(
+        "--log-file",
+        type=str,
+        help="Optional path to write scheduler logs to a file",
+    )
+    dev_run_parser.add_argument(
+        "--profile",
+        default="auto",
+        help="Runtime recovery profile name. Defaults to auto-detect.",
+    )
+    dev_run_parser.add_argument(
+        "--nodes-host-file",
+        type=str,
+        help="Optional file listing SSH-reachable node hosts to track alongside live joined nodes.",
+    )
+    dev_run_parser.add_argument(
+        "--frontend-port",
+        type=int,
+        default=5173,
+        help="Port for the Vite frontend dev server.",
+    )
+    dev_run_parser.add_argument(
+        "--frontend-host",
+        type=str,
+        default="127.0.0.1",
+        help="Host for the Vite frontend dev server.",
     )
 
     # Add 'join' command parser
@@ -529,6 +721,8 @@ Examples:
 
     if args.command == "run":
         run_command(args, passthrough_args)
+    elif args.command == "dev-run":
+        dev_run_command(args, passthrough_args)
     elif args.command == "join":
         join_command(args, passthrough_args)
     elif args.command == "chat":
