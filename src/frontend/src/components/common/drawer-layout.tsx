@@ -2,9 +2,11 @@ import { useEffect, useRef, useState, type FC, type PropsWithChildren } from 're
 import { Link as RouterLink } from 'react-router-dom';
 import {
   Alert,
+  Autocomplete,
   Box,
   Button,
   Chip,
+  CircularProgress,
   Divider,
   IconButton,
   MenuItem,
@@ -17,7 +19,7 @@ import {
   useTheme,
 } from '@mui/material';
 import { useCluster, useHost } from '../../services';
-import { addCustomModel, deleteCustomModel, getCustomModelList, type CustomModelRecord } from '../../services/api';
+import { addCustomModel, deleteCustomModel, getCustomModelList, searchCustomModels, type CustomModelRecord, type CustomModelSearchResult } from '../../services/api';
 import { AlertDialog, useAlertDialog } from '../mui';
 import { IconBrandGradient } from '../brand';
 import {
@@ -231,6 +233,11 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
   const [customModelDisplayName, setCustomModelDisplayName] = useState('');
   const [customModelSubmitting, setCustomModelSubmitting] = useState(false);
   const [customModelDeletingId, setCustomModelDeletingId] = useState('');
+  const [customModelSearchLoading, setCustomModelSearchLoading] = useState(false);
+  const [customModelSearchResults, setCustomModelSearchResults] = useState<readonly CustomModelSearchResult[]>([]);
+  const [customModelSearchOpen, setCustomModelSearchOpen] = useState(false);
+  const customModelSearchCacheRef = useRef<Record<string, readonly CustomModelSearchResult[]>>({});
+  const customModelSearchRequestIdRef = useRef(0);
 
   const activeNodes = nodeInfoList.filter((node) => node.status === 'available').length;
   const inactiveNodes = nodeInfoList.length - activeNodes;
@@ -254,6 +261,53 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
       loadCustomModels();
     }
   }, [clusterSettingsOpen, hostType]);
+
+  useEffect(() => {
+    if (!clusterSettingsOpen || hostType === 'node' || customModelSourceType !== 'huggingface') {
+      return;
+    }
+    const query = customModelSourceValue.trim();
+    if (!query) {
+      setCustomModelSearchResults([]);
+      setCustomModelSearchLoading(false);
+      setCustomModelSearchOpen(false);
+      return;
+    }
+    const timeoutId = window.setTimeout(async () => {
+      const cached = customModelSearchCacheRef.current[query];
+      if (cached) {
+        setCustomModelError('');
+        setCustomModelSearchResults(cached);
+        setCustomModelSearchLoading(false);
+        setCustomModelSearchOpen(cached.length > 0);
+        return;
+      }
+      const requestId = ++customModelSearchRequestIdRef.current;
+      try {
+        setCustomModelSearchLoading(true);
+        setCustomModelError('');
+        const results = await searchCustomModels(query, 8);
+        if (requestId !== customModelSearchRequestIdRef.current) {
+          return;
+        }
+        customModelSearchCacheRef.current[query] = results;
+        setCustomModelSearchResults(results);
+        setCustomModelSearchOpen(results.length > 0);
+      } catch (error) {
+        if (requestId !== customModelSearchRequestIdRef.current) {
+          return;
+        }
+        setCustomModelError(error instanceof Error ? error.message : 'Failed to search Hugging Face models');
+        setCustomModelSearchResults([]);
+        setCustomModelSearchOpen(false);
+      } finally {
+        if (requestId === customModelSearchRequestIdRef.current) {
+          setCustomModelSearchLoading(false);
+        }
+      }
+    }, 1000);
+    return () => window.clearTimeout(timeoutId);
+  }, [clusterSettingsOpen, hostType, customModelSourceType, customModelSourceValue]);
 
   const onClickRebalanceTopology = async () => {
     if (rebalancingTopology) {
@@ -611,14 +665,90 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
                   <MenuItem value='huggingface'>Hugging Face</MenuItem>
                   <MenuItem value='local_path'>Local path</MenuItem>
                 </TextField>
-                <TextField
-                  label={customModelSourceType === 'huggingface' ? 'Repo id' : 'Absolute path'}
-                  size='small'
-                  fullWidth
-                  value={customModelSourceValue}
-                  onChange={(event) => setCustomModelSourceValue(event.target.value)}
-                  placeholder={customModelSourceType === 'huggingface' ? 'org/model-name' : '/path/to/model'}
-                />
+                {customModelSourceType === 'huggingface' ? (
+                  <Autocomplete
+                    freeSolo
+                    fullWidth
+                    options={customModelSearchResults}
+                    loading={customModelSearchLoading}
+                    open={customModelSearchOpen}
+                    onOpen={() => {
+                      if (customModelSearchResults.length > 0) {
+                        setCustomModelSearchOpen(true);
+                      }
+                    }}
+                    onClose={() => setCustomModelSearchOpen(false)}
+                    filterOptions={(options) => options}
+                    getOptionLabel={(option) => typeof option === 'string' ? option : option.source_value}
+                    inputValue={customModelSourceValue}
+                    onInputChange={(_, value, reason) => {
+                      if (reason !== 'reset' && !customModelSearchLoading) {
+                        setCustomModelSourceValue(value);
+                        if (!value.trim()) {
+                          setCustomModelSearchOpen(false);
+                        }
+                      }
+                    }}
+                    onChange={(_, value) => {
+                      if (typeof value === 'string') {
+                        setCustomModelSourceValue(value);
+                        setCustomModelSearchOpen(false);
+                        return;
+                      }
+                      if (value) {
+                        setCustomModelSourceValue(value.source_value);
+                        setCustomModelDisplayName(value.display_name);
+                        setCustomModelSearchOpen(false);
+                      }
+                    }}
+                    renderInput={(params) => (
+                      <TextField
+                        {...params}
+                        label='Repo id'
+                        size='small'
+                        placeholder='org/model-name'
+                        helperText='Searches Hugging Face after 1 second of inactivity.'
+                        InputProps={{
+                          ...params.InputProps,
+                          readOnly: customModelSearchLoading,
+                          endAdornment: (
+                            <>
+                              {customModelSearchLoading ? <CircularProgress color='inherit' size={16} /> : null}
+                              {params.InputProps.endAdornment}
+                            </>
+                          ),
+                        }}
+                      />
+                    )}
+                    renderOption={(props, option) => (
+                      <Box component='li' {...props} sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
+                        <Stack sx={{ minWidth: 0, gap: 0.25 }}>
+                          <Typography variant='body2' sx={{ fontWeight: 600 }}>
+                            {option.display_name}
+                          </Typography>
+                          <Typography variant='caption' color='text.secondary'>
+                            {option.validation_message}
+                          </Typography>
+                        </Stack>
+                        <Stack direction='row' sx={{ gap: 0.75, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                          {renderValidationChip(option.validation_status)}
+                          {typeof option.vram_gb === 'number' && option.vram_gb > 0 && (
+                            <Chip size='small' variant='outlined' label={`${option.vram_gb} GB`} />
+                          )}
+                        </Stack>
+                      </Box>
+                    )}
+                  />
+                ) : (
+                  <TextField
+                    label='Absolute path'
+                    size='small'
+                    fullWidth
+                    value={customModelSourceValue}
+                    onChange={(event) => setCustomModelSourceValue(event.target.value)}
+                    placeholder='/path/to/model'
+                  />
+                )}
                 <TextField
                   label='Display name'
                   size='small'

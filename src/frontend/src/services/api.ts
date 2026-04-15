@@ -36,11 +36,36 @@ export interface CustomModelRecord {
   readonly updated_at?: number;
 }
 
+export interface CustomModelSearchResult {
+  readonly source_type: 'huggingface';
+  readonly source_value: string;
+  readonly display_name: string;
+  readonly validation_status: string;
+  readonly validation_message: string;
+  readonly detected_model_type?: string;
+  readonly supports_sharding?: boolean;
+  readonly vram_gb?: number;
+}
+
 export const getCustomModelList = async (): Promise<readonly CustomModelRecord[]> => {
   const response = await fetch(`${API_BASE_URL}/model/custom`, { method: 'GET' });
   const message = await parseJsonResponse(response);
   if (message.type !== 'custom_model_list') {
     throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  return message.data;
+};
+
+export const searchCustomModels = async (query: string, limit = 8): Promise<readonly CustomModelSearchResult[]> => {
+  const response = await fetch(`${API_BASE_URL}/model/custom/search?${new URLSearchParams({ query, limit: String(limit) })}`, {
+    method: 'GET',
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'custom_model_search') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
   }
   return message.data;
 };

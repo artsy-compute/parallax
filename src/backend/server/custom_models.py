@@ -3,6 +3,8 @@ import os
 import sqlite3
 import threading
 import time
+import urllib.parse
+import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any
@@ -155,6 +157,64 @@ class CustomModelStore:
             for row in self.list_models()
             if bool(row.get('enabled'))
         ]
+
+    def search_huggingface_models(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
+        normalized_query = str(query or '').strip()
+        if not normalized_query:
+            raise ValueError('query is required')
+        normalized_limit = max(1, min(int(limit or 8), 20))
+        raw_limit = min(max(normalized_limit * 5, 20), 100)
+
+        model_ids: list[str] = []
+        try:
+            from huggingface_hub import HfApi  # type: ignore
+
+            api = HfApi()
+            for item in api.list_models(search=normalized_query, limit=raw_limit):
+                model_id = str(getattr(item, 'id', '') or '').strip()
+                if model_id:
+                    model_ids.append(model_id)
+        except Exception as e:
+            logger.debug('Falling back to HF REST search for %r: %s', normalized_query, e)
+            url = (
+                "https://huggingface.co/api/models?"
+                + urllib.parse.urlencode({"search": normalized_query, "limit": raw_limit})
+            )
+            with urllib.request.urlopen(url, timeout=10) as response:
+                payload = json.loads(response.read().decode('utf-8'))
+            model_ids.extend(
+                str(item.get('id') or '').strip()
+                for item in payload
+                if str(item.get('id') or '').strip()
+            )
+
+        seen: set[str] = set()
+        results: list[dict[str, Any]] = []
+        for model_id in model_ids:
+            if model_id in seen:
+                continue
+            seen.add(model_id)
+            try:
+                validation = self._validate_model('huggingface', model_id)
+                if validation['validation_status'] != 'verified':
+                    continue
+                results.append(
+                    {
+                        'source_type': 'huggingface',
+                        'source_value': model_id,
+                        'display_name': model_id,
+                        'validation_status': validation['validation_status'],
+                        'validation_message': validation['validation_message'],
+                        'detected_model_type': validation['detected_model_type'],
+                        'supports_sharding': bool(validation['supports_sharding']),
+                        'vram_gb': int(validation['vram_gb'] or 0),
+                    }
+                )
+                if len(results) >= normalized_limit:
+                    break
+            except Exception:
+                continue
+        return results
 
     @staticmethod
     def _model_id(source_type: str, source_value: str) -> str:

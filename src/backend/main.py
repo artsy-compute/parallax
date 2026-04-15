@@ -221,6 +221,36 @@ async def custom_model_add(raw_request: Request):
     )
 
 
+@app.get("/model/custom/search")
+async def custom_model_search(query: str = "", limit: int = 8):
+    try:
+        results = custom_model_store.search_huggingface_models(query=query, limit=limit)
+    except ValueError as e:
+        return JSONResponse(
+            content={
+                "type": "custom_model_search",
+                "error": str(e),
+            },
+            status_code=400,
+        )
+    except Exception as e:
+        logger.exception("Failed to search Hugging Face models: %s", e)
+        return JSONResponse(
+            content={
+                "type": "custom_model_search",
+                "error": str(e),
+            },
+            status_code=500,
+        )
+    return JSONResponse(
+        content={
+            "type": "custom_model_search",
+            "data": results,
+        },
+        status_code=200,
+    )
+
+
 @app.delete("/model/custom/{model_id}")
 async def custom_model_delete(model_id: str):
     deleted = custom_model_store.delete_model(model_id)
