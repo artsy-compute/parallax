@@ -1,5 +1,12 @@
 # Settings Page Spec
 
+> Status: partially implemented and partially outdated.
+>
+> This document is still useful for the original move into a dedicated Settings page, but it no longer reflects the current direction for cluster profiles, shared custom models, SQLite-backed settings, or future node-to-cluster assignment policy.
+>
+> Current source-of-truth follow-on spec:
+> - [Cluster And Node Assignment Spec](./cluster_and_node_assignment_spec.md)
+
 This document captures the planned UX direction for moving from scattered setup/configuration surfaces to a unified dedicated Settings page.
 
 ## Goals
