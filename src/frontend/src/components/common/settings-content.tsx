@@ -8,6 +8,9 @@ import {
   Checkbox,
   Chip,
   CircularProgress,
+  Dialog,
+  DialogContent,
+  DialogTitle,
   IconButton,
   MenuItem,
   Stack,
@@ -19,7 +22,9 @@ import {
   IconCheck,
   IconInfoCircle,
   IconLoader,
+  IconPlus,
   IconTrash,
+  IconX,
 } from '@tabler/icons-react';
 import { useCluster, useHost } from '../../services';
 import {
@@ -29,6 +34,7 @@ import {
   exportSettingsBundle,
   getChatHistoryList,
   getCustomModelList,
+  getCustomModelSources,
   getFrontendBuildStatus,
   getNodesInventory,
   importSettingsBundle,
@@ -39,6 +45,8 @@ import {
   type AppClusterProfile,
   type CustomModelRecord,
   type CustomModelSearchResult,
+  type CustomModelSourceOption,
+  type CustomModelSourceRoot,
 } from '../../services/api';
 import { useRefCallback } from '../../hooks';
 import { NodeManagementContent } from './node-management-content';
@@ -85,16 +93,25 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
   const [customModels, setCustomModels] = useState<readonly CustomModelRecord[]>([]);
   const [customModelLoading, setCustomModelLoading] = useState(false);
   const [customModelError, setCustomModelError] = useState('');
-  const [customModelSourceType, setCustomModelSourceType] = useState<'huggingface' | 'local_path'>('huggingface');
+  const [customModelSourceType, setCustomModelSourceType] = useState<'huggingface' | 'scheduler_root' | 'url'>('huggingface');
   const [customModelSourceValue, setCustomModelSourceValue] = useState('');
   const [customModelDisplayName, setCustomModelDisplayName] = useState('');
+  const [customModelSourceRoots, setCustomModelSourceRoots] = useState<readonly CustomModelSourceRoot[]>([]);
+  const [customModelSourceOptions, setCustomModelSourceOptions] = useState<readonly CustomModelSourceOption[]>([]);
   const [customModelSubmitting, setCustomModelSubmitting] = useState(false);
   const [customModelDeletingId, setCustomModelDeletingId] = useState('');
   const [customModelEditorOpen, setCustomModelEditorOpen] = useState(false);
   const [customModelSearchLoading, setCustomModelSearchLoading] = useState(false);
   const [customModelSearchResults, setCustomModelSearchResults] = useState<readonly CustomModelSearchResult[]>([]);
   const [customModelSearchOpen, setCustomModelSearchOpen] = useState(false);
-  const customModelSearchCacheRef = useRef<Record<string, readonly CustomModelSearchResult[]>>({});
+  const [customModelSearchHasMore, setCustomModelSearchHasMore] = useState(false);
+  const [customModelSearchLoadingMore, setCustomModelSearchLoadingMore] = useState(false);
+  const [customModelSearchNextOffset, setCustomModelSearchNextOffset] = useState(0);
+  const customModelSearchCacheRef = useRef<Record<string, {
+    items: readonly CustomModelSearchResult[];
+    nextOffset: number;
+    hasMore: boolean;
+  }>>({});
   const customModelSearchRequestIdRef = useRef(0);
   const [rebalancingTopology, setRebalancingTopology] = useState(false);
   const [initializingCluster, setInitializingCluster] = useState(false);
@@ -190,15 +207,40 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     }
   };
 
-  useEffect(() => {
-    if (hostType !== 'node') {
-      loadCustomModels();
+  const loadCustomModelSources = useRefCallback(async () => {
+    const data = await getCustomModelSources();
+    setCustomModelSourceRoots(data.allowed_local_roots || []);
+    setCustomModelSourceOptions(data.allowed_local_model_options || []);
+    if (
+      customModelSourceType === 'scheduler_root'
+      && !customModelSourceValue
+      && (data.allowed_local_model_options || []).length > 0
+    ) {
+      setCustomModelSourceValue(String(data.allowed_local_model_options?.[0]?.source_value || ''));
     }
-  }, [hostType]);
+  });
 
   const activeSection = SETTINGS_SECTIONS.some((item) => item.key === routeSection)
     ? (routeSection as SettingsSectionKey)
     : 'cluster';
+
+  useEffect(() => {
+    if (hostType !== 'node') {
+      loadCustomModels();
+      loadCustomModelSources().catch((error) => {
+        console.error('getCustomModelSources error', error);
+      });
+    }
+  }, [hostType, loadCustomModelSources]);
+
+  useEffect(() => {
+    if (hostType === 'node' || activeSection !== 'custom-models' || !customModelEditorOpen) {
+      return;
+    }
+    loadCustomModelSources().catch((error) => {
+      console.error('getCustomModelSources error', error);
+    });
+  }, [hostType, activeSection, customModelEditorOpen, loadCustomModelSources]);
 
   const selectedCluster = clusterProfiles.find((item) => item.id === activeClusterId) || clusterProfiles[0];
   const selectedClusterAssignedNodeIds = new Set(selectedCluster?.assigned_node_ids || []);
@@ -219,6 +261,66 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     .reduce((sum, item) => sum + Math.max(0, Number(item.node?.gpuMemory || 0)), 0);
   const knownAssignedHardwareCount = assignedHostDetails.filter((item) => Number(item.node?.gpuMemory || 0) > 0).length;
   const remainingVramGap = Math.max(0, Number(modelInfo?.vram || 0) - availableAssignedVram);
+  const customModelUrlValidationError = (() => {
+    if (customModelSourceType !== 'url') {
+      return '';
+    }
+    const raw = customModelSourceValue.trim();
+    if (!raw) {
+      return '';
+    }
+    try {
+      const parsed = new URL(raw);
+      if (!['http:', 'https:'].includes(parsed.protocol)) {
+        return 'URL source must use http or https.';
+      }
+      if (!parsed.hostname) {
+        return 'URL source must include a host.';
+      }
+      const filename = parsed.pathname.split('/').filter(Boolean).pop() || '';
+      if (!filename) {
+        return 'URL source must point to a downloadable archive file.';
+      }
+      const lower = filename.toLowerCase();
+      if (!['.zip', '.tar', '.tar.gz', '.tgz', '.tar.bz2', '.tar.xz'].some((suffix) => lower.endsWith(suffix))) {
+        return 'URL source must point to a .zip or .tar archive.';
+      }
+      return '';
+    } catch {
+      return 'Enter a valid archive URL.';
+    }
+  })();
+  const customModelSearchStatus = (() => {
+    if (customModelSourceType !== 'huggingface') {
+      return null;
+    }
+    const query = customModelSourceValue.trim();
+    if (!query) {
+      return {
+        severity: 'info' as const,
+        message: 'Type a Hugging Face repo id or keyword to search. The scheduler validates matches by fetching model config metadata.',
+      };
+    }
+    if (customModelSearchLoading) {
+      return {
+        severity: 'info' as const,
+        message: `Searching Hugging Face for "${query}" and validating matching model configs on the scheduler…`,
+      };
+    }
+    if (customModelSearchResults.length > 0) {
+      return {
+        severity: 'success' as const,
+        message: `Found ${customModelSearchResults.length} validated match${customModelSearchResults.length === 1 ? '' : 'es'}${customModelSearchHasMore ? ' so far' : ''}. Pick one below or keep typing to refine.`,
+      };
+    }
+    if (query && customModelSearchResults.length === 0) {
+      return {
+        severity: 'warning' as const,
+        message: `No validated Hugging Face matches found for "${query}".`,
+      };
+    }
+    return null;
+  })();
 
   useEffect(() => {
     const loadChatHistory = async () => {
@@ -279,28 +381,38 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
       setCustomModelSearchResults([]);
       setCustomModelSearchLoading(false);
       setCustomModelSearchOpen(false);
+      setCustomModelSearchHasMore(false);
+      setCustomModelSearchNextOffset(0);
       return;
     }
     const timeoutId = window.setTimeout(async () => {
       const cached = customModelSearchCacheRef.current[query];
       if (cached) {
         setCustomModelError('');
-        setCustomModelSearchResults(cached);
+        setCustomModelSearchResults(cached.items);
+        setCustomModelSearchHasMore(cached.hasMore);
+        setCustomModelSearchNextOffset(cached.nextOffset);
         setCustomModelSearchLoading(false);
-        setCustomModelSearchOpen(cached.length > 0);
+        setCustomModelSearchOpen(cached.items.length > 0);
         return;
       }
       const requestId = ++customModelSearchRequestIdRef.current;
       try {
         setCustomModelSearchLoading(true);
         setCustomModelError('');
-        const results = await searchCustomModels(query, 8);
+        const result = await searchCustomModels(query, 3, 0);
         if (requestId !== customModelSearchRequestIdRef.current) {
           return;
         }
-        customModelSearchCacheRef.current[query] = results;
-        setCustomModelSearchResults(results);
-        setCustomModelSearchOpen(results.length > 0);
+        customModelSearchCacheRef.current[query] = {
+          items: result.items,
+          nextOffset: result.next_offset,
+          hasMore: result.has_more,
+        };
+        setCustomModelSearchResults(result.items);
+        setCustomModelSearchHasMore(result.has_more);
+        setCustomModelSearchNextOffset(result.next_offset);
+        setCustomModelSearchOpen(result.items.length > 0);
       } catch (error) {
         if (requestId !== customModelSearchRequestIdRef.current) {
           return;
@@ -308,14 +420,32 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
         setCustomModelError(error instanceof Error ? error.message : 'Failed to search Hugging Face models');
         setCustomModelSearchResults([]);
         setCustomModelSearchOpen(false);
+        setCustomModelSearchHasMore(false);
+        setCustomModelSearchNextOffset(0);
       } finally {
         if (requestId === customModelSearchRequestIdRef.current) {
           setCustomModelSearchLoading(false);
         }
       }
-    }, 1000);
+    }, 300);
     return () => window.clearTimeout(timeoutId);
   }, [hostType, customModelSourceType, customModelSourceValue]);
+
+  useEffect(() => {
+    if (customModelSourceType !== 'scheduler_root') {
+      return;
+    }
+    if (!customModelSourceValue && customModelSourceOptions.length > 0) {
+      setCustomModelSourceValue(String(customModelSourceOptions[0]?.source_value || ''));
+      return;
+    }
+    if (
+      customModelSourceValue
+      && !customModelSourceOptions.some((option) => option.source_value === customModelSourceValue)
+    ) {
+      setCustomModelSourceValue(String(customModelSourceOptions[0]?.source_value || ''));
+    }
+  }, [customModelSourceType, customModelSourceOptions, customModelSourceValue]);
 
   const onClickRebalanceTopology = async () => {
     if (rebalancingTopology) {
@@ -364,10 +494,8 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
         source_value: customModelSourceValue.trim(),
         display_name: customModelDisplayName.trim(),
       });
-      setCustomModelSourceValue('');
-      setCustomModelDisplayName('');
-      setCustomModelEditorOpen(false);
       await Promise.all([loadCustomModels(), refreshModelList()]);
+      closeCustomModelEditor();
     } catch (error) {
       setCustomModelError(error instanceof Error ? error.message : 'Failed to add custom model');
     } finally {
@@ -389,6 +517,55 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     } finally {
       setCustomModelDeletingId('');
     }
+  };
+
+  const onLoadMoreCustomModelSearchResults = useRefCallback(async () => {
+    const query = customModelSourceValue.trim();
+    if (
+      customModelSourceType !== 'huggingface'
+      || !query
+      || customModelSearchLoading
+      || customModelSearchLoadingMore
+      || !customModelSearchHasMore
+    ) {
+      return;
+    }
+    try {
+      setCustomModelSearchLoadingMore(true);
+      setCustomModelError('');
+      const result = await searchCustomModels(query, 3, customModelSearchNextOffset);
+      setCustomModelSearchResults((prev) => {
+        const merged = [
+          ...prev,
+          ...result.items.filter((item) => !prev.some((existing) => existing.source_value === item.source_value)),
+        ];
+        customModelSearchCacheRef.current[query] = {
+          items: merged,
+          nextOffset: result.next_offset,
+          hasMore: result.has_more,
+        };
+        return merged;
+      });
+      setCustomModelSearchHasMore(result.has_more);
+      setCustomModelSearchNextOffset(result.next_offset);
+      setCustomModelSearchOpen(result.items.length > 0);
+    } catch (error) {
+      setCustomModelError(error instanceof Error ? error.message : 'Failed to load more Hugging Face matches');
+    } finally {
+      setCustomModelSearchLoadingMore(false);
+    }
+  });
+
+  const closeCustomModelEditor = () => {
+    setCustomModelEditorOpen(false);
+    setCustomModelError('');
+    setCustomModelSourceValue('');
+    setCustomModelDisplayName('');
+    setCustomModelSearchOpen(false);
+    setCustomModelSearchResults([]);
+    setCustomModelSearchHasMore(false);
+    setCustomModelSearchNextOffset(0);
+    setCustomModelSearchLoadingMore(false);
   };
 
   const renderValidationChip = (status: string) => {
@@ -864,140 +1041,31 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     if (activeSection === 'custom-models') {
       return (
         <Stack sx={{ gap: 1.25 }}>
-          <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75 }}>
-            <Typography variant='h2'>Custom Models</Typography>
-            <Tooltip
-              title='Add Hugging Face repo ids or local model paths. These models are shared across clusters and appear in each cluster model selector.'
-              placement='right'
-              slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
-            >
-              <IconButton size='small' sx={{ color: 'text.secondary', p: 0.25 }}>
-                <IconInfoCircle size={16} />
-              </IconButton>
-            </Tooltip>
-          </Stack>
-          <Typography variant='body2' color='text.secondary'>
-            Custom models are a shared library for all clusters. Supported in this version: Hugging Face repo ids and local filesystem paths. Arbitrary website URLs are intentionally not accepted.
-          </Typography>
-          {customModelError && <Alert severity='warning'>{customModelError}</Alert>}
-          {!customModelEditorOpen && (
-            <Stack direction='row' sx={{ justifyContent: 'flex-start' }}>
-              <Button variant='outlined' onClick={() => setCustomModelEditorOpen(true)}>Add model</Button>
-            </Stack>
-          )}
-          {customModelEditorOpen && (
-            <Stack direction={{ xs: 'column', sm: 'row' }} sx={{ gap: 1 }}>
-              <TextField
-                select
-                label='Source'
-                size='small'
-                value={customModelSourceType}
-                onChange={(event) => setCustomModelSourceType(event.target.value as 'huggingface' | 'local_path')}
-                sx={{ minWidth: { sm: '10rem' } }}
+          <Stack direction='row' sx={{ alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
+            <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75 }}>
+              <Typography variant='h2'>Custom Models</Typography>
+              <Tooltip
+                title='Custom models are a shared library for all clusters. Supported in this version: Hugging Face repo ids, approved scheduler-local model roots, and ad hoc archive URLs imported onto the scheduler.'
+                placement='right'
+                slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
               >
-                <MenuItem value='huggingface'>Hugging Face</MenuItem>
-                <MenuItem value='local_path'>Local path</MenuItem>
-              </TextField>
-              {customModelSourceType === 'huggingface' ? (
-                <Autocomplete
-                  freeSolo
-                  fullWidth
-                  options={customModelSearchResults}
-                  loading={customModelSearchLoading}
-                  open={customModelSearchOpen}
-                  onOpen={() => {
-                    if (customModelSearchResults.length > 0) setCustomModelSearchOpen(true);
-                  }}
-                  onClose={() => setCustomModelSearchOpen(false)}
-                  filterOptions={(options) => options}
-                  getOptionLabel={(option) => typeof option === 'string' ? option : option.source_value}
-                  inputValue={customModelSourceValue}
-                  onInputChange={(_, value, reason) => {
-                    if (reason !== 'reset' && !customModelSearchLoading) {
-                      setCustomModelSourceValue(value);
-                      if (!value.trim()) setCustomModelSearchOpen(false);
-                    }
-                  }}
-                  onChange={(_, value) => {
-                    if (typeof value === 'string') {
-                      setCustomModelSourceValue(value);
-                      setCustomModelSearchOpen(false);
-                      return;
-                    }
-                    if (value) {
-                      setCustomModelSourceValue(value.source_value);
-                      setCustomModelDisplayName(value.display_name);
-                      setCustomModelSearchOpen(false);
-                    }
-                  }}
-                  renderInput={(params) => (
-                    <TextField
-                      {...params}
-                      label='Repo id'
-                      size='small'
-                      placeholder='org/model-name'
-                      helperText='Searches Hugging Face after 1 second of inactivity.'
-                      InputProps={{
-                        ...params.InputProps,
-                        readOnly: customModelSearchLoading,
-                        endAdornment: (
-                          <>
-                            {customModelSearchLoading ? <CircularProgress color='inherit' size={16} /> : null}
-                            {params.InputProps.endAdornment}
-                          </>
-                        ),
-                      }}
-                    />
-                  )}
-                  renderOption={(props, option) => (
-                    <Box component='li' {...props} sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
-                      <Stack sx={{ minWidth: 0, gap: 0.25 }}>
-                        <Typography variant='body2' sx={{ fontWeight: 600 }}>{option.display_name}</Typography>
-                        <Typography variant='caption' color='text.secondary'>{option.validation_message}</Typography>
-                      </Stack>
-                      <Stack direction='row' sx={{ gap: 0.75, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-                        {renderValidationChip(option.validation_status)}
-                        {typeof option.vram_gb === 'number' && option.vram_gb > 0 && <Chip size='small' variant='outlined' label={`${option.vram_gb} GB`} />}
-                      </Stack>
-                    </Box>
-                  )}
-                />
-              ) : (
-                <TextField
-                  label='Absolute path'
-                  size='small'
-                  fullWidth
-                  value={customModelSourceValue}
-                  onChange={(event) => setCustomModelSourceValue(event.target.value)}
-                  placeholder='/path/to/model'
-                />
-              )}
-              <TextField
-                label='Display name'
-                size='small'
-                value={customModelDisplayName}
-                onChange={(event) => setCustomModelDisplayName(event.target.value)}
-                placeholder='Optional'
-                sx={{ minWidth: { sm: '12rem' } }}
-              />
-              <Button variant='contained' onClick={onAddCustomModel} disabled={customModelSubmitting || !customModelSourceValue.trim()} sx={{ alignSelf: { xs: 'stretch', sm: 'center' }, whiteSpace: 'nowrap' }}>
-                {customModelSubmitting ? 'Adding...' : 'Add model'}
-              </Button>
+                <IconButton size='small' sx={{ color: 'text.secondary', p: 0.25 }}>
+                  <IconInfoCircle size={16} />
+                </IconButton>
+              </Tooltip>
+            </Stack>
+            {!customModelEditorOpen && (
               <Button
-                variant='text'
-                onClick={() => {
-                  setCustomModelEditorOpen(false);
-                  setCustomModelError('');
-                  setCustomModelSourceValue('');
-                  setCustomModelDisplayName('');
-                  setCustomModelSearchOpen(false);
-                }}
-                sx={{ alignSelf: { xs: 'stretch', sm: 'center' }, whiteSpace: 'nowrap' }}
+                variant='outlined'
+                onClick={() => setCustomModelEditorOpen(true)}
+                startIcon={<IconPlus size={16} />}
+                sx={{ whiteSpace: 'nowrap' }}
               >
-                Cancel
+                Add model
               </Button>
-            </Stack>
-          )}
+            )}
+          </Stack>
+          {customModelError && <Alert severity='warning'>{customModelError}</Alert>}
           <Stack sx={{ gap: 1, maxHeight: '24rem', overflow: 'auto' }}>
             {customModelLoading && <Typography variant='body2' color='text.secondary'>Loading custom models…</Typography>}
             {!customModelLoading && customModels.length === 0 && <Typography variant='body2' color='text.secondary'>No custom models added yet.</Typography>}
@@ -1007,7 +1075,17 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                   <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75, flexWrap: 'wrap' }}>
                     <Typography variant='body2' sx={{ fontWeight: 600 }}>{model.display_name || model.source_value}</Typography>
                     {renderValidationChip(model.validation_status)}
-                    <Chip size='small' variant='outlined' label={model.source_type === 'huggingface' ? 'HF' : 'Local'} />
+                    <Chip
+                      size='small'
+                      variant='outlined'
+                      label={
+                        model.source_type === 'huggingface'
+                          ? 'HF'
+                          : model.source_type === 'scheduler_root'
+                            ? 'Local root'
+                            : 'URL'
+                      }
+                    />
                   </Stack>
                   <Typography variant='caption' color='text.secondary' sx={{ wordBreak: 'break-all' }}>{model.source_value}</Typography>
                   {model.validation_message && <Typography variant='caption' color='text.secondary'>{model.validation_message}</Typography>}
@@ -1018,6 +1096,254 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
               </Stack>
             ))}
           </Stack>
+          <Dialog open={customModelEditorOpen} onClose={closeCustomModelEditor} fullWidth maxWidth='md'>
+            <DialogTitle sx={{ pr: 6 }}>
+              Add Custom Model
+              <IconButton
+                onClick={closeCustomModelEditor}
+                aria-label='Close add custom model dialog'
+                sx={{ position: 'absolute', right: 16, top: 16 }}
+              >
+                <IconX size={18} />
+              </IconButton>
+            </DialogTitle>
+            <DialogContent dividers>
+              <Stack sx={{ gap: 1.25, pt: 0.5 }}>
+              <TextField
+                select
+                label='Source'
+                size='small'
+                value={customModelSourceType}
+                onChange={(event) => {
+                  const nextType = event.target.value as 'huggingface' | 'scheduler_root' | 'url';
+                  setCustomModelSourceType(nextType);
+                  setCustomModelError('');
+                  setCustomModelSearchOpen(false);
+                  setCustomModelSearchResults([]);
+                  setCustomModelSearchHasMore(false);
+                  setCustomModelSearchNextOffset(0);
+                  if (nextType === 'scheduler_root') {
+                    setCustomModelSourceValue(String(customModelSourceOptions[0]?.source_value || ''));
+                  } else {
+                    setCustomModelSourceValue('');
+                  }
+                }}
+                sx={{ minWidth: { sm: '10rem' } }}
+              >
+                <MenuItem value='huggingface'>Hugging Face</MenuItem>
+                <MenuItem value='scheduler_root' disabled={customModelSourceRoots.length === 0}>Approved local root</MenuItem>
+                <MenuItem value='url'>URL</MenuItem>
+              </TextField>
+                {customModelSourceType === 'huggingface' ? (
+                  <Stack sx={{ gap: 1 }}>
+                    <Autocomplete
+                      freeSolo
+                      fullWidth
+                      openOnFocus
+                      autoHighlight
+                      disablePortal
+                      clearOnBlur={false}
+                      options={customModelSearchResults}
+                      loading={customModelSearchLoading}
+                      open={!!customModelSourceValue.trim() && (customModelSearchOpen || customModelSearchLoading || customModelSearchResults.length > 0)}
+                      loadingText='Searching Hugging Face…'
+                      noOptionsText={customModelSourceValue.trim() ? 'No matching models found' : 'Start typing a repo id'}
+                      onOpen={() => {
+                        if (customModelSourceValue.trim()) setCustomModelSearchOpen(true);
+                      }}
+                      onClose={() => setCustomModelSearchOpen(false)}
+                      filterOptions={(options) => options}
+                      getOptionLabel={(option) => typeof option === 'string' ? option : option.source_value}
+                      inputValue={customModelSourceValue}
+                      onInputChange={(_, value, reason) => {
+                        if (reason !== 'reset' && !customModelSearchLoading) {
+                          setCustomModelSourceValue(value);
+                          setCustomModelSearchOpen(!!value.trim());
+                        }
+                      }}
+                      onChange={(_, value) => {
+                        if (typeof value === 'string') {
+                          setCustomModelSourceValue(value);
+                          setCustomModelSearchOpen(false);
+                          return;
+                        }
+                        if (value) {
+                          setCustomModelSourceValue(value.source_value);
+                          setCustomModelDisplayName(value.display_name);
+                          setCustomModelSearchOpen(false);
+                        }
+                      }}
+                      renderInput={(params) => (
+                        <TextField
+                          {...params}
+                          label='Repo id'
+                          size='small'
+                          placeholder='org/model-name'
+                          helperText='Searches Hugging Face shortly after you stop typing.'
+                          InputProps={{
+                            ...params.InputProps,
+                            endAdornment: (
+                              <>
+                                {customModelSearchLoading ? <CircularProgress color='inherit' size={16} /> : null}
+                                {params.InputProps.endAdornment}
+                              </>
+                            ),
+                          }}
+                        />
+                      )}
+                      renderOption={(props, option) => (
+                        <Box component='li' {...props} sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
+                          <Stack sx={{ minWidth: 0, gap: 0.25 }}>
+                            <Typography variant='body2' sx={{ fontWeight: 600 }}>{option.display_name}</Typography>
+                            <Typography variant='caption' color='text.secondary'>{option.validation_message}</Typography>
+                          </Stack>
+                          <Stack direction='row' sx={{ gap: 0.75, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                            {renderValidationChip(option.validation_status)}
+                            {typeof option.vram_gb === 'number' && option.vram_gb > 0 && <Chip size='small' variant='outlined' label={`${option.vram_gb} GB`} />}
+                          </Stack>
+                        </Box>
+                      )}
+                    />
+                    {customModelSearchStatus && (
+                      <Alert severity={customModelSearchStatus.severity}>
+                        {customModelSearchStatus.message}
+                      </Alert>
+                    )}
+                    {customModelSearchLoading && (
+                      <Stack direction='row' sx={{ alignItems: 'center', gap: 1, px: 0.5, py: 0.25 }}>
+                        <CircularProgress size={18} />
+                        <Typography variant='body2' color='text.secondary'>
+                          Waiting for Hugging Face matches…
+                        </Typography>
+                      </Stack>
+                    )}
+                    {customModelSearchResults.length > 0 && (
+                      <Stack sx={{ gap: 0.75 }}>
+                        {customModelSearchResults.map((option) => (
+                          <Stack
+                            key={option.source_value}
+                            direction='row'
+                            onClick={() => {
+                              setCustomModelSourceValue(option.source_value);
+                              setCustomModelDisplayName(option.display_name);
+                              setCustomModelSearchOpen(false);
+                            }}
+                            sx={{
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              gap: 1,
+                              px: 1.25,
+                              py: 1,
+                              borderRadius: 2,
+                              border: '1px solid',
+                              borderColor: option.source_value === customModelSourceValue ? 'primary.main' : 'divider',
+                              bgcolor: option.source_value === customModelSourceValue ? 'action.selected' : 'background.paper',
+                              cursor: 'pointer',
+                              '&:hover': {
+                                bgcolor: 'action.hover',
+                              },
+                            }}
+                          >
+                            <Stack sx={{ minWidth: 0, gap: 0.25, flex: 1 }}>
+                              <Typography variant='body2' sx={{ fontWeight: 600 }}>
+                                {option.display_name}
+                              </Typography>
+                              <Typography variant='caption' color='text.secondary'>
+                                {option.source_value}
+                              </Typography>
+                              <Typography variant='caption' color='text.secondary'>
+                                {option.validation_message}
+                              </Typography>
+                            </Stack>
+                            <Stack direction='row' sx={{ gap: 0.75, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                              {renderValidationChip(option.validation_status)}
+                              {typeof option.vram_gb === 'number' && option.vram_gb > 0 && (
+                                <Chip size='small' variant='outlined' label={`${option.vram_gb} GB`} />
+                              )}
+                            </Stack>
+                          </Stack>
+                        ))}
+                        {customModelSearchHasMore && (
+                          <Stack direction='row' sx={{ justifyContent: 'flex-end' }}>
+                            <Button
+                              variant='outlined'
+                              onClick={() => void onLoadMoreCustomModelSearchResults()}
+                              disabled={customModelSearchLoadingMore}
+                              startIcon={customModelSearchLoadingMore ? <IconLoader size={16} /> : undefined}
+                            >
+                              {customModelSearchLoadingMore ? 'Loading more…' : 'Load more matches'}
+                            </Button>
+                          </Stack>
+                        )}
+                      </Stack>
+                    )}
+                  </Stack>
+                ) : customModelSourceType === 'scheduler_root' ? (
+                <TextField
+                  select
+                  label='Model directory'
+                  size='small'
+                  fullWidth
+                  value={customModelSourceValue}
+                  onChange={(event) => setCustomModelSourceValue(String(event.target.value))}
+                  helperText={
+                    customModelSourceOptions.length === 0
+                      ? 'No approved model directories with config.json were found under the scheduler roots.'
+                      : (customModelSourceOptions.find((option) => option.source_value === customModelSourceValue)?.path || 'Select an approved model directory')
+                  }
+                  disabled={customModelSourceOptions.length === 0}
+                >
+                  {customModelSourceOptions.map((option) => (
+                    <MenuItem key={option.source_value} value={option.source_value}>
+                      {option.label}
+                    </MenuItem>
+                  ))}
+                </TextField>
+              ) : (
+                <TextField
+                  label='Archive URL'
+                  size='small'
+                  fullWidth
+                  value={customModelSourceValue}
+                  onChange={(event) => setCustomModelSourceValue(event.target.value)}
+                  placeholder='https://example.com/model.tar.gz'
+                  error={!!customModelUrlValidationError}
+                  helperText={customModelUrlValidationError || 'The scheduler downloads and imports the archive into the approved local model root.'}
+                />
+              )}
+                <TextField
+                  label='Display name'
+                  size='small'
+                  value={customModelDisplayName}
+                  onChange={(event) => setCustomModelDisplayName(event.target.value)}
+                  placeholder='Optional'
+                  sx={{ maxWidth: { sm: '20rem' } }}
+                />
+                <Stack direction='row' sx={{ justifyContent: 'flex-end', gap: 1 }}>
+                  <Button variant='text' onClick={closeCustomModelEditor}>
+                    Cancel
+                  </Button>
+                  <Button
+                    variant='contained'
+                    onClick={onAddCustomModel}
+                    disabled={
+                      customModelSubmitting
+                      || (
+                        customModelSourceType === 'huggingface'
+                          ? !customModelSourceValue.trim()
+                          : customModelSourceType === 'url'
+                            ? !!customModelUrlValidationError
+                            : !customModelSourceValue.trim()
+                      )
+                    }
+                    startIcon={customModelSubmitting ? <IconLoader size={16} /> : <IconCheck size={16} />}
+                  >
+                    Add model
+                  </Button>
+                </Stack>
+              </Stack>
+            </DialogContent>
+          </Dialog>
         </Stack>
       );
     }

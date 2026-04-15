@@ -12,7 +12,7 @@ export default function PageSettings() {
           <Button component={RouterLink} to='/chat' variant='text' startIcon={<IconArrowLeft size={16} />} sx={{ alignSelf: 'flex-start' }}>
             Back to chat
           </Button>
-          <Typography variant='h3'>Settings</Typography>
+          <Typography variant='h1'>Settings</Typography>
         </Stack>
         <SettingsContent routeSection={section} />
       </Stack>

@@ -67,6 +67,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional file listing SSH-reachable node hosts to track alongside live joined nodes.",
     )
+    parser.add_argument(
+        "--custom-model-root",
+        action="append",
+        default=[],
+        help="Approved local model root in the form root_id=/absolute/path. May be passed multiple times.",
+    )
 
     # Weight refit configuration
     parser.add_argument(

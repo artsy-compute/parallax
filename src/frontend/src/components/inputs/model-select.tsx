@@ -116,6 +116,23 @@ const ModelMemory = styled('span')(({ theme }) => ({
   whiteSpace: 'nowrap',
 }));
 
+const ModelSourceBadge = styled('span')(({ theme }) => ({
+  ...theme.typography.caption,
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  minWidth: '3.1rem',
+  padding: '0.125rem 0.45rem',
+  borderRadius: 999,
+  fontSize: '0.68rem',
+  lineHeight: 1,
+  fontWeight: theme.typography.fontWeightMedium,
+  color: theme.palette.info.dark,
+  backgroundColor: 'rgba(25, 118, 210, 0.08)',
+  border: `1px solid ${theme.palette.info.light}`,
+  whiteSpace: 'nowrap',
+}));
+
 const NodeCounts = styled(Stack)(({ theme }) => ({
   flexDirection: 'row',
   alignItems: 'center',
@@ -147,8 +164,15 @@ const NodeCountBadge = styled('span')<{ ownerState: { tone: 'active' | 'inactive
 
 const formatRequiredMemory = (vram: number) => (vram > 0 ? `${vram} GB` : '');
 
+const formatModelSource = ({ sourceType, custom }: Pick<ModelInfo, 'sourceType' | 'custom'>) => {
+  if (sourceType === 'huggingface') return 'HF';
+  if (sourceType === 'scheduler_root') return 'Local Root';
+  if (sourceType === 'url') return 'URL';
+  return custom ? 'Custom' : 'Built-in';
+};
+
 const renderOption = (
-  { name, displayName, logoUrl, vram }: ModelInfo,
+  { name, displayName, logoUrl, vram, sourceType, custom }: ModelInfo,
   {
     selected,
     loading,
@@ -172,8 +196,11 @@ const renderOption = (
     <ModelLogo src={logoUrl} />
     <ModelInfoColumn gap={0.125}>
       <ModelDisplayName>{displayName}</ModelDisplayName>
-      <ModelName>{disabled && disabledReason ? disabledReason : name}</ModelName>
+      <ModelName>
+        {disabled && disabledReason ? disabledReason : name}
+      </ModelName>
     </ModelInfoColumn>
+    <ModelSourceBadge>{formatModelSource({ sourceType, custom })}</ModelSourceBadge>
     {vram > 0 && <ModelMemory>{formatRequiredMemory(vram)}</ModelMemory>}
   </ModelSelectOption>
 );
@@ -265,7 +292,10 @@ export const ModelSelect: FC<ModelSelectProps> = ({
                   <ModelLogo src={model.logoUrl} />
                   <ModelInfoColumn gap={0.125}>
                     <ModelDisplayName>{model.displayName}</ModelDisplayName>
-                    <ModelName>{model.name}</ModelName>
+                    <Stack direction="row" alignItems="center" gap={0.75} sx={{ minWidth: 0 }}>
+                      <ModelName>{model.name}</ModelName>
+                      <ModelSourceBadge>{formatModelSource(model)}</ModelSourceBadge>
+                    </Stack>
                   </ModelInfoColumn>
                   {model.vram > 0 && <ModelMemory>{formatRequiredMemory(model.vram)}</ModelMemory>}
                 </ValueRow>

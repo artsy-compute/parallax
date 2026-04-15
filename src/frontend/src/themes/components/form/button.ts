@@ -119,6 +119,33 @@ export const MuiButton = (theme: Theme): Components<Theme>['MuiButton'] => {
     }));
   }).flat(1);
 
+  const outlinedColorVariants = COLORS.map((color) => {
+    const paletteColor = theme.palette[color as keyof Palette] as PaletteColor;
+    return {
+      props: { variant: 'outlined' as ButtonProps['variant'], color },
+      style: {
+        color: paletteColor.dark,
+        border: '1px solid',
+        borderColor: paletteColor.light,
+        backgroundColor: 'transparent',
+        boxShadow: 'none',
+        '&:hover': {
+          borderColor: paletteColor.main,
+          backgroundColor: paletteColor.lighter,
+        },
+        '&:active': {
+          borderColor: paletteColor.darker,
+          backgroundColor: paletteColor.lighter,
+        },
+        '&.Mui-disabled': {
+          color: theme.palette.text.disabled,
+          borderColor: theme.palette.action.disabledBackground,
+          backgroundColor: 'transparent',
+        },
+      },
+    };
+  }).flat(1);
+
   const iconFontSizeVariants = SIZES.map((size) => ({
     props: { size },
     style: {
@@ -144,7 +171,7 @@ export const MuiButton = (theme: Theme): Components<Theme>['MuiButton'] => {
         letterSpacing: 0,
         textTransform: 'none',
 
-        variants: [...containedBoxShadowVariants, ...containedColorVariants],
+        variants: [...containedBoxShadowVariants, ...containedColorVariants, ...outlinedColorVariants],
 
         [`&.${buttonClasses.text}`]: {
           fontFamily: 'inherit',
@@ -156,6 +183,9 @@ export const MuiButton = (theme: Theme): Components<Theme>['MuiButton'] => {
           '&:hover': {
             background: 'transparent',
           },
+        },
+        [`&.${buttonClasses.outlined}`]: {
+          fontWeight: 500,
         },
       },
 
@@ -189,6 +219,9 @@ export const MuiButton = (theme: Theme): Components<Theme>['MuiButton'] => {
           height: '1lh',
           paddingInline: 0,
         },
+        [`&.${buttonClasses.outlined}`]: {
+          paddingInline: `${SIZE_PADDING_INLINE_REM_MAP.small}rem`,
+        },
         '&.MuiButton-containedRounded': {
           borderRadius: `${SIZE_REM_MAP.small / 2}rem`,
         },
@@ -219,6 +252,9 @@ export const MuiButton = (theme: Theme): Components<Theme>['MuiButton'] => {
           height: '1lh',
           paddingInline: 0,
         },
+        [`&.${buttonClasses.outlined}`]: {
+          paddingInline: `${SIZE_PADDING_INLINE_REM_MAP.medium}rem`,
+        },
         '&.MuiButton-containedRounded': {
           borderRadius: `${SIZE_REM_MAP.medium / 2}rem`,
         },
@@ -248,6 +284,9 @@ export const MuiButton = (theme: Theme): Components<Theme>['MuiButton'] => {
           minWidth: 0,
           height: '1lh',
           paddingInline: 0,
+        },
+        [`&.${buttonClasses.outlined}`]: {
+          paddingInline: `${SIZE_PADDING_INLINE_REM_MAP.large}rem`,
         },
         '&.MuiButton-containedRounded': {
           borderRadius: `${SIZE_REM_MAP.large / 2}rem`,

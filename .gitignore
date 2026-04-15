@@ -16,3 +16,4 @@ hosts.json
 src/frontend/dist/*
 
 logs/
+custom-model-root/

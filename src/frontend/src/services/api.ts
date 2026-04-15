@@ -22,7 +22,7 @@ export const getModelList = async (): Promise<readonly any[]> => {
 
 export interface CustomModelRecord {
   readonly id: string;
-  readonly source_type: 'huggingface' | 'local_path';
+  readonly source_type: 'huggingface' | 'scheduler_root' | 'url' | 'local_path';
   readonly source_value: string;
   readonly display_name: string;
   readonly enabled: boolean;
@@ -47,6 +47,34 @@ export interface CustomModelSearchResult {
   readonly vram_gb?: number;
 }
 
+export interface CustomModelSourceRoot {
+  readonly id: string;
+  readonly label: string;
+  readonly path: string;
+}
+
+export interface CustomModelSourceOption {
+  readonly root_id: string;
+  readonly root_label: string;
+  readonly relative_path: string;
+  readonly source_value: string;
+  readonly label: string;
+  readonly path: string;
+}
+
+export const getCustomModelSources = async (): Promise<{
+  supported_source_types: readonly ('huggingface' | 'scheduler_root' | 'url')[];
+  allowed_local_roots: readonly CustomModelSourceRoot[];
+  allowed_local_model_options: readonly CustomModelSourceOption[];
+}> => {
+  const response = await fetch(`${API_BASE_URL}/model/custom/sources`, { method: 'GET' });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'custom_model_sources') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  return message.data;
+};
+
 export const getCustomModelList = async (): Promise<readonly CustomModelRecord[]> => {
   const response = await fetch(`${API_BASE_URL}/model/custom`, { method: 'GET' });
   const message = await parseJsonResponse(response);
@@ -56,8 +84,12 @@ export const getCustomModelList = async (): Promise<readonly CustomModelRecord[]
   return message.data;
 };
 
-export const searchCustomModels = async (query: string, limit = 8): Promise<readonly CustomModelSearchResult[]> => {
-  const response = await fetch(`${API_BASE_URL}/model/custom/search?${new URLSearchParams({ query, limit: String(limit) })}`, {
+export const searchCustomModels = async (query: string, limit = 8, offset = 0): Promise<{
+  items: readonly CustomModelSearchResult[];
+  next_offset: number;
+  has_more: boolean;
+}> => {
+  const response = await fetch(`${API_BASE_URL}/model/custom/search?${new URLSearchParams({ query, limit: String(limit), offset: String(offset) })}`, {
     method: 'GET',
   });
   const message = await parseJsonResponse(response);
@@ -67,11 +99,23 @@ export const searchCustomModels = async (query: string, limit = 8): Promise<read
   if (message.error) {
     throw new Error(String(message.error));
   }
-  return message.data;
+  if (Array.isArray(message.data)) {
+    const items = message.data as readonly CustomModelSearchResult[];
+    return {
+      items,
+      next_offset: offset + items.length,
+      has_more: items.length >= limit,
+    };
+  }
+  return {
+    items: Array.isArray(message.data?.items) ? message.data.items : [],
+    next_offset: Number(message.data?.next_offset || 0),
+    has_more: Boolean(message.data?.has_more),
+  };
 };
 
 export const addCustomModel = async (params: {
-  source_type: 'huggingface' | 'local_path';
+  source_type: 'huggingface' | 'scheduler_root' | 'url';
   source_value: string;
   display_name?: string;
 }): Promise<CustomModelRecord> => {
@@ -163,7 +207,7 @@ export interface SettingsExportBundle {
     linked_cluster_names?: readonly string[];
     linked_cluster_count?: number;
   }[];
-  readonly custom_models: readonly { source_type: 'huggingface' | 'local_path'; source_value: string; display_name?: string }[];
+  readonly custom_models: readonly { source_type: 'huggingface' | 'scheduler_root' | 'url' | 'local_path'; source_value: string; display_name?: string }[];
 }
 
 export const exportSettingsBundle = async (): Promise<SettingsExportBundle> => {

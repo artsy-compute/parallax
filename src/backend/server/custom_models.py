@@ -1,11 +1,13 @@
 import json
 import os
 import sqlite3
+import tarfile
 import threading
 import time
 import urllib.parse
 import urllib.request
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,7 @@ from backend.server.static_config import estimate_vram_gb_required, get_model_in
 from parallax_utils.logging_config import get_logger
 
 logger = get_logger(__name__)
+HF_SEARCH_CACHE_TTL_SEC = 60 * 60
 
 SUPPORTED_MODEL_TYPES = {
     'qwen2',
@@ -31,13 +34,82 @@ SUPPORTED_MODEL_TYPES = {
 
 
 class CustomModelStore:
-    def __init__(self, db_path: str | None = None):
+    def __init__(self, db_path: str | None = None, allowed_local_roots: dict[str, str] | None = None):
         if db_path is None:
             db_path = os.environ.get('PARALLAX_CUSTOM_MODELS_DB', '/tmp/parallax_custom_models.sqlite3')
         self.db_path = str(Path(db_path))
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._allowed_local_roots: dict[str, Path] = {}
         self._init_db()
+        self.configure_allowed_local_roots(allowed_local_roots or {})
+
+    def configure_allowed_local_roots(self, roots: dict[str, str] | None) -> None:
+        normalized: dict[str, Path] = {}
+        for raw_key, raw_path in (roots or {}).items():
+            key = str(raw_key or '').strip()
+            path_text = str(raw_path or '').strip()
+            if not key or not path_text:
+                continue
+            normalized[key] = Path(path_text).expanduser().resolve()
+        self._allowed_local_roots = normalized
+
+    def list_allowed_local_roots(self) -> list[dict[str, str]]:
+        return [
+            {
+                'id': key,
+                'label': key.replace('_', ' ').replace('-', ' ').title(),
+                'path': str(path),
+            }
+            for key, path in sorted(self._allowed_local_roots.items())
+        ]
+
+    def list_allowed_local_model_options(self) -> list[dict[str, str]]:
+        options: list[dict[str, str]] = []
+        for root in self.list_allowed_local_roots():
+            root_id = str(root.get('id') or '').strip()
+            root_label = str(root.get('label') or root_id).strip() or root_id
+            root_path = self._allowed_local_roots.get(root_id)
+            if not root_id or root_path is None or not root_path.exists():
+                continue
+            try:
+                seen_dirs: set[Path] = set()
+                config_paths: list[Path] = []
+                for current_root, _, filenames in os.walk(root_path, followlinks=True):
+                    if 'config.json' not in filenames:
+                        continue
+                    config_path = (Path(current_root) / 'config.json').resolve()
+                    model_dir = config_path.parent
+                    if model_dir in seen_dirs:
+                        continue
+                    seen_dirs.add(model_dir)
+                    config_paths.append(config_path)
+                config_paths.sort()
+            except Exception:
+                logger.warning('Failed to scan approved local root %s', root_path, exc_info=True)
+                continue
+            for config_path in config_paths:
+                if not config_path.is_file():
+                    continue
+                model_dir = config_path.parent.resolve()
+                try:
+                    relative_path = model_dir.relative_to(root_path).as_posix()
+                except ValueError:
+                    continue
+                if not relative_path or relative_path == '.':
+                    continue
+                options.append(
+                    {
+                        'root_id': root_id,
+                        'root_label': root_label,
+                        'relative_path': relative_path,
+                        'source_value': f'{root_id}:{relative_path}',
+                        'label': f'{Path(relative_path).name} ({root_label})',
+                        'path': str(model_dir),
+                    }
+                )
+        options.sort(key=lambda item: (str(item.get('root_label') or '').lower(), str(item.get('relative_path') or '').lower()))
+        return options
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
@@ -65,15 +137,82 @@ class CustomModelStore:
                     updated_at REAL NOT NULL,
                     UNIQUE(source_type, source_value)
                 );
+                CREATE TABLE IF NOT EXISTS hf_search_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    query TEXT NOT NULL,
+                    response_json TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    expires_at REAL NOT NULL
+                );
                 """
+            )
+            conn.commit()
+
+    @staticmethod
+    def _hf_search_cache_key(query: str, limit: int, offset: int) -> str:
+        return json.dumps(
+            {
+                'query': str(query or '').strip().lower(),
+                'limit': int(limit or 0),
+                'offset': int(offset or 0),
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+
+    def _get_cached_hf_search(self, query: str, limit: int, offset: int) -> dict[str, Any] | None:
+        cache_key = self._hf_search_cache_key(query, limit, offset)
+        now = time.time()
+        with self._lock, self._connect() as conn:
+            conn.execute("DELETE FROM hf_search_cache WHERE expires_at <= ?", (now,))
+            row = conn.execute(
+                """
+                SELECT response_json
+                FROM hf_search_cache
+                WHERE cache_key = ? AND expires_at > ?
+                """,
+                (cache_key, now),
+            ).fetchone()
+            conn.commit()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(str(row['response_json'] or '{}'))
+        except Exception:
+            logger.warning('Failed to parse cached HF search response for %s', cache_key, exc_info=True)
+            return None
+        if not isinstance(payload, dict):
+            return None
+        payload['items'] = payload.get('items') if isinstance(payload.get('items'), list) else []
+        payload['next_offset'] = int(payload.get('next_offset') or 0)
+        payload['has_more'] = bool(payload.get('has_more'))
+        return payload
+
+    def _set_cached_hf_search(self, query: str, limit: int, offset: int, payload: dict[str, Any]) -> None:
+        cache_key = self._hf_search_cache_key(query, limit, offset)
+        now = time.time()
+        expires_at = now + HF_SEARCH_CACHE_TTL_SEC
+        response_json = json.dumps(payload or {}, ensure_ascii=False)
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO hf_search_cache (cache_key, query, response_json, created_at, expires_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    query=excluded.query,
+                    response_json=excluded.response_json,
+                    created_at=excluded.created_at,
+                    expires_at=excluded.expires_at
+                """,
+                (cache_key, str(query or '').strip(), response_json, now, expires_at),
             )
             conn.commit()
 
     @staticmethod
     def _normalize_source_type(source_type: str) -> str:
         value = str(source_type or '').strip().lower()
-        if value not in {'huggingface', 'local_path'}:
-            raise ValueError('source_type must be one of: huggingface, local_path')
+        if value not in {'huggingface', 'local_path', 'scheduler_root', 'url'}:
+            raise ValueError('source_type must be one of: huggingface, scheduler_root, url')
         return value
 
     @staticmethod
@@ -87,9 +226,156 @@ class CustomModelStore:
     def _default_display_name(source_type: str, source_value: str) -> str:
         if source_type == 'local_path':
             return Path(source_value).name or source_value
+        if source_type == 'scheduler_root':
+            _, _, relative_path = source_value.partition(':')
+            return Path(relative_path or source_value).name or source_value
+        if source_type == 'url':
+            parsed = urllib.parse.urlparse(source_value)
+            filename = Path(parsed.path or '').name
+            stem = filename
+            for suffix in ('.tar.gz', '.tgz', '.tar.bz2', '.tar.xz', '.zip', '.tar'):
+                if stem.endswith(suffix):
+                    stem = stem[: -len(suffix)]
+                    break
+            return stem or source_value
         return source_value
 
+    def _normalize_scheduler_root_value(self, source_value: str) -> str:
+        raw = str(source_value or '').strip()
+        if ':' not in raw:
+            raise ValueError('Approved local root models must use root_id:relative_path')
+        root_id, _, relative_path = raw.partition(':')
+        root_id = str(root_id or '').strip()
+        relative_path = str(relative_path or '').strip().strip('/')
+        if not root_id or not relative_path:
+            raise ValueError('Approved local root models must include both a root and relative path')
+        if root_id not in self._allowed_local_roots:
+            raise ValueError(f'Unknown approved local root: {root_id}')
+        relative = Path(relative_path)
+        if relative.is_absolute() or '..' in relative.parts:
+            raise ValueError('Relative path must stay within the approved local root')
+        return f'{root_id}:{relative.as_posix()}'
+
+    def _resolve_scheduler_root_path(self, source_value: str) -> Path:
+        normalized_value = self._normalize_scheduler_root_value(source_value)
+        root_id, _, relative_path = normalized_value.partition(':')
+        root = self._allowed_local_roots[root_id]
+        candidate = (root / relative_path).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            raise ValueError('Relative path escapes the approved local root')
+        return candidate
+
+    @staticmethod
+    def _normalize_url_value(source_value: str) -> str:
+        value = str(source_value or '').strip()
+        parsed = urllib.parse.urlparse(value)
+        if parsed.scheme not in {'https', 'http'}:
+            raise ValueError('URL source must use http or https')
+        if not parsed.netloc:
+            raise ValueError('URL source must include a host')
+        if not Path(parsed.path or '').name:
+            raise ValueError('URL source must point to a downloadable archive file')
+        return value
+
+    def _get_import_root(self) -> Path:
+        if not self._allowed_local_roots:
+            raise ValueError('No approved local model roots are configured')
+        first_root = next(iter(self._allowed_local_roots.values()))
+        import_root = (first_root / 'imported').resolve()
+        import_root.mkdir(parents=True, exist_ok=True)
+        return import_root
+
+    def _extract_model_archive(self, archive_path: Path, target_dir: Path) -> None:
+        target_dir = target_dir.resolve()
+        if zipfile.is_zipfile(archive_path):
+            with zipfile.ZipFile(archive_path) as zf:
+                for member in zf.namelist():
+                    candidate = (target_dir / member).resolve()
+                    try:
+                        candidate.relative_to(target_dir)
+                    except ValueError:
+                        raise ValueError('Archive contains an invalid path outside the target directory')
+                zf.extractall(target_dir)
+            return
+        if tarfile.is_tarfile(archive_path):
+            with tarfile.open(archive_path) as tf:
+                for member in tf.getmembers():
+                    candidate = (target_dir / member.name).resolve()
+                    try:
+                        candidate.relative_to(target_dir)
+                    except ValueError:
+                        raise ValueError('Archive contains an invalid path outside the target directory')
+                tf.extractall(target_dir)
+            return
+        raise ValueError('URL source must point to a .zip or .tar archive')
+
+    def _resolve_imported_model_dir(self, base_dir: Path) -> Path:
+        direct_config = base_dir / 'config.json'
+        if direct_config.exists():
+            return base_dir
+        candidates = [path for path in base_dir.iterdir() if path.is_dir()]
+        if len(candidates) == 1 and (candidates[0] / 'config.json').exists():
+            return candidates[0]
+        raise FileNotFoundError(f'Imported archive does not contain a model directory with config.json: {base_dir}')
+
+    def _import_url_model(self, source_value: str) -> Path:
+        normalized_url = self._normalize_url_value(source_value)
+        import_root = self._get_import_root()
+        model_dir = import_root / f'url-{uuid.uuid5(uuid.NAMESPACE_URL, normalized_url)}'
+        resolved_model_dir = model_dir.resolve()
+        if resolved_model_dir.exists():
+            return self._resolve_imported_model_dir(resolved_model_dir)
+
+        resolved_model_dir.mkdir(parents=True, exist_ok=True)
+        parsed = urllib.parse.urlparse(normalized_url)
+        archive_name = Path(parsed.path or '').name or 'model-archive'
+        archive_path = resolved_model_dir / archive_name
+        try:
+            with urllib.request.urlopen(normalized_url, timeout=60) as response, archive_path.open('wb') as output:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    output.write(chunk)
+            self._extract_model_archive(archive_path, resolved_model_dir)
+            archive_path.unlink(missing_ok=True)
+            return self._resolve_imported_model_dir(resolved_model_dir)
+        except Exception:
+            try:
+                for child in resolved_model_dir.iterdir():
+                    if child.is_dir():
+                        for nested in sorted(child.rglob('*'), reverse=True):
+                            if nested.is_file():
+                                nested.unlink(missing_ok=True)
+                            elif nested.is_dir():
+                                nested.rmdir()
+                        child.rmdir()
+                    else:
+                        child.unlink(missing_ok=True)
+                resolved_model_dir.rmdir()
+            except Exception:
+                logger.warning('Failed to clean up partial URL import directory %s', resolved_model_dir, exc_info=True)
+            raise
+
     def _load_config_only(self, source_type: str, source_value: str) -> dict[str, Any]:
+        if source_type == 'url':
+            model_path = self._import_url_model(source_value)
+            config_path = model_path / 'config.json'
+            if not config_path.exists():
+                raise FileNotFoundError(f'Missing config.json in imported URL model path: {model_path}')
+            return json.loads(config_path.read_text())
+
+        if source_type == 'scheduler_root':
+            model_path = self._resolve_scheduler_root_path(source_value)
+            if not model_path.exists():
+                raise FileNotFoundError(f'Approved local model path does not exist: {model_path}')
+            config_path = model_path / 'config.json'
+            if not config_path.exists():
+                raise FileNotFoundError(f'Missing config.json in approved local model path: {model_path}')
+            return json.loads(config_path.read_text())
+
         if source_type == 'local_path':
             model_path = Path(source_value).expanduser()
             if not model_path.exists():
@@ -99,15 +385,34 @@ class CustomModelStore:
                 raise FileNotFoundError(f'Missing config.json in local model path: {model_path}')
             return json.loads(config_path.read_text())
 
-        from huggingface_hub import hf_hub_download  # type: ignore
+        try:
+            from huggingface_hub import hf_hub_download  # type: ignore
 
-        config_file = hf_hub_download(repo_id=source_value, filename='config.json')
-        return json.loads(Path(config_file).read_text())
+            config_file = hf_hub_download(repo_id=source_value, filename='config.json')
+            return json.loads(Path(config_file).read_text())
+        except Exception:
+            encoded_repo = '/'.join(urllib.parse.quote(part, safe='') for part in str(source_value or '').split('/'))
+            config_url = f'https://huggingface.co/{encoded_repo}/resolve/main/config.json'
+            with urllib.request.urlopen(config_url, timeout=20) as response:
+                return json.loads(response.read().decode('utf-8'))
 
     def _validate_model(self, source_type: str, source_value: str) -> dict[str, Any]:
-        config = self._load_config_only(source_type, source_value)
+        normalized_value = (
+            self._normalize_scheduler_root_value(source_value)
+            if source_type == 'scheduler_root'
+            else self._normalize_url_value(source_value)
+            if source_type == 'url'
+            else source_value
+        )
+        config = self._load_config_only(source_type, normalized_value)
         model_type = str(config.get('model_type') or '').strip()
-        model_name = source_value
+        model_name = (
+            str(self._resolve_scheduler_root_path(normalized_value))
+            if source_type == 'scheduler_root'
+            else str(self._import_url_model(normalized_value))
+            if source_type == 'url'
+            else normalized_value
+        )
         model_info = get_model_info_with_try_catch(model_name)
         vram_gb = int(estimate_vram_gb_required(model_info)) if model_info is not None else 0
         if model_type in SUPPORTED_MODEL_TYPES:
@@ -126,7 +431,30 @@ class CustomModelStore:
             'detected_model_type': model_type,
             'supports_sharding': 1 if validation_status == 'verified' else 0,
             'vram_gb': vram_gb,
-            'metadata_json': json.dumps({'config': {'model_type': model_type}}, ensure_ascii=False),
+            'metadata_json': json.dumps(
+                {
+                    'config': {'model_type': model_type},
+                    **(
+                        {
+                            'scheduler_root': {
+                                'root_id': normalized_value.partition(':')[0],
+                                'relative_path': normalized_value.partition(':')[2],
+                                'resolved_path': str(self._resolve_scheduler_root_path(normalized_value)),
+                            }
+                        }
+                        if source_type == 'scheduler_root'
+                        else {
+                            'url_import': {
+                                'url': normalized_value,
+                                'resolved_path': str(self._import_url_model(normalized_value)),
+                            }
+                        }
+                        if source_type == 'url'
+                        else {}
+                    ),
+                },
+                ensure_ascii=False,
+            ),
         }
 
     def list_models(self) -> list[dict[str, Any]]:
@@ -145,7 +473,7 @@ class CustomModelStore:
     def list_model_entries(self) -> list[dict[str, Any]]:
         return [
             {
-                'name': row['source_value'],
+                'name': self._runtime_model_name_for_row(row),
                 'display_name': row['display_name'],
                 'vram_gb': int(row['vram_gb'] or 0),
                 'custom': True,
@@ -158,6 +486,21 @@ class CustomModelStore:
             if bool(row.get('enabled'))
         ]
 
+    def _runtime_model_name_for_row(self, row: dict[str, Any]) -> str:
+        source_type = str(row.get('source_type') or '')
+        source_value = str(row.get('source_value') or '')
+        if source_type == 'scheduler_root':
+            try:
+                return str(self._resolve_scheduler_root_path(source_value))
+            except Exception:
+                return source_value
+        if source_type == 'url':
+            try:
+                return str(self._import_url_model(source_value))
+            except Exception:
+                return source_value
+        return source_value
+
     def export_models(self) -> list[dict[str, Any]]:
         return [
             {
@@ -169,63 +512,152 @@ class CustomModelStore:
             if bool(row.get('enabled'))
         ]
 
-    def search_huggingface_models(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
+    def search_huggingface_models(self, query: str, limit: int = 8, offset: int = 0) -> dict[str, Any]:
         normalized_query = str(query or '').strip()
         if not normalized_query:
             raise ValueError('query is required')
         normalized_limit = max(1, min(int(limit or 8), 20))
-        raw_limit = min(max(normalized_limit * 5, 20), 100)
+        normalized_offset = max(0, int(offset or 0))
+        cached = self._get_cached_hf_search(normalized_query, normalized_limit, normalized_offset)
+        if cached is not None:
+            return cached
+        raw_limit = min(max((normalized_offset + normalized_limit) * 8, 20), 250)
+
+        normalized_query_lower = normalized_query.lower()
+        query_author = ''
+        query_search = normalized_query
+        if '/' in normalized_query:
+            candidate_author, _, candidate_search = normalized_query.partition('/')
+            if str(candidate_author or '').strip() and str(candidate_search or '').strip():
+                query_author = str(candidate_author or '').strip()
+                query_search = str(candidate_search or '').strip()
+
+        candidate_requests: list[tuple[str, str | None]] = []
+        if query_author:
+            candidate_requests.append((query_search, query_author))
+        elif all(ch not in normalized_query for ch in (' ', '\t', '\n', '/')):
+            for author_candidate in (
+                normalized_query,
+                normalized_query_lower,
+                normalized_query.title(),
+                normalized_query.upper(),
+            ):
+                normalized_author_candidate = str(author_candidate or '').strip()
+                if normalized_author_candidate:
+                    candidate_requests.append((normalized_query, normalized_author_candidate))
+        candidate_requests.append((normalized_query, None))
 
         model_ids: list[str] = []
+        seen_candidate_requests: set[tuple[str, str]] = set()
+
+        def extend_model_ids_from_payload(payload: Any) -> None:
+            for item in payload or []:
+                model_id = str((item or {}).get('id') or '').strip()
+                if model_id:
+                    model_ids.append(model_id)
+                if len(model_ids) >= raw_limit:
+                    return
+
         try:
             from huggingface_hub import HfApi  # type: ignore
 
             api = HfApi()
-            for item in api.list_models(search=normalized_query, limit=raw_limit):
-                model_id = str(getattr(item, 'id', '') or '').strip()
-                if model_id:
-                    model_ids.append(model_id)
+            for search_text, author in candidate_requests:
+                request_key = (str(search_text or '').strip().lower(), str(author or '').strip().lower())
+                if request_key in seen_candidate_requests:
+                    continue
+                seen_candidate_requests.add(request_key)
+                request_kwargs: dict[str, Any] = {
+                    'search': search_text,
+                    'limit': raw_limit,
+                }
+                if author:
+                    request_kwargs['author'] = author
+                for item in api.list_models(**request_kwargs):
+                    model_id = str(getattr(item, 'id', '') or '').strip()
+                    if model_id:
+                        model_ids.append(model_id)
+                    if len(model_ids) >= raw_limit:
+                        break
+                if len(model_ids) >= raw_limit:
+                    break
         except Exception as e:
             logger.debug('Falling back to HF REST search for %r: %s', normalized_query, e)
-            url = (
-                "https://huggingface.co/api/models?"
-                + urllib.parse.urlencode({"search": normalized_query, "limit": raw_limit})
-            )
-            with urllib.request.urlopen(url, timeout=10) as response:
-                payload = json.loads(response.read().decode('utf-8'))
-            model_ids.extend(
-                str(item.get('id') or '').strip()
-                for item in payload
-                if str(item.get('id') or '').strip()
-            )
+            for search_text, author in candidate_requests:
+                request_key = (str(search_text or '').strip().lower(), str(author or '').strip().lower())
+                if request_key in seen_candidate_requests:
+                    continue
+                seen_candidate_requests.add(request_key)
+                params = {
+                    'search': search_text,
+                    'limit': raw_limit,
+                }
+                if author:
+                    params['author'] = author
+                url = "https://huggingface.co/api/models?" + urllib.parse.urlencode(params)
+                with urllib.request.urlopen(url, timeout=10) as response:
+                    payload = json.loads(response.read().decode('utf-8'))
+                extend_model_ids_from_payload(payload)
+                if len(model_ids) >= raw_limit:
+                    break
 
         seen: set[str] = set()
-        results: list[dict[str, Any]] = []
+        validated_results: list[dict[str, Any]] = []
         for model_id in model_ids:
             if model_id in seen:
                 continue
             seen.add(model_id)
             try:
                 validation = self._validate_model('huggingface', model_id)
-                if validation['validation_status'] != 'verified':
+                validation_status = str(validation.get('validation_status') or '')
+                if validation_status not in {'verified', 'config_only'}:
                     continue
-                results.append(
+                model_id_lower = model_id.lower()
+                repo_name = model_id_lower.split('/', 1)[-1]
+                score = 0
+                if model_id_lower.startswith(f'{normalized_query_lower}/'):
+                    score += 40
+                if repo_name.startswith(normalized_query_lower):
+                    score += 30
+                if normalized_query_lower in repo_name:
+                    score += 20
+                if normalized_query_lower in model_id_lower:
+                    score += 10
+                if validation_status == 'verified':
+                    score += 100
+                validated_results.append(
                     {
                         'source_type': 'huggingface',
                         'source_value': model_id,
                         'display_name': model_id,
-                        'validation_status': validation['validation_status'],
+                        'validation_status': validation_status,
                         'validation_message': validation['validation_message'],
                         'detected_model_type': validation['detected_model_type'],
                         'supports_sharding': bool(validation['supports_sharding']),
                         'vram_gb': int(validation['vram_gb'] or 0),
+                        '_score': score,
                     }
                 )
-                if len(results) >= normalized_limit:
+                if len(validated_results) >= max(normalized_offset + normalized_limit, normalized_limit * 3):
                     break
             except Exception:
                 continue
-        return results
+        validated_results.sort(
+            key=lambda item: (
+                -int(item.get('_score') or 0),
+                str(item.get('source_value') or '').lower(),
+            )
+        )
+        for item in validated_results:
+            item.pop('_score', None)
+        page_items = validated_results[normalized_offset: normalized_offset + normalized_limit]
+        payload = {
+            'items': page_items,
+            'next_offset': normalized_offset + len(page_items),
+            'has_more': len(validated_results) > normalized_offset + normalized_limit or len(model_ids) >= raw_limit,
+        }
+        self._set_cached_hf_search(normalized_query, normalized_limit, normalized_offset, payload)
+        return payload
 
     @staticmethod
     def _model_id(source_type: str, source_value: str) -> str:
@@ -233,7 +665,14 @@ class CustomModelStore:
 
     def add_model(self, *, source_type: str, source_value: str, display_name: str = '') -> dict[str, Any]:
         normalized_type = self._normalize_source_type(source_type)
-        normalized_value = self._normalize_source_value(source_value)
+        raw_normalized_value = self._normalize_source_value(source_value)
+        normalized_value = (
+            self._normalize_scheduler_root_value(raw_normalized_value)
+            if normalized_type == 'scheduler_root'
+            else self._normalize_url_value(raw_normalized_value)
+            if normalized_type == 'url'
+            else raw_normalized_value
+        )
         resolved_display_name = str(display_name or '').strip() or self._default_display_name(normalized_type, normalized_value)
         validation = self._validate_model(normalized_type, normalized_value)
         now = time.time()

@@ -60,6 +60,35 @@ _FRONTEND_BUILD_STATUS = {
 FRONTEND_DEV_SERVER_URL = os.environ.get("PARALLAX_FRONTEND_DEV_SERVER_URL", "").strip()
 
 
+def _parse_custom_model_roots(values: list[str] | None) -> dict[str, str]:
+    roots: dict[str, str] = {}
+    for raw in values or []:
+        item = str(raw or "").strip()
+        if not item or "=" not in item:
+            continue
+        root_id, _, path = item.partition("=")
+        root_id = str(root_id or "").strip()
+        path = str(path or "").strip()
+        if root_id and path:
+            roots[root_id] = path
+    return roots
+
+
+def _custom_model_roots_from_env() -> dict[str, str]:
+    raw = os.environ.get("PARALLAX_CUSTOM_MODEL_ROOTS", "").strip()
+    if not raw:
+        return {}
+    return _parse_custom_model_roots([item for item in raw.split(",") if str(item).strip()])
+
+
+def _default_custom_model_roots() -> dict[str, str]:
+    default_root = (Path.cwd() / "custom-model-root").resolve()
+    default_root.mkdir(parents=True, exist_ok=True)
+    return {
+        "custom-model-root": str(default_root),
+    }
+
+
 def _frontend_dev_server_redirect_target(path: str = "/") -> str | None:
     base = FRONTEND_DEV_SERVER_URL.rstrip("/")
     if not base:
@@ -197,6 +226,21 @@ async def custom_model_list():
     )
 
 
+@app.get("/model/custom/sources")
+async def custom_model_sources():
+    return JSONResponse(
+        content={
+            "type": "custom_model_sources",
+            "data": {
+                "supported_source_types": ["huggingface", "scheduler_root", "url"],
+                "allowed_local_roots": custom_model_store.list_allowed_local_roots(),
+                "allowed_local_model_options": custom_model_store.list_allowed_local_model_options(),
+            },
+        },
+        status_code=200,
+    )
+
+
 @app.post("/model/custom")
 async def custom_model_add(raw_request: Request):
     request_data = await raw_request.json()
@@ -233,9 +277,9 @@ async def custom_model_add(raw_request: Request):
 
 
 @app.get("/model/custom/search")
-async def custom_model_search(query: str = "", limit: int = 8):
+async def custom_model_search(query: str = "", limit: int = 8, offset: int = 0):
     try:
-        results = custom_model_store.search_huggingface_models(query=query, limit=limit)
+        results = custom_model_store.search_huggingface_models(query=query, limit=limit, offset=offset)
     except ValueError as e:
         return JSONResponse(
             content={
@@ -741,6 +785,13 @@ app.mount(
 
 if __name__ == "__main__":
     args = parse_args()
+    configured_custom_model_roots = {
+        **_custom_model_roots_from_env(),
+        **_parse_custom_model_roots(getattr(args, "custom_model_root", []) or []),
+    }
+    custom_model_store.configure_allowed_local_roots(
+        configured_custom_model_roots or _default_custom_model_roots()
+    )
     stored_cluster_settings = settings_store.get_cluster_settings()
     stored_advanced = dict(stored_cluster_settings.get("advanced") or {})
     if args.host == "localhost" and stored_advanced.get("scheduler_host"):
