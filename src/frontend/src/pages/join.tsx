@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
 import {
   Alert,
+  Box,
   Button,
   ButtonGroup,
   FormControl,
@@ -96,15 +97,14 @@ export default function PageJoin() {
           )}
 
           {!!modelInfo && modelInfo.vram > 0 && needMoreNodes && (
-            <Alert key='vram-warning' severity='warning' variant='standard'>
-              <Typography variant='inherit'>
+            <Alert key='vram-warning' severity='warning' variant='standard' icon={false}>
+              <Box component='span' sx={{ whiteSpace: 'nowrap' }}>
                 {[
-                  `Your selected model requires more nodes.`,
-                  `You’ll need a `,
+                  `Your selected model requires more nodes. You’ll need a `,
                   <strong>{`minimum of ${modelInfo.vram} GB of total VRAM`}</strong>,
                   ` to host this model.`,
                 ]}
-              </Typography>
+              </Box>
             </Alert>
           )}
 

@@ -2,7 +2,7 @@
 import type { Dispatch, SetStateAction, FC, PropsWithChildren } from 'react';
 import { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { useRefCallback } from '../hooks';
-import { createStreamClusterStatus, getModelList, initScheduler, rebalanceCluster } from './api';
+import { createStreamClusterStatus, getAppSettings, getModelList, initScheduler, rebalanceCluster, updateAppSettings, type AppClusterProfile } from './api';
 import { useHost } from './host';
 
 import logoUrlOpenAI from '../assets/models/OpenAI-black-monoblossom.svg';
@@ -150,6 +150,8 @@ export interface ClusterConfig {
   readonly modelName: string;
   readonly modelInfo: ModelInfo | undefined;
   readonly modelInfoList: readonly ModelInfo[];
+  readonly activeClusterId: string;
+  readonly clusterProfiles: readonly AppClusterProfile[];
 }
 
 export interface ClusterConfigSetters {
@@ -171,6 +173,9 @@ export interface ClusterActions {
   readonly init: () => Promise<void>;
   readonly rebalanceTopology: () => Promise<void>;
   readonly refreshModelList: () => Promise<void>;
+  readonly reloadSettings: () => Promise<void>;
+  readonly setActiveCluster: (clusterId: string) => Promise<void>;
+  readonly saveClusterProfiles: (clusters: readonly AppClusterProfile[], activeClusterId?: string) => Promise<void>;
 }
 
 // Implementation
@@ -187,6 +192,36 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
   const [networkType, setNetworkType] = useState<NetworkType>('local');
   const [initNodesNumber, setInitNodesNumber] = useState(1);
   const [modelName, setModelName] = useState<string>('');
+  const [advancedSettings, setAdvancedSettings] = useState<Record<string, unknown>>({});
+  const [settingsHydrated, setSettingsHydrated] = useState(false);
+  const [activeClusterId, setActiveClusterId] = useState('');
+  const [clusterProfiles, setClusterProfiles] = useState<readonly AppClusterProfile[]>([]);
+
+  const reloadSettings = useRefCallback(async () => {
+    if (hostType === 'node') {
+      return;
+    }
+    const payload = await getAppSettings();
+    const clusterSettings = payload.cluster_settings;
+    setClusterProfiles(payload.clusters || []);
+    setActiveClusterId(payload.active_cluster_id || payload.clusters?.[0]?.id || '');
+    setNetworkType(clusterSettings.network_type === 'remote' ? 'remote' : 'local');
+    setInitNodesNumber(Math.max(1, Number(clusterSettings.init_nodes_num || 1)));
+    setModelName(String(clusterSettings.model_name || '').trim());
+    setAdvancedSettings({ ...(clusterSettings.advanced || {}) });
+    setSettingsHydrated(true);
+  });
+
+  useEffect(() => {
+    if (hostType !== 'node') {
+      reloadSettings().catch((error) => {
+        console.error('getAppSettings error', error);
+        setSettingsHydrated(true);
+      });
+    } else {
+      setSettingsHydrated(true);
+    }
+  }, [hostType, reloadSettings]);
 
   // ================================
   // Model List
@@ -237,6 +272,56 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
   useEffect(() => {
     updateModelList();
   }, []);
+
+  useEffect(() => {
+    if (hostType === 'node' || !settingsHydrated) {
+      return;
+    }
+    void updateAppSettings({
+      cluster_settings: {
+        model_name: modelName,
+        init_nodes_num: initNodesNumber,
+        is_local_network: networkType === 'local',
+        network_type: networkType,
+        advanced: advancedSettings,
+      },
+    }).catch((error) => {
+      console.error('updateAppSettings error', error);
+    });
+  }, [hostType, settingsHydrated, modelName, initNodesNumber, networkType, advancedSettings]);
+
+  const setActiveCluster = useRefCallback(async (clusterId: string) => {
+    if (hostType === 'node') {
+      return;
+    }
+    const payload = await updateAppSettings({ active_cluster_id: clusterId });
+    const clusterSettings = payload.cluster_settings;
+    setClusterProfiles(payload.clusters || []);
+    setActiveClusterId(payload.active_cluster_id || payload.clusters?.[0]?.id || '');
+    setNetworkType(clusterSettings.network_type === 'remote' ? 'remote' : 'local');
+    setInitNodesNumber(Math.max(1, Number(clusterSettings.init_nodes_num || 1)));
+    setModelName(String(clusterSettings.model_name || '').trim());
+    setAdvancedSettings({ ...(clusterSettings.advanced || {}) });
+    setSettingsHydrated(true);
+  });
+
+  const saveClusterProfiles = useRefCallback(async (clusters: readonly AppClusterProfile[], nextActiveClusterId?: string) => {
+    if (hostType === 'node') {
+      return;
+    }
+    const payload = await updateAppSettings({
+      clusters,
+      active_cluster_id: nextActiveClusterId,
+    });
+    const clusterSettings = payload.cluster_settings;
+    setClusterProfiles(payload.clusters || []);
+    setActiveClusterId(payload.active_cluster_id || payload.clusters?.[0]?.id || '');
+    setNetworkType(clusterSettings.network_type === 'remote' ? 'remote' : 'local');
+    setInitNodesNumber(Math.max(1, Number(clusterSettings.init_nodes_num || 1)));
+    setModelName(String(clusterSettings.model_name || '').trim());
+    setAdvancedSettings({ ...(clusterSettings.advanced || {}) });
+    setSettingsHydrated(true);
+  });
 
   // ================================
   // Cluster and Nodes
@@ -443,6 +528,9 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
       init,
       rebalanceTopology,
       refreshModelList: updateModelList,
+      reloadSettings,
+      setActiveCluster,
+      saveClusterProfiles,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -456,13 +544,15 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
           modelName,
           modelInfo: modelInfoList.find((model) => model.name === modelName),
           modelInfoList,
+          activeClusterId,
+          clusterProfiles,
         },
         clusterInfo,
         nodeInfoList,
       },
       actions,
     ],
-    [networkType, initNodesNumber, modelName, modelInfoList, clusterInfo, nodeInfoList, actions],
+    [networkType, initNodesNumber, modelName, modelInfoList, activeClusterId, clusterProfiles, clusterInfo, nodeInfoList, actions],
   );
 
   return <Provider value={value}>{children}</Provider>;

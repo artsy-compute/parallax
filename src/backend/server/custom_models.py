@@ -158,6 +158,17 @@ class CustomModelStore:
             if bool(row.get('enabled'))
         ]
 
+    def export_models(self) -> list[dict[str, Any]]:
+        return [
+            {
+                'source_type': str(row.get('source_type') or ''),
+                'source_value': str(row.get('source_value') or ''),
+                'display_name': str(row.get('display_name') or ''),
+            }
+            for row in self.list_models()
+            if bool(row.get('enabled'))
+        ]
+
     def search_huggingface_models(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
         normalized_query = str(query or '').strip()
         if not normalized_query:
@@ -273,3 +284,34 @@ class CustomModelStore:
             cur = conn.execute("DELETE FROM custom_models WHERE id = ?", (str(model_id or '').strip(),))
             conn.commit()
             return cur.rowcount > 0
+
+    def replace_models(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        normalized_items: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for raw in items or []:
+            source_type = self._normalize_source_type(str((raw or {}).get('source_type') or ''))
+            source_value = self._normalize_source_value(str((raw or {}).get('source_value') or ''))
+            display_name = str((raw or {}).get('display_name') or '').strip()
+            key = (source_type, source_value)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized_items.append(
+                {
+                    'source_type': source_type,
+                    'source_value': source_value,
+                    'display_name': display_name,
+                }
+            )
+
+        with self._lock, self._connect() as conn:
+            conn.execute("DELETE FROM custom_models")
+            conn.commit()
+
+        for item in normalized_items:
+            self.add_model(
+                source_type=item['source_type'],
+                source_value=item['source_value'],
+                display_name=item['display_name'],
+            )
+        return self.list_models()

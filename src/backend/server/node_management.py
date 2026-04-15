@@ -157,24 +157,33 @@ exit 0
     def get_overview(self) -> dict[str, Any]:
         live_nodes = self._live_nodes()
         configured_hosts = self._configured_hosts()
-        matched_live_node_ids: set[str] = set()
+        matched_live_node_keys: set[str] = set()
+        live_node_entries: list[dict[str, Any]] = []
         live_by_hostname: dict[str, list[dict[str, Any]]] = {}
-        for node in live_nodes:
+        for index, node in enumerate(live_nodes, start=1):
+            match_key = str(node.get('node_id') or '').strip() or f"live-{index}:{self._normalize_hostname(str(node.get('hostname') or ''))}"
+            entry = {
+                'match_key': match_key,
+                'node': node,
+            }
+            live_node_entries.append(entry)
             key = self._normalize_hostname(str(node.get('hostname') or ''))
             if key:
-                live_by_hostname.setdefault(key, []).append(node)
+                live_by_hostname.setdefault(key, []).append(entry)
 
-        hosts: list[dict[str, Any]] = []
-        for item in configured_hosts:
+        host_entries: list[dict[str, Any]] = []
+        for index, item in enumerate(configured_hosts, start=1):
             hostname_hint = self._normalize_hostname(str(item.get('hostname_hint') or ''))
             ssh_target = str(item.get('ssh_target') or '')
             action_override = self._recent_action_override(ssh_target)
             live_match = None
+            live_match_key = ''
             for candidate in live_by_hostname.get(hostname_hint, []):
-                node_id = str(candidate.get('node_id') or '')
-                if node_id and node_id not in matched_live_node_ids:
-                    live_match = candidate
-                    matched_live_node_ids.add(node_id)
+                candidate_key = str(candidate.get('match_key') or '')
+                if candidate_key and candidate_key not in matched_live_node_keys:
+                    live_match = dict(candidate.get('node') or {})
+                    live_match_key = candidate_key
+                    matched_live_node_keys.add(candidate_key)
                     break
             if action_override and not bool(action_override.get('running')):
                 live_match = None
@@ -204,8 +213,8 @@ exit 0
                 serving_end_layer=live_match.get('end_layer') if live_match else None,
                 serving_total_layers=live_match.get('total_layers') if live_match else None,
             )
-            hosts.append({
-                'id': str(item.get('ssh_target') or hostname_hint or item.get('line_number') or len(hosts)),
+            host_entries.append({
+                'id': str(item.get('ssh_target') or hostname_hint or item.get('line_number') or index),
                 'display_name': str(item.get('ssh_target') or item.get('hostname_hint') or 'Configured host'),
                 'ssh_target': ssh_target,
                 'hostname_hint': str(item.get('hostname_hint') or ''),
@@ -245,11 +254,88 @@ exit 0
                     'can_restart': can_remote_manage and bool(process_status.get('confirmed_running')),
                     'can_tail_logs': can_remote_manage,
                 },
+                '_live_match': live_match,
+                '_live_match_key': live_match_key,
             })
 
-        for node in live_nodes:
-            node_id = str(node.get('node_id') or '')
-            if node_id and node_id in matched_live_node_ids:
+        # Fallback reconciliation: if a managed host was started from the UI but the node reports a
+        # machine hostname that differs from the SSH target/alias, bind one unmatched live node back
+        # onto that host instead of rendering a duplicate configured + live_only pair.
+        unmatched_live_nodes = [
+            entry for entry in live_node_entries
+            if str(entry.get('match_key') or '') not in matched_live_node_keys
+        ]
+        fallback_candidates = [
+            host for host in host_entries
+            if host.get('inventory_source') == 'configured'
+            and host.get('_live_match') is None
+            and bool((host.get('actions') or {}).get('can_tail_logs'))
+            and bool((host.get('host_process') or {}).get('running'))
+        ]
+        fallback_candidates.sort(
+            key=lambda host: float(((host.get('host_process') or {}).get('checked_at')) or 0.0),
+            reverse=True,
+        )
+        for host, live_entry in zip(fallback_candidates, unmatched_live_nodes):
+            node_key = str(live_entry.get('match_key') or '')
+            node = dict(live_entry.get('node') or {})
+            if not node_key or node_key in matched_live_node_keys:
+                continue
+            matched_live_node_keys.add(node_key)
+            process_status = dict(host.get('host_process') or {})
+            process_status.update(
+                {
+                    'running': True,
+                    'confirmed_running': bool(process_status.get('confirmed_running', True)),
+                    'source': str(process_status.get('source') or 'joined'),
+                    'message': str(process_status.get('message') or 'Node process detected on remote host'),
+                    'checked_at': float(process_status.get('checked_at') or time.time()),
+                }
+            )
+            host['joined'] = True
+            host['runtime'] = {
+                'node_id': node.get('node_id'),
+                'status': node.get('status'),
+                'hostname': node.get('hostname'),
+                'gpu_name': node.get('gpu_name'),
+                'gpu_memory': node.get('gpu_memory'),
+                'gpu_num': node.get('gpu_num'),
+                'start_layer': node.get('start_layer'),
+                'end_layer': node.get('end_layer'),
+                'total_layers': node.get('total_layers'),
+                'approx_remaining_context': node.get('approx_remaining_context'),
+            }
+            host['system'] = {
+                'cpu_percent': node.get('cpu_percent'),
+                'ram_used_gb': node.get('ram_used_gb'),
+                'ram_total_gb': node.get('ram_total_gb'),
+                'ram_used_percent': node.get('ram_used_percent'),
+                'disk_used_gb': node.get('disk_used_gb'),
+                'disk_total_gb': node.get('disk_total_gb'),
+                'disk_used_percent': node.get('disk_used_percent'),
+            }
+            host['host_process'] = process_status
+            host['lifecycle'] = build_node_lifecycle(
+                management_mode='ssh_managed' if bool((host.get('actions') or {}).get('can_tail_logs')) else 'manual',
+                process_status=process_status,
+                scheduler_joined=True,
+                scheduler_node_id=node.get('node_id'),
+                runtime_status=node.get('status'),
+                serving_start_layer=node.get('start_layer'),
+                serving_end_layer=node.get('end_layer'),
+                serving_total_layers=node.get('total_layers'),
+            )
+            host['_live_match_key'] = node_key
+
+        hosts: list[dict[str, Any]] = []
+        for host in host_entries:
+            host.pop('_live_match', None)
+            host.pop('_live_match_key', None)
+            hosts.append(host)
+
+        for index, node in enumerate(live_nodes, start=1):
+            node_key = str(node.get('node_id') or '').strip() or f"live-{index}:{self._normalize_hostname(str(node.get('hostname') or ''))}"
+            if node_key in matched_live_node_keys:
                 continue
             process_status = {
                 'running': True,
@@ -270,8 +356,8 @@ exit 0
                 serving_total_layers=node.get('total_layers'),
             )
             hosts.append({
-                'id': node_id or str(len(hosts)),
-                'display_name': str(node.get('hostname') or node_id or 'Live node'),
+                'id': str(node.get('node_id') or node_key or len(hosts)),
+                'display_name': str(node.get('hostname') or node.get('node_id') or 'Live node'),
                 'ssh_target': '',
                 'hostname_hint': self._normalize_hostname(str(node.get('hostname') or '')),
                 'inventory_source': 'live_only',

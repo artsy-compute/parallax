@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import signal
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -109,6 +110,24 @@ def _find_flag_value(args_list: list[str], flag_names: list[str]) -> str | None:
             if token.startswith(prefix):
                 return token[len(prefix) :]
     return None
+
+
+def _is_local_port_available(host: str, port: int) -> bool:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((host, int(port)))
+            return True
+    except OSError:
+        return False
+
+
+def _pick_available_local_port(host: str, preferred_port: int) -> int:
+    if preferred_port > 0 and _is_local_port_available(host, preferred_port):
+        return preferred_port
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((host, 0))
+        return int(s.getsockname()[1])
 
 
 def _execute_with_graceful_shutdown(cmd: list[str], env: dict[str, str] | None = None) -> None:
@@ -379,9 +398,50 @@ def dev_run_command(args, passthrough_args: list[str] | None = None):
         sys.exit(1)
 
     passthrough_args = passthrough_args or []
-    backend_port = _find_flag_value(passthrough_args, ["--port"]) or "3001"
-    frontend_port = str(args.frontend_port or 5173)
+    requested_backend_port = int(_find_flag_value(passthrough_args, ["--port"]) or "3001")
+    backend_host = _find_flag_value(passthrough_args, ["--host"]) or "127.0.0.1"
+    requested_frontend_port = int(args.frontend_port or 5173)
     frontend_host = str(args.frontend_host or "127.0.0.1")
+    explicit_backend_port = _flag_present(passthrough_args, ["--port"])
+    explicit_frontend_port = int(args.frontend_port or 5173) != 5173
+
+    if explicit_backend_port:
+        if not _is_local_port_available(backend_host, requested_backend_port):
+            logger.error(
+                "Error: backend dev-run port %s is already in use on %s. Stop the other process or pass a different --port.",
+                requested_backend_port,
+                backend_host,
+            )
+            sys.exit(1)
+        backend_port = requested_backend_port
+    else:
+        backend_port = _pick_available_local_port(backend_host, requested_backend_port)
+        if backend_port != requested_backend_port:
+            logger.info(
+                "Backend port %s is in use on %s; dev-run selected free port %s instead.",
+                requested_backend_port,
+                backend_host,
+                backend_port,
+            )
+
+    if explicit_frontend_port:
+        if not _is_local_port_available(frontend_host, requested_frontend_port):
+            logger.error(
+                "Error: frontend dev-run port %s is already in use on %s. Stop the other process or pass a different --frontend-port.",
+                requested_frontend_port,
+                frontend_host,
+            )
+            sys.exit(1)
+        frontend_port = requested_frontend_port
+    else:
+        frontend_port = _pick_available_local_port(frontend_host, requested_frontend_port)
+        if frontend_port != requested_frontend_port:
+            logger.info(
+                "Frontend port %s is in use on %s; dev-run selected free port %s instead.",
+                requested_frontend_port,
+                frontend_host,
+                frontend_port,
+            )
 
     backend_cmd = [sys.executable, str(backend_main)]
     log_file = args.log_file or _find_flag_value(passthrough_args, ["--log-file"]) or _default_log_file("run")
@@ -389,7 +449,9 @@ def dev_run_command(args, passthrough_args: list[str] | None = None):
     backend_env["PARALLAX_LOG_FILE"] = log_file
 
     if not _flag_present(passthrough_args, ["--port"]):
-        backend_cmd.extend(["--port", backend_port])
+        backend_cmd.extend(["--port", str(backend_port)])
+    if not _flag_present(passthrough_args, ["--host"]):
+        backend_cmd.extend(["--host", backend_host])
     if args.model_name:
         backend_cmd.extend(["--model-name", args.model_name])
     if args.init_nodes_num:
@@ -408,15 +470,17 @@ def dev_run_command(args, passthrough_args: list[str] | None = None):
     if passthrough_args:
         backend_cmd.extend(passthrough_args)
 
-    frontend_cmd = ["npm", "run", "dev", "--", "--host", frontend_host, "--port", frontend_port]
+    frontend_cmd = ["npm", "run", "dev", "--", "--host", frontend_host, "--port", str(frontend_port)]
     frontend_env = os.environ.copy()
-    frontend_env["PARALLAX_BACKEND_HOST"] = "localhost"
+    frontend_env["PARALLAX_BACKEND_HOST"] = backend_host
     frontend_env["PARALLAX_BACKEND_PORT"] = str(backend_port)
     backend_env["PARALLAX_FRONTEND_DEV_SERVER_URL"] = f"http://{frontend_host}:{frontend_port}"
 
     logger.info("Frontend dev server URL: http://%s:%s", frontend_host, frontend_port)
+    logger.info("Backend dev server URL: http://%s:%s", backend_host, backend_port)
     logger.info(
-        "dev-run is active. Open http://localhost:%s/ and the backend will redirect to the live Vite frontend.",
+        "dev-run is active. Open http://%s:%s/ and the backend will redirect to the live Vite frontend.",
+        backend_host,
         backend_port,
     )
     _execute_dev_processes(

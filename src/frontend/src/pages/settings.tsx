@@ -4,7 +4,7 @@ import { IconArrowLeft } from '@tabler/icons-react';
 import { DrawerLayout, SettingsContent } from '../components/common';
 
 export default function PageSettings() {
-  const { section = 'models' } = useParams();
+  const { section = 'cluster' } = useParams();
   return (
     <DrawerLayout contentWidth='wide' hideConversationHistory>
       <Stack sx={{ gap: 3, minHeight: 0 }}>
@@ -12,7 +12,7 @@ export default function PageSettings() {
           <Stack sx={{ gap: 0.5 }}>
             <Typography variant='h3'>Settings</Typography>
             <Typography variant='body2' color='text.secondary'>
-              Plan what to run, how much startup capacity to reserve, and which managed hosts belong to the cluster.
+              Define the available node pool, then configure the active cluster with its model and startup capacity.
             </Typography>
           </Stack>
           <Button component={RouterLink} to='/chat' variant='text' startIcon={<IconArrowLeft size={16} />}>

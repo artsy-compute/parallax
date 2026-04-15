@@ -16,6 +16,7 @@ from backend.server.custom_models import CustomModelStore
 from backend.server.node_management import NodeManagementService
 from backend.server.request_handler import RequestHandler
 from backend.server.scheduler_manage import SchedulerManage
+from backend.server.settings_store import SettingsStore
 from backend.server.server_args import parse_args
 from backend.server.static_config import (
     get_model_list,
@@ -42,6 +43,7 @@ logger = get_logger(__name__)
 scheduler_manage = None
 node_management = None
 custom_model_store = CustomModelStore()
+settings_store = SettingsStore()
 request_handler = RequestHandler()
 
 FRONTEND_DIR = get_project_root() / "src" / "frontend"
@@ -334,6 +336,132 @@ async def scheduler_init(raw_request: Request):
         )
 
 
+@app.get("/settings")
+async def app_settings():
+    cluster_settings = settings_store.get_cluster_settings()
+    clusters_state = settings_store.get_clusters_state()
+    return JSONResponse(
+        content={
+            "type": "app_settings",
+            "data": {
+                "cluster_settings": cluster_settings,
+                "clusters": clusters_state.get("clusters") or [],
+                "active_cluster_id": clusters_state.get("active_cluster_id") or "",
+            },
+        },
+        status_code=200,
+    )
+
+
+@app.put("/settings")
+async def app_settings_update(raw_request: Request):
+    request_data = await raw_request.json()
+    clusters_payload = request_data.get("clusters")
+    active_cluster_id = str(request_data.get("active_cluster_id") or "").strip()
+    if isinstance(clusters_payload, list):
+        clusters_state = settings_store.replace_clusters_state(
+            list(clusters_payload or []),
+            active_cluster_id=active_cluster_id or None,
+        )
+    elif active_cluster_id:
+        clusters_state = settings_store.set_active_cluster_id(active_cluster_id)
+    else:
+        clusters_state = settings_store.get_clusters_state()
+    if isinstance(request_data.get("cluster_settings"), dict):
+        cluster_settings = settings_store.set_cluster_settings(dict(request_data.get("cluster_settings") or {}))
+        clusters_state = settings_store.get_clusters_state()
+    else:
+        cluster_settings = settings_store.get_cluster_settings()
+    return JSONResponse(
+        content={
+            "type": "app_settings_update",
+            "data": {
+                "cluster_settings": cluster_settings,
+                "clusters": clusters_state.get("clusters") or [],
+                "active_cluster_id": clusters_state.get("active_cluster_id") or "",
+            },
+        },
+        status_code=200,
+    )
+
+
+@app.get("/settings/export")
+async def app_settings_export():
+    cluster_settings = settings_store.get_cluster_settings()
+    clusters_state = settings_store.get_clusters_state()
+    runtime_advanced = dict(cluster_settings.get("advanced") or {})
+    if scheduler_manage is not None:
+        runtime_advanced.update(
+            {
+                "profile": scheduler_manage.profile,
+                "scheduler_host": scheduler_manage.scheduler_host,
+                "http_port": scheduler_manage.http_port,
+                "tcp_port": scheduler_manage.tcp_port,
+                "udp_port": scheduler_manage.udp_port,
+                "announce_maddrs": list(scheduler_manage.announce_maddrs),
+                "nodes_host_file": scheduler_manage.nodes_host_file,
+            }
+        )
+    cluster_settings["advanced"] = runtime_advanced
+    return JSONResponse(
+        content={
+            "type": "settings_export",
+            "data": {
+                "schema_version": 2,
+                "cluster_settings": cluster_settings,
+                "clusters": clusters_state.get("clusters") or [],
+                "active_cluster_id": clusters_state.get("active_cluster_id") or "",
+                "managed_node_hosts": settings_store.list_managed_node_hosts(),
+                "custom_models": custom_model_store.export_models(),
+            },
+        },
+        status_code=200,
+    )
+
+
+@app.post("/settings/import")
+async def app_settings_import(raw_request: Request):
+    request_data = await raw_request.json()
+    try:
+        if isinstance(request_data.get("clusters"), list):
+            clusters_state = settings_store.replace_clusters_state(
+                list(request_data.get("clusters") or []),
+                active_cluster_id=str(request_data.get("active_cluster_id") or "").strip() or None,
+            )
+            cluster_settings = settings_store.get_cluster_settings()
+        else:
+            cluster_settings = settings_store.set_cluster_settings(dict(request_data.get("cluster_settings") or {}))
+            clusters_state = settings_store.get_clusters_state()
+        managed_node_hosts = settings_store.replace_managed_node_hosts(list(request_data.get("managed_node_hosts") or []))
+        custom_models = custom_model_store.replace_models(list(request_data.get("custom_models") or []))
+        if scheduler_manage is not None:
+            scheduler_manage.configured_node_hosts = settings_store.list_managed_node_hosts()
+    except ValueError as e:
+        return JSONResponse(
+            content={"type": "settings_import", "error": str(e)},
+            status_code=400,
+        )
+    except Exception as e:
+        logger.exception("Failed to import settings bundle: %s", e)
+        return JSONResponse(
+            content={"type": "settings_import", "error": str(e)},
+            status_code=500,
+        )
+    return JSONResponse(
+        content={
+            "type": "settings_import",
+            "data": {
+                "cluster_settings": cluster_settings,
+                "clusters": clusters_state.get("clusters") or [],
+                "active_cluster_id": clusters_state.get("active_cluster_id") or "",
+                "managed_node_hosts": managed_node_hosts,
+                "custom_models": custom_models,
+            },
+        },
+        status_code=200,
+    )
+
+
 @app.get("/node/join/command")
 async def node_join_command():
     scheduler_addr = scheduler_manage.get_join_scheduler_addr()
@@ -387,32 +515,26 @@ async def nodes_overview() -> JSONResponse:
 
 @app.get("/nodes/inventory")
 async def nodes_inventory() -> JSONResponse:
-    if scheduler_manage is None:
-        return JSONResponse(
-            content={"type": "nodes_inventory", "data": {"hosts": []}},
-            status_code=503,
-        )
+    joined_hostnames: set[str] = set()
+    if scheduler_manage is not None and scheduler_manage.scheduler is not None:
+        joined_hostnames = {
+            str(node.hardware.hostname or '').strip().lower()
+            for node in scheduler_manage.scheduler.node_manager.nodes
+            if getattr(node.hardware, 'hostname', None)
+        }
     return JSONResponse(
-        content={"type": "nodes_inventory", "data": {"hosts": scheduler_manage.get_configured_node_hosts()}},
+        content={"type": "nodes_inventory", "data": {"hosts": settings_store.list_managed_node_hosts(joined_hostnames)}},
         status_code=200,
     )
 
 
 @app.put("/nodes/inventory")
 async def nodes_inventory_update(raw_request: Request) -> JSONResponse:
-    if scheduler_manage is None:
-        return JSONResponse(
-            content={"type": "nodes_inventory_update", "data": {"ok": False, "message": "Scheduler is not initialized", "hosts": []}},
-            status_code=503,
-        )
     request_data = await raw_request.json()
     try:
-        hosts = scheduler_manage.set_configured_node_hosts(list(request_data.get("hosts") or []))
-    except ValueError as e:
-        return JSONResponse(
-            content={"type": "nodes_inventory_update", "data": {"ok": False, "message": str(e), "hosts": []}},
-            status_code=400,
-        )
+        hosts = settings_store.replace_managed_node_hosts(list(request_data.get("hosts") or []))
+        if scheduler_manage is not None:
+            scheduler_manage.configured_node_hosts = settings_store.list_managed_node_hosts()
     except Exception as e:
         logger.exception("Failed to update configured node inventory: %s", e)
         return JSONResponse(
@@ -619,6 +741,22 @@ app.mount(
 
 if __name__ == "__main__":
     args = parse_args()
+    stored_cluster_settings = settings_store.get_cluster_settings()
+    stored_advanced = dict(stored_cluster_settings.get("advanced") or {})
+    if args.host == "localhost" and stored_advanced.get("scheduler_host"):
+        args.host = str(stored_advanced.get("scheduler_host"))
+    if args.port == 3001 and stored_advanced.get("http_port") is not None:
+        args.port = int(stored_advanced.get("http_port"))
+    if args.tcp_port == 0 and stored_advanced.get("tcp_port") is not None:
+        args.tcp_port = int(stored_advanced.get("tcp_port"))
+    if args.udp_port == 0 and stored_advanced.get("udp_port") is not None:
+        args.udp_port = int(stored_advanced.get("udp_port"))
+    if not args.announce_maddrs and isinstance(stored_advanced.get("announce_maddrs"), list):
+        args.announce_maddrs = [str(item) for item in stored_advanced.get("announce_maddrs") or [] if str(item)]
+    if args.profile == "auto" and stored_advanced.get("profile"):
+        args.profile = str(stored_advanced.get("profile"))
+    if args.nodes_host_file is None and stored_advanced.get("nodes_host_file"):
+        args.nodes_host_file = str(stored_advanced.get("nodes_host_file"))
     set_log_file(args.log_file)
     set_log_level(args.log_level)
     logger.info(f"args: {args}")
@@ -650,6 +788,9 @@ if __name__ == "__main__":
         profile=args.profile,
         scheduler_heartbeat_timeout_sec=args.scheduler_heartbeat_timeout_sec,
         nodes_host_file=args.nodes_host_file,
+        settings_store=settings_store,
+        tcp_port=args.tcp_port,
+        udp_port=args.udp_port,
     )
 
     node_management = NodeManagementService(scheduler_manage)

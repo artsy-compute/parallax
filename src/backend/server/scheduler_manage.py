@@ -8,6 +8,7 @@ from lattica import Lattica
 
 from backend.server.constants import NODE_STATUS_AVAILABLE, NODE_STATUS_WAITING
 from backend.server.node_lifecycle import build_node_lifecycle
+from backend.server.settings_store import SettingsStore
 from backend.server.rpc_connection_handler import RPCConnectionHandler
 from backend.server.static_config import get_model_info, get_node_join_command
 from parallax.cli import PUBLIC_INITIAL_PEERS, PUBLIC_RELAY_SERVERS
@@ -45,6 +46,9 @@ class SchedulerManage:
         profile: str = DEFAULT_RUNTIME_PROFILE,
         scheduler_heartbeat_timeout_sec: float | None = None,
         nodes_host_file: str | None = None,
+        settings_store: SettingsStore | None = None,
+        tcp_port: int = 0,
+        udp_port: int = 0,
     ):
         """Initialize the manager with networking bootstrap parameters."""
         self.initial_peers = initial_peers
@@ -60,7 +64,12 @@ class SchedulerManage:
         self.profile = profile or DEFAULT_RUNTIME_PROFILE
         self.scheduler_heartbeat_timeout_sec = scheduler_heartbeat_timeout_sec
         self.nodes_host_file = nodes_host_file
-        self.configured_node_hosts = self._load_nodes_host_file(nodes_host_file)
+        self.settings_store = settings_store or SettingsStore()
+        self.tcp_port = tcp_port
+        self.udp_port = udp_port
+        self.configured_node_hosts = self.settings_store.list_managed_node_hosts()
+        if not self.configured_node_hosts and nodes_host_file:
+            self.configured_node_hosts = self.settings_store.import_nodes_host_file(nodes_host_file)
         self.model_name = None
         self.init_nodes_num = None
         self.scheduler = None
@@ -135,6 +144,14 @@ class SchedulerManage:
         return configured_hosts
 
     def get_configured_node_hosts(self) -> list[dict]:
+        if self.settings_store is not None:
+            live_hostnames = {
+                str(node.hardware.hostname or '').strip().lower()
+                for node in (self.scheduler.node_manager.nodes if self.scheduler else [])
+                if getattr(node.hardware, 'hostname', None)
+            }
+            self.configured_node_hosts = self.settings_store.list_managed_node_hosts(live_hostnames)
+            return list(self.configured_node_hosts)
         live_hostnames = {
             str(node.hardware.hostname or '').strip().lower()
             for node in (self.scheduler.node_manager.nodes if self.scheduler else [])
@@ -152,6 +169,9 @@ class SchedulerManage:
         ]
 
     def set_configured_node_hosts(self, hosts: list[dict]) -> list[dict]:
+        if self.settings_store is not None:
+            self.configured_node_hosts = self.settings_store.replace_managed_node_hosts(hosts)
+            return self.get_configured_node_hosts()
         if not self.nodes_host_file:
             raise ValueError("Scheduler was not started with --nodes-host-file; configured node inventory cannot be persisted")
 
@@ -187,6 +207,27 @@ class SchedulerManage:
         return self.get_configured_node_hosts()
 
     def persist_runtime_config(self, model_name, init_nodes_num, is_local_network) -> None:
+        if self.settings_store is not None:
+            cluster_settings = self.settings_store.get_cluster_settings()
+            cluster_settings.update(
+                {
+                    "model_name": model_name,
+                    "init_nodes_num": init_nodes_num,
+                    "is_local_network": is_local_network,
+                    "network_type": "local" if is_local_network else "remote",
+                    "advanced": {
+                        **dict(cluster_settings.get("advanced") or {}),
+                        "profile": self.profile,
+                        "scheduler_host": self.scheduler_host,
+                        "http_port": self.http_port,
+                        "tcp_port": self.tcp_port,
+                        "udp_port": self.udp_port,
+                        "announce_maddrs": list(self.announce_maddrs),
+                    },
+                }
+            )
+            self.settings_store.set_cluster_settings(cluster_settings)
+            return
         data = {
             "model_name": model_name,
             "init_nodes_num": init_nodes_num,
@@ -195,6 +236,14 @@ class SchedulerManage:
         SCHEDULER_STATE_PATH.write_text(json.dumps(data))
 
     def load_runtime_config(self):
+        if self.settings_store is not None:
+            cluster_settings = self.settings_store.get_cluster_settings()
+            if cluster_settings.get("model_name"):
+                return {
+                    "model_name": cluster_settings.get("model_name"),
+                    "init_nodes_num": cluster_settings.get("init_nodes_num"),
+                    "is_local_network": cluster_settings.get("is_local_network", True),
+                }
         if not SCHEDULER_STATE_PATH.exists():
             return None
         try:

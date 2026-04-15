@@ -100,6 +100,85 @@ export const deleteCustomModel = async (modelId: string): Promise<{ deleted: boo
   return message.data;
 };
 
+export interface AppClusterSettings {
+  readonly id?: string;
+  readonly name?: string;
+  readonly model_name: string;
+  readonly init_nodes_num: number;
+  readonly is_local_network: boolean;
+  readonly network_type: 'local' | 'remote';
+  readonly advanced?: Record<string, unknown>;
+}
+
+export interface AppClusterProfile extends AppClusterSettings {
+  readonly id: string;
+  readonly name: string;
+}
+
+export interface AppSettingsPayload {
+  readonly cluster_settings: AppClusterSettings;
+  readonly clusters: readonly AppClusterProfile[];
+  readonly active_cluster_id: string;
+}
+
+export const getAppSettings = async (): Promise<AppSettingsPayload> => {
+  const response = await fetch(`${API_BASE_URL}/settings`, { method: 'GET' });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'app_settings') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  return message.data;
+};
+
+export const updateAppSettings = async (params: {
+  cluster_settings?: Partial<AppClusterSettings>;
+  clusters?: readonly Partial<AppClusterProfile>[];
+  active_cluster_id?: string;
+}): Promise<AppSettingsPayload> => {
+  const response = await fetch(`${API_BASE_URL}/settings`, {
+    method: 'PUT',
+    body: JSON.stringify(params),
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'app_settings_update') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  return message.data;
+};
+
+export interface SettingsExportBundle {
+  readonly schema_version: number;
+  readonly cluster_settings: AppClusterSettings;
+  readonly clusters?: readonly AppClusterProfile[];
+  readonly active_cluster_id?: string;
+  readonly managed_node_hosts: readonly { ssh_target: string; parallax_path: string; hostname_hint?: string; line_number?: number; joined?: boolean }[];
+  readonly custom_models: readonly { source_type: 'huggingface' | 'local_path'; source_value: string; display_name?: string }[];
+}
+
+export const exportSettingsBundle = async (): Promise<SettingsExportBundle> => {
+  const response = await fetch(`${API_BASE_URL}/settings/export`, { method: 'GET' });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'settings_export') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  return message.data;
+};
+
+export const importSettingsBundle = async (bundle: SettingsExportBundle): Promise<any> => {
+  const response = await fetch(`${API_BASE_URL}/settings/import`, {
+    method: 'POST',
+    body: JSON.stringify(bundle),
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'settings_import') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
 export const initScheduler = async (params: {
   model_name: string;
   init_nodes_num: number;

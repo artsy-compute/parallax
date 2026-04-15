@@ -1,4 +1,5 @@
 import { Alert, Box, Button, Stack, TextField, Tooltip } from '@mui/material';
+import { Link as RouterLink } from 'react-router-dom';
 import {
   useEffect,
   useRef,
@@ -32,7 +33,9 @@ const BudgetTokenLabel: FC<{ label: string; title: string }> = ({ label, title }
 export const ChatInput: FC = () => {
   const [
     {
+      config: { activeClusterId, clusterProfiles },
       clusterInfo: { status: clusterStatus },
+      nodeInfoList,
     },
   ] = useCluster();
   const [{ input, status, inputTruncationNotice, requestHealthNotice, promptBudgetNotice }, { setInput, generate, stop, clear, registerInputFocus, startNewConversation }] = useChat();
@@ -76,8 +79,33 @@ export const ChatInput: FC = () => {
     clear();
   });
 
+  const activeCluster = clusterProfiles.find((item) => item.id === activeClusterId) || clusterProfiles[0];
+  const activeNodes = nodeInfoList.filter((node) => node.status === 'available').length;
+  const inactiveNodes = nodeInfoList.length - activeNodes;
+  const clusterUnavailableNotice = activeCluster && clusterStatus !== 'available'
+    ? {
+      severity: (clusterStatus === 'failed' || clusterStatus === 'offline') ? 'error' as const : 'warning' as const,
+      message:
+        activeNodes > 0
+          ? `${activeCluster.name} is not ready yet. ${activeNodes} up, ${inactiveNodes} down.`
+          : `${activeCluster.name} has no available nodes. Start or reconnect nodes, switch cluster, or adjust the cluster configuration before sending a message.`,
+    }
+    : null;
+
   return (
     <Stack data-status={status} sx={{ gap: 1 }}>
+      {clusterUnavailableNotice && (
+        <Alert
+          severity={clusterUnavailableNotice.severity}
+          action={(
+            <Button component={RouterLink} to='/settings/cluster' color='inherit' size='small'>
+              Open cluster
+            </Button>
+          )}
+        >
+          {clusterUnavailableNotice.message}
+        </Alert>
+      )}
       {inputTruncationNotice?.truncated && (
         <Alert
           severity='warning'

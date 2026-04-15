@@ -5,7 +5,7 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react-swc';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const backendHost = process.env.PARALLAX_BACKEND_HOST || 'localhost';
+const backendHost = process.env.PARALLAX_BACKEND_HOST || '127.0.0.1';
 const backendPort = process.env.PARALLAX_BACKEND_PORT || '3001';
 const backendTarget = `http://${backendHost}:${backendPort}`;
 

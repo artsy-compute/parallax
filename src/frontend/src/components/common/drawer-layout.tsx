@@ -5,8 +5,10 @@ import {
   Box,
   Button,
   IconButton,
+  MenuItem,
   Stack,
   styled,
+  TextField,
   Tooltip,
   Typography,
   useMediaQuery,
@@ -51,10 +53,10 @@ const DrawerLayoutHeader = styled(Stack)(({ theme }) => {
   const { spacing } = theme;
   return {
     width: '100%',
-    height: '2.5rem',
+    minHeight: '3.25rem',
     flex: 'none',
     marginTop: spacing(1),
-    paddingBlock: spacing(1),
+    paddingBlock: spacing(0.75),
     paddingInline: spacing(4),
     overflow: 'hidden',
   };
@@ -96,11 +98,11 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
 
   const [
     {
-      config: { modelInfo, modelName: configModelName },
+      config: { modelInfo, modelName: configModelName, activeClusterId, clusterProfiles, modelInfoList },
       clusterInfo: { status: clusterStatus, needMoreNodes, topologyChangeAdvisory, modelName: clusterModelName },
       nodeInfoList,
     },
-    { rebalanceTopology },
+    { rebalanceTopology, setActiveCluster },
   ] = useCluster();
 
   const [dialogRecovery, { open: openRecovery, close: closeRecovery }] = useAlertDialog({
@@ -209,6 +211,39 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
   const activeNodes = nodeInfoList.filter((node) => node.status === 'available').length;
   const inactiveNodes = nodeInfoList.length - activeNodes;
   const [rebalancingTopology, setRebalancingTopology] = useState(false);
+
+  const getClusterStatusCounts = (clusterId: string) => {
+    if (clusterId === activeClusterId) {
+      return { up: activeNodes, down: inactiveNodes, total: activeNodes + inactiveNodes };
+    }
+    const cluster = clusterProfiles.find((item) => item.id === clusterId);
+    const plannedNodes = Math.max(0, Number(cluster?.init_nodes_num || 0));
+    return { up: 0, down: plannedNodes, total: plannedNodes };
+  };
+
+  const renderClusterCountBadge = (counts: { up: number; down: number; total: number }) => {
+    const fullyUp = counts.total > 0 && counts.up >= counts.total;
+    const label = counts.total > 0 ? `${counts.up}/${counts.total} up` : '0 up';
+    return (
+      <Box
+        component='span'
+        sx={{
+          px: 0.55,
+          py: 0.125,
+          borderRadius: 999,
+          bgcolor: fullyUp ? 'rgba(46, 125, 50, 0.12)' : counts.up > 0 ? 'rgba(237, 108, 2, 0.12)' : 'rgba(158, 158, 158, 0.12)',
+          color: fullyUp ? 'success.dark' : counts.up > 0 ? 'warning.dark' : 'text.secondary',
+          fontSize: '0.68rem',
+          fontWeight: 600,
+          lineHeight: 1.2,
+          whiteSpace: 'nowrap',
+          flex: 'none',
+        }}
+      >
+        {label}
+      </Box>
+    );
+  };
 
   const onClickRebalanceTopology = async () => {
     if (rebalancingTopology) {
@@ -384,45 +419,132 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
             </Stack>
           )}
           <Stack sx={{ minWidth: 0, flex: 1 }}>
-            <Typography variant='caption' color='text.secondary'>Cluster model</Typography>
-            <Typography variant='body2' sx={{ fontWeight: 600 }} noWrap>
-              {clusterModelName || configModelName || 'No model selected'}
-            </Typography>
-          </Stack>
-          <Stack direction='row' sx={{ gap: 0.5, flexWrap: 'wrap', alignItems: 'center', justifyContent: 'flex-end', flex: 'none' }}>
-            <Box
-              component='span'
-              sx={{
-                px: 0.75,
-                py: 0.25,
-                borderRadius: 999,
-                bgcolor: 'rgba(46, 125, 50, 0.12)',
-                color: 'success.dark',
-                fontSize: '0.75rem',
-                fontWeight: 600,
-                lineHeight: 1.2,
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {activeNodes} up
-            </Box>
-            {inactiveNodes > 0 && (
-              <Box
-                component='span'
-                sx={{
-                  px: 0.75,
-                  py: 0.25,
-                  borderRadius: 999,
-                  bgcolor: 'rgba(237, 108, 2, 0.12)',
-                  color: 'warning.dark',
-                  fontSize: '0.75rem',
-                  fontWeight: 600,
-                  lineHeight: 1.2,
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                {inactiveNodes} down
-              </Box>
+            <Typography variant='caption' color='text.secondary'>Cluster</Typography>
+            {!hideConversationHistory && clusterProfiles.length > 0 ? (
+              <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75, minWidth: 0 }}>
+                <TextField
+                  select
+                  size='small'
+                  value={activeClusterId || clusterProfiles[0]?.id || ''}
+                  onChange={(event) => void setActiveCluster(String(event.target.value))}
+                  sx={{
+                    mt: 0.25,
+                    minWidth: '18rem',
+                    width: 'fit-content',
+                    maxWidth: 'min(42rem, 100%)',
+                    '& .MuiInputBase-root': {
+                      fontSize: '0.875rem',
+                      fontWeight: 600,
+                      minHeight: '2.25rem',
+                      pr: 1,
+                    },
+                    '& .MuiSelect-select': {
+                      display: 'flex',
+                      alignItems: 'center',
+                      minHeight: 'unset',
+                      py: 0.5,
+                    },
+                  }}
+                  slotProps={{
+                    select: {
+                      displayEmpty: true,
+                      autoWidth: true,
+                      MenuProps: {
+                        PaperProps: {
+                          sx: {
+                            minWidth: '24rem',
+                            maxWidth: 'min(48rem, calc(100vw - 2rem))',
+                          },
+                        },
+                      },
+                      renderValue: (value) => {
+                        const selectedCluster = clusterProfiles.find((item) => item.id === value) || clusterProfiles[0];
+                        const label = selectedCluster?.name || 'Select cluster';
+                        const model = clusterModelName || configModelName;
+                        const counts = getClusterStatusCounts(String(selectedCluster?.id || value || ''));
+                        return (
+                          <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75, minWidth: 0 }}>
+                            <Typography variant='inherit' noWrap sx={{ fontWeight: 600 }}>
+                              {model ? `${label} · ${model}` : label}
+                            </Typography>
+                            {renderClusterCountBadge(counts)}
+                          </Stack>
+                        );
+                      },
+                    },
+                  }}
+                >
+                  {clusterProfiles.map((cluster) => {
+                    const counts = getClusterStatusCounts(cluster.id);
+                    const clusterModel = modelInfoList.find((item) => item.name === cluster.model_name);
+                    const isUnavailable = counts.total === 0 || counts.up === 0;
+                    return (
+                      <MenuItem
+                        key={cluster.id}
+                        value={cluster.id}
+                        sx={{
+                          opacity: isUnavailable ? 0.55 : 1,
+                        }}
+                      >
+                        <Stack direction='row' sx={{ alignItems: 'center', justifyContent: 'space-between', gap: 1, width: '100%' }}>
+                          <Stack sx={{ minWidth: 0, flex: 1, gap: 0.125 }}>
+                            <Typography variant='body2' sx={{ fontWeight: 600, color: isUnavailable ? 'text.secondary' : 'text.primary' }} noWrap>
+                              {cluster.name}
+                            </Typography>
+                            <Typography variant='caption' color='text.secondary' noWrap>
+                              {cluster.model_name || 'No model selected'}
+                            </Typography>
+                          </Stack>
+                          <Stack direction='row' sx={{ gap: 0.5, alignItems: 'center', flex: 'none' }}>
+                            {clusterModel && clusterModel.vram > 0 && (
+                              <Box
+                                component='span'
+                                sx={{
+                                  px: 0.55,
+                                  py: 0.125,
+                                  borderRadius: 999,
+                                  bgcolor: 'rgba(25, 118, 210, 0.1)',
+                                  color: 'info.dark',
+                                  fontSize: '0.68rem',
+                                  fontWeight: 600,
+                                  lineHeight: 1.2,
+                                  whiteSpace: 'nowrap',
+                                }}
+                              >
+                                {clusterModel.vram} GB
+                              </Box>
+                            )}
+                            {renderClusterCountBadge(counts)}
+                          </Stack>
+                        </Stack>
+                      </MenuItem>
+                    );
+                  })}
+                </TextField>
+                <Tooltip
+                  title='Open cluster settings'
+                  placement='bottom'
+                  slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
+                >
+                  <IconButton
+                    component={RouterLink}
+                    to='/settings/cluster'
+                    size='small'
+                    sx={{
+                      mt: 0.25,
+                      color: 'text.secondary',
+                      borderRadius: 1.5,
+                      '&:hover': { bgcolor: 'action.hover', color: 'text.primary' },
+                    }}
+                  >
+                    <IconSettings size={16} />
+                  </IconButton>
+                </Tooltip>
+              </Stack>
+            ) : (
+              <Typography variant='body2' sx={{ fontWeight: 600 }} noWrap>
+                {clusterProfiles.find((item) => item.id === activeClusterId)?.name || clusterModelName || configModelName || 'No cluster selected'}
+              </Typography>
             )}
           </Stack>
         </DrawerLayoutHeader>
