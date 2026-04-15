@@ -11,9 +11,12 @@ import {
   Dialog,
   DialogContent,
   DialogTitle,
+  InputAdornment,
   IconButton,
   MenuItem,
   Stack,
+  Tab,
+  Tabs,
   TextField,
   Tooltip,
   Typography,
@@ -38,6 +41,7 @@ import {
   getFrontendBuildStatus,
   getNodesInventory,
   importSettingsBundle,
+  probeNodeHost,
   searchCustomModels,
   updateNodesInventory,
   updateAppSettings,
@@ -136,14 +140,35 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
   const [nodesInventoryLoading, setNodesInventoryLoading] = useState(false);
   const [nodesInventorySaving, setNodesInventorySaving] = useState(false);
   const [nodesInventoryMessage, setNodesInventoryMessage] = useState('');
-  const [hostEditorOpen, setHostEditorOpen] = useState(false);
-  const [hostDraft, setHostDraft] = useState<{ ssh_target: string; parallax_path: string }>({ ssh_target: '', parallax_path: '' });
-  const [manualNodeEditorOpen, setManualNodeEditorOpen] = useState(false);
-  const [manualNodeDraft, setManualNodeDraft] = useState<{ display_name: string; hostname_hint: string; network_scope: 'local' | 'remote' }>({
-    display_name: '',
-    hostname_hint: '',
-    network_scope: 'remote',
+  const [nodesOverviewRefreshToken, setNodesOverviewRefreshToken] = useState(0);
+  const [nodeEditorOpen, setNodeEditorOpen] = useState(false);
+  const [nodeEditorTab, setNodeEditorTab] = useState<'discovered' | 'manual'>('manual');
+  const [nodeDraft, setNodeDraft] = useState<{
+    ssh_target: string;
+    parallax_path: string;
+  }>({
+    ssh_target: '',
+    parallax_path: '',
   });
+  const [nodeDraftProbeLoading, setNodeDraftProbeLoading] = useState(false);
+  const [nodeDraftProbeResult, setNodeDraftProbeResult] = useState<null | {
+    ok: boolean;
+    message: string;
+    ssh_target: string;
+    parallax_path: string;
+    ssh_reachable: boolean;
+    stdout?: string;
+    stderr?: string;
+    return_code?: number | null;
+    os_name?: string;
+    remote_user?: string;
+    remote_host?: string;
+    path_exists?: boolean;
+    has_venv_activate?: boolean;
+    has_parallax_bin?: boolean;
+    notes?: readonly string[];
+  }>(null);
+  const [nodeDraftProbeError, setNodeDraftProbeError] = useState('');
   const [buildStatus, setBuildStatus] = useState<any | null>(null);
   const [buildStatusLoading, setBuildStatusLoading] = useState(false);
   const [clusterNameDraft, setClusterNameDraft] = useState('');
@@ -261,6 +286,67 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     .reduce((sum, item) => sum + Math.max(0, Number(item.node?.gpuMemory || 0)), 0);
   const knownAssignedHardwareCount = assignedHostDetails.filter((item) => Number(item.node?.gpuMemory || 0) > 0).length;
   const remainingVramGap = Math.max(0, Number(modelInfo?.vram || 0) - availableAssignedVram);
+  const configuredHostnames = new Set(
+    nodesInventory
+      .map((host) => normalizeHostname(host.hostname_hint || host.ssh_target))
+      .filter((hostname) => !!hostname),
+  );
+  const discoveredNodeCandidates = nodeInfoList
+    .filter((node) => !!normalizeHostname(node.hostname))
+    .filter((node) => !configuredHostnames.has(normalizeHostname(node.hostname)));
+
+  useEffect(() => {
+    if (!nodeEditorOpen) {
+      return;
+    }
+    if (discoveredNodeCandidates.length === 0 && nodeEditorTab === 'discovered') {
+      setNodeEditorTab('manual');
+    }
+  }, [discoveredNodeCandidates.length, nodeEditorOpen, nodeEditorTab]);
+
+  useEffect(() => {
+    if (!nodeEditorOpen || nodeEditorTab !== 'manual') {
+      setNodeDraftProbeLoading(false);
+      setNodeDraftProbeResult(null);
+      setNodeDraftProbeError('');
+      return;
+    }
+    const sshTarget = nodeDraft.ssh_target.trim();
+    const parallaxPath = nodeDraft.parallax_path.trim();
+    if (!sshTarget || !parallaxPath) {
+      setNodeDraftProbeLoading(false);
+      setNodeDraftProbeResult(null);
+      setNodeDraftProbeError('');
+      return;
+    }
+    setNodeDraftProbeResult(null);
+    setNodeDraftProbeError('');
+    let cancelled = false;
+    const timeoutId = window.setTimeout(async () => {
+      try {
+        setNodeDraftProbeLoading(true);
+        const result = await probeNodeHost(sshTarget, parallaxPath);
+        if (cancelled) {
+          return;
+        }
+        setNodeDraftProbeResult(result);
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        setNodeDraftProbeResult(null);
+        setNodeDraftProbeError(error instanceof Error ? error.message : 'Failed to probe SSH node');
+      } finally {
+        if (!cancelled) {
+          setNodeDraftProbeLoading(false);
+        }
+      }
+    }, 500);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [nodeDraft.parallax_path, nodeDraft.ssh_target, nodeEditorOpen, nodeEditorTab]);
   const customModelUrlValidationError = (() => {
     if (customModelSourceType !== 'url') {
       return '';
@@ -357,6 +443,13 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
   useEffect(() => {
     loadInventory();
   }, [loadInventory]);
+
+  useEffect(() => {
+    if (hostType === 'node' || activeSection !== 'nodes') {
+      return;
+    }
+    loadInventory();
+  }, [hostType, activeSection, loadInventory]);
 
   useEffect(() => {
     const loadBuildStatus = async () => {
@@ -658,83 +751,40 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     }
   };
 
-  const updateInventoryRow = (localId: string, patch: Partial<{ ssh_target: string; parallax_path: string }>) => {
-    setNodesInventory((prev) =>
-      prev.map((item) => (
-        item.local_id === localId
-          ? {
-            ...item,
-            ...patch,
-            display_name: patch.ssh_target !== undefined && item.management_mode === 'ssh_managed' ? patch.ssh_target : item.display_name,
-            hostname_hint: patch.ssh_target !== undefined ? normalizeHostname(patch.ssh_target) : item.hostname_hint,
-          }
-          : item
-      )),
-    );
+  const closeNodeEditor = () => {
+    setNodeEditorOpen(false);
+    setNodeDraftProbeLoading(false);
+    setNodeDraftProbeResult(null);
+    setNodeDraftProbeError('');
+    setNodeDraft({
+      ssh_target: '',
+      parallax_path: '',
+    });
   };
 
-  const onAddInventoryHostDraft = () => {
-    const sshTarget = hostDraft.ssh_target.trim();
-    const parallaxPath = hostDraft.parallax_path.trim();
-    if (!sshTarget) {
-      return;
-    }
-    setNodesInventory((prev) => [
-      ...prev,
-      {
-        local_id: nextInventoryRowId(),
-        id: '',
-        display_name: sshTarget,
-        ssh_target: sshTarget,
-        parallax_path: parallaxPath,
-        hostname_hint: normalizeHostname(sshTarget),
-        joined: false,
-        management_mode: 'ssh_managed',
-        network_scope: 'remote',
-        linked_clusters: [],
-        linked_cluster_ids: [],
-        linked_cluster_names: [],
-        linked_cluster_count: 0,
-      },
-    ]);
-    setHostDraft({ ssh_target: '', parallax_path: '' });
-    setHostEditorOpen(false);
-  };
-
-  const onAddManualNodeDraft = () => {
-    const hostnameHint = normalizeHostname(manualNodeDraft.hostname_hint);
-    const displayName = manualNodeDraft.display_name.trim() || hostnameHint;
-    if (!hostnameHint) {
-      return;
-    }
-    setNodesInventory((prev) => [
-      ...prev,
-      {
-        local_id: nextInventoryRowId(),
-        id: '',
-        display_name: displayName,
-        ssh_target: '',
-        parallax_path: '',
-        hostname_hint: hostnameHint,
-        joined: false,
-        management_mode: 'manual',
-        network_scope: manualNodeDraft.network_scope,
-        linked_clusters: [],
-        linked_cluster_ids: [],
-        linked_cluster_names: [],
-        linked_cluster_count: 0,
-      },
-    ]);
-    setManualNodeDraft({ display_name: '', hostname_hint: '', network_scope: 'remote' });
-    setManualNodeEditorOpen(false);
-  };
-
-  const onSaveNodesInventory = async () => {
+  const persistNodesInventory = async (
+    nextInventory: Array<{
+      local_id: string;
+      id: string;
+      display_name: string;
+      ssh_target: string;
+      parallax_path: string;
+      hostname_hint: string;
+      joined: boolean;
+      management_mode: 'ssh_managed' | 'manual';
+      network_scope: 'local' | 'remote';
+      linked_clusters: readonly { id: string; name: string }[];
+      linked_cluster_ids: readonly string[];
+      linked_cluster_names: readonly string[];
+      linked_cluster_count: number;
+    }>,
+    successMessage: string,
+  ) => {
     try {
       setNodesInventorySaving(true);
       setNodesInventoryMessage('');
       const result = await updateNodesInventory(
-        nodesInventory.map((item) => ({
+        nextInventory.map((item) => ({
           id: item.id || undefined,
           display_name: item.display_name || undefined,
           ssh_target: item.ssh_target.trim(),
@@ -745,13 +795,87 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
         })),
       );
       setNodesInventory((result.hosts || []).map(mapInventoryHost));
+      setNodesOverviewRefreshToken((prev) => prev + 1);
       await reloadSettings();
-      setNodesInventoryMessage(result.message || 'Configured node inventory saved');
+      setNodesInventoryMessage('');
     } catch (error) {
-      setNodesInventoryMessage(error instanceof Error ? error.message : 'Failed to save node inventory');
+      setNodesInventoryMessage(error instanceof Error ? error.message : 'Failed to update node inventory');
     } finally {
       setNodesInventorySaving(false);
     }
+  };
+
+  const onAddNodeDraft = async () => {
+    const sshTarget = nodeDraft.ssh_target.trim();
+    const parallaxPath = nodeDraft.parallax_path.trim();
+    if (!sshTarget) {
+      return;
+    }
+    const nextItem: (typeof nodesInventory)[number] = {
+      local_id: nextInventoryRowId(),
+      id: '',
+      display_name: sshTarget,
+      ssh_target: sshTarget,
+      parallax_path: parallaxPath,
+      hostname_hint: normalizeHostname(sshTarget),
+      joined: false,
+      management_mode: 'ssh_managed',
+      network_scope: 'remote',
+      linked_clusters: [],
+      linked_cluster_ids: [],
+      linked_cluster_names: [],
+      linked_cluster_count: 0,
+    };
+    await persistNodesInventory([...nodesInventory, nextItem], 'Node added to configured inventory');
+    closeNodeEditor();
+  };
+
+  const onAddDiscoveredNode = async (node: (typeof nodeInfoList)[number]) => {
+    const hostnameHint = normalizeHostname(node.hostname);
+    if (!hostnameHint) {
+      return;
+    }
+    await persistNodesInventory(
+      [
+        ...nodesInventory,
+        {
+          local_id: nextInventoryRowId(),
+          id: '',
+          display_name: node.hostname || node.id,
+          ssh_target: '',
+          parallax_path: '',
+          hostname_hint: hostnameHint,
+          joined: node.status === 'available',
+          management_mode: 'manual',
+          network_scope: 'remote',
+          linked_clusters: [],
+          linked_cluster_ids: [],
+          linked_cluster_names: [],
+          linked_cluster_count: 0,
+        },
+      ],
+      'Discovered node added to configured inventory',
+    );
+    closeNodeEditor();
+  };
+
+  const onRemoveInventoryNode = async (localId: string) => {
+    await persistNodesInventory(
+      nodesInventory.filter((item) => item.local_id !== localId),
+      'Node removed from configured inventory',
+    );
+  };
+
+  const onRemoveConfiguredOverviewHost = async (host: { id: string; ssh_target: string; hostname_hint: string }) => {
+    const targetLocalId = nodesInventory.find((item) => item.id && item.id === host.id)?.local_id
+      || nodesInventory.find((item) => item.ssh_target && item.ssh_target === host.ssh_target)?.local_id
+      || nodesInventory.find((item) => item.hostname_hint && item.hostname_hint === normalizeHostname(host.hostname_hint))?.local_id
+      || '';
+    if (!targetLocalId) {
+      setNodesInventoryMessage('Configured node could not be matched in inventory');
+      return;
+    }
+    await onRemoveInventoryNode(targetLocalId);
   };
 
   const onExportSettings = async () => {
@@ -956,8 +1080,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                           <Typography variant='body2' sx={{ fontWeight: 600 }}>
                             {host.display_name || host.ssh_target || host.hostname_hint || 'Unnamed host'}
                           </Typography>
-                          <Chip size='small' variant='outlined' label={host.management_mode === 'manual' ? 'Manual' : 'SSH managed'} />
-                          <Chip size='small' variant='outlined' label={host.network_scope === 'local' ? 'Local' : 'Remote'} />
+                          <Chip size='small' variant='outlined' label={host.management_mode === 'manual' ? 'Self-joining' : 'SSH managed'} />
                           {host.joined
                             ? <Chip size='small' color='success' label='Online' />
                             : <Chip size='small' variant='outlined' label='Offline' />}
@@ -977,7 +1100,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                         )}
                         {host.management_mode === 'manual' && (
                           <Typography variant='caption' color='text.secondary'>
-                            Manual node: Parallax cannot SSH into or restart this node.
+                            Self-joining node: Parallax does not SSH into or restart this node.
                           </Typography>
                         )}
                         <Stack direction='row' sx={{ gap: 0.5, flexWrap: 'wrap' }}>
@@ -1351,159 +1474,292 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     if (activeSection === 'nodes') {
       return (
         <Stack sx={{ gap: 1.25 }}>
-          <Typography variant='h2'>Nodes</Typography>
-          <Typography variant='body2' color='text.secondary'>
-            Manage the available machine pool here. Add SSH-managed hosts when Parallax can control them directly, or add manual remote nodes when they will join on their own and this cluster cannot SSH into them.
-          </Typography>
-          <Stack sx={{ gap: 0.75 }}>
-            <Typography variant='body1'>Join command</Typography>
-            <Typography variant='body2' color='text.secondary'>
-              Use this command to bring additional nodes into the currently active cluster or to reconnect nodes during recovery.
-            </Typography>
-            <JoinCommand />
+          <Stack direction='row' sx={{ alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
+            <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75 }}>
+              <Typography variant='h2'>Nodes</Typography>
+              <Tooltip
+                title='Manage the available machine pool here. Add SSH-managed hosts when Parallax can control them directly, or add manual remote nodes when they will join on their own and this cluster cannot SSH into them.'
+                placement='right'
+                slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
+              >
+                <IconButton size='small' sx={{ color: 'text.secondary', p: 0.25 }}>
+                  <IconInfoCircle size={16} />
+                </IconButton>
+              </Tooltip>
+            </Stack>
+            <Button
+              variant='outlined'
+              onClick={() => {
+                setNodeEditorTab(discoveredNodeCandidates.length > 0 ? 'discovered' : 'manual');
+                setNodeEditorOpen(true);
+              }}
+              startIcon={<IconPlus size={16} />}
+            >
+              Add node
+            </Button>
           </Stack>
           {nodesInventoryMessage && <Alert severity='info'>{nodesInventoryMessage}</Alert>}
-          <Stack sx={{ gap: 1 }}>
-            {nodesInventoryLoading && <Typography variant='body2' color='text.secondary'>Loading configured node inventory…</Typography>}
-            {!nodesInventoryLoading && nodesInventory.length === 0 && <Typography variant='body2' color='text.secondary'>No configured node hosts yet.</Typography>}
-            {nodesInventory.map((host) => (
-              <Stack key={host.local_id} sx={{ gap: 0.75 }}>
-                <Stack direction={{ xs: 'column', md: 'row' }} sx={{ gap: 1 }}>
-                  {host.management_mode === 'ssh_managed' ? (
-                    <>
-                      <TextField label='SSH target' size='small' fullWidth value={host.ssh_target} onChange={(event) => updateInventoryRow(host.local_id, { ssh_target: event.target.value })} placeholder='user@host' />
-                      <TextField label='PARALLAX_PATH' size='small' fullWidth value={host.parallax_path} onChange={(event) => updateInventoryRow(host.local_id, { parallax_path: event.target.value })} placeholder='/path/to/parallax' />
-                    </>
+          <Dialog open={nodeEditorOpen} onClose={closeNodeEditor} fullWidth maxWidth='md'>
+            <DialogTitle sx={{ pr: 6 }}>
+              Add Node
+              <IconButton
+                onClick={closeNodeEditor}
+                aria-label='Close add node dialog'
+                sx={{ position: 'absolute', right: 16, top: 16 }}
+              >
+                <IconX size={18} />
+              </IconButton>
+            </DialogTitle>
+            <DialogContent dividers>
+              <Stack sx={{ gap: 1.5, pt: 0.5, minHeight: '32rem' }}>
+                <Tabs
+                  value={nodeEditorTab}
+                  onChange={(_, value) => setNodeEditorTab(value)}
+                  variant='fullWidth'
+                >
+                  <Tab
+                    value='discovered'
+                    label={
+                      <Stack direction='row' sx={{ alignItems: 'center', gap: 0.5 }}>
+                        <span>{`Discovered nodes${discoveredNodeCandidates.length > 0 ? ` (${discoveredNodeCandidates.length})` : ''}`}</span>
+                        <Tooltip
+                          title='Add currently joined nodes directly into configured inventory.'
+                          placement='top'
+                          slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
+                        >
+                          <IconButton size='small' sx={{ color: 'inherit', p: 0.25 }}>
+                            <IconInfoCircle size={14} />
+                          </IconButton>
+                        </Tooltip>
+                      </Stack>
+                    }
+                    disabled={discoveredNodeCandidates.length === 0}
+                  />
+                  <Tab
+                    value='manual'
+                    label={
+                      <Stack direction='row' sx={{ alignItems: 'center', gap: 0.5 }}>
+                        <span>Managed via SSH</span>
+                        <Tooltip
+                          title='Add a node Parallax can reach and control directly over SSH.'
+                          placement='top'
+                          slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
+                        >
+                          <IconButton size='small' sx={{ color: 'inherit', p: 0.25 }}>
+                            <IconInfoCircle size={14} />
+                          </IconButton>
+                        </Tooltip>
+                      </Stack>
+                    }
+                  />
+                </Tabs>
+                <Box sx={{ minHeight: '26rem', display: 'flex', flexDirection: 'column', pt: 2 }}>
+                  {nodeEditorTab === 'discovered' ? (
+                    discoveredNodeCandidates.length > 0 ? (
+                      <Stack sx={{ gap: 0.75, minHeight: 0, flex: 1 }}>
+                        <Stack sx={{ gap: 0.75, maxHeight: '18rem', overflowY: 'auto', minHeight: 0, flex: 1 }}>
+                          {discoveredNodeCandidates.map((node) => (
+                            <Stack
+                              key={node.id}
+                              direction='row'
+                              sx={{
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                gap: 1,
+                                px: 1.25,
+                                py: 1,
+                                borderRadius: 2,
+                                border: '1px solid',
+                                borderColor: 'divider',
+                                bgcolor: 'background.paper',
+                              }}
+                            >
+                              <Stack sx={{ minWidth: 0, gap: 0.25, flex: 1 }}>
+                                <Typography variant='body2' sx={{ fontWeight: 600 }}>
+                                  {node.hostname || node.id}
+                                </Typography>
+                                <Typography variant='caption' color='text.secondary' sx={{ wordBreak: 'break-all' }}>
+                                  {node.id}
+                                </Typography>
+                              </Stack>
+                              <Stack direction='row' sx={{ gap: 0.5, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                                <Chip size='small' variant='outlined' label='Self-joining' />
+                                <Chip size='small' color={node.status === 'available' ? 'success' : 'default'} variant='outlined' label={node.status === 'available' ? 'Online' : node.status} />
+                                <Button
+                                  variant='outlined'
+                                  disabled={nodesInventorySaving}
+                                  onClick={() => void onAddDiscoveredNode(node)}
+                                >
+                                  Add
+                                </Button>
+                              </Stack>
+                            </Stack>
+                          ))}
+                        </Stack>
+                      </Stack>
+                    ) : (
+                      <Alert severity='info'>
+                        No discovered node candidates are available right now. Switch to Manual to add one yourself.
+                      </Alert>
+                    )
                   ) : (
-                    <>
-                      <TextField
-                        label='Node name'
-                        size='small'
-                        fullWidth
-                        value={host.display_name}
-                        onChange={(event) => setNodesInventory((prev) => prev.map((item) => item.local_id === host.local_id ? { ...item, display_name: event.target.value } : item))}
-                        placeholder='Remote GPU node'
-                      />
-                      <TextField
-                        label='Hostname hint'
-                        size='small'
-                        fullWidth
-                        value={host.hostname_hint}
-                        onChange={(event) => setNodesInventory((prev) => prev.map((item) => item.local_id === host.local_id ? { ...item, hostname_hint: normalizeHostname(event.target.value) } : item))}
-                        placeholder='node-12'
-                      />
-                    </>
-                  )}
-                  <Button color='error' variant='text' onClick={() => setNodesInventory((prev) => prev.filter((item) => item.local_id !== host.local_id))}>Remove</Button>
-                </Stack>
-                <Stack direction='row' sx={{ gap: 0.5, flexWrap: 'wrap', pl: 0.25 }}>
-                  <Chip size='small' variant='outlined' label={host.management_mode === 'manual' ? 'Manual' : 'SSH managed'} />
-                  <Chip size='small' variant='outlined' label={host.network_scope === 'local' ? 'Local' : 'Remote'} />
-                  {host.linked_cluster_count === 0 && <Chip size='small' variant='outlined' label='Unassigned' />}
-                  {host.linked_clusters.map((cluster) => (
-                    <Chip
-                      key={`${host.id || host.local_id}-${cluster.id}`}
-                      size='small'
-                      color={cluster.id === activeClusterId ? 'primary' : 'default'}
-                      variant={cluster.id === activeClusterId ? 'filled' : 'outlined'}
-                      label={cluster.name}
-                    />
-                  ))}
-                  {host.joined && <Chip size='small' color='success' variant='outlined' label='Online' />}
-                </Stack>
-              </Stack>
-            ))}
-            <Stack direction='row' sx={{ gap: 1, justifyContent: 'space-between' }}>
-              <Stack sx={{ gap: 1, flex: 1 }}>
-                {!hostEditorOpen && (
-                  <Stack direction='row' sx={{ justifyContent: 'flex-start' }}>
-                    <Button variant='outlined' onClick={() => setHostEditorOpen(true)}>Add host</Button>
-                  </Stack>
-                )}
-                {hostEditorOpen && (
-                  <Stack direction={{ xs: 'column', md: 'row' }} sx={{ gap: 1 }}>
-                    <TextField
-                      label='SSH target'
-                      size='small'
-                      fullWidth
-                      value={hostDraft.ssh_target}
-                      onChange={(event) => setHostDraft((prev) => ({ ...prev, ssh_target: event.target.value }))}
-                      placeholder='user@host'
-                    />
-                    <TextField
-                      label='PARALLAX_PATH'
-                      size='small'
-                      fullWidth
-                      value={hostDraft.parallax_path}
-                      onChange={(event) => setHostDraft((prev) => ({ ...prev, parallax_path: event.target.value }))}
-                      placeholder='/path/to/parallax'
-                    />
-                    <Button variant='contained' onClick={onAddInventoryHostDraft} disabled={!hostDraft.ssh_target.trim()}>
-                      Add host
-                    </Button>
-                    <Button
-                      variant='text'
-                      onClick={() => {
-                        setHostEditorOpen(false);
-                        setHostDraft({ ssh_target: '', parallax_path: '' });
-                      }}
-                    >
-                      Cancel
-                    </Button>
-                  </Stack>
-                )}
-                {!manualNodeEditorOpen && (
-                  <Stack direction='row' sx={{ justifyContent: 'flex-start' }}>
-                    <Button variant='outlined' onClick={() => setManualNodeEditorOpen(true)}>Add manual remote node</Button>
-                  </Stack>
-                )}
-                {manualNodeEditorOpen && (
-                  <Stack direction={{ xs: 'column', md: 'row' }} sx={{ gap: 1 }}>
-                    <TextField
-                      label='Node name'
-                      size='small'
-                      fullWidth
-                      value={manualNodeDraft.display_name}
-                      onChange={(event) => setManualNodeDraft((prev) => ({ ...prev, display_name: event.target.value }))}
-                      placeholder='Remote GPU node'
-                    />
-                    <TextField
-                      label='Hostname hint'
-                      size='small'
-                      fullWidth
-                      value={manualNodeDraft.hostname_hint}
-                      onChange={(event) => setManualNodeDraft((prev) => ({ ...prev, hostname_hint: event.target.value }))}
-                      placeholder='node-12'
-                    />
-                    <Stack direction='row' sx={{ gap: 1 }}>
-                      <Button variant={manualNodeDraft.network_scope === 'remote' ? 'contained' : 'outlined'} onClick={() => setManualNodeDraft((prev) => ({ ...prev, network_scope: 'remote' }))}>
-                        Remote
-                      </Button>
-                      <Button variant={manualNodeDraft.network_scope === 'local' ? 'contained' : 'outlined'} onClick={() => setManualNodeDraft((prev) => ({ ...prev, network_scope: 'local' }))}>
-                        Local
-                      </Button>
+                    <Stack sx={{ gap: 1.5, minHeight: 0, flex: 1 }}>
+                    <Stack sx={{ gap: 1, minHeight: 0, flex: 1 }}>
+                      <Stack direction={{ xs: 'column', md: 'row' }} sx={{ gap: 1 }}>
+                        <TextField
+                          label='SSH target'
+                          size='small'
+                          fullWidth
+                          value={nodeDraft.ssh_target}
+                          onChange={(event) => setNodeDraft((prev) => ({ ...prev, ssh_target: event.target.value }))}
+                          placeholder='user@host'
+                          InputProps={{
+                            endAdornment: (
+                              <InputAdornment position='end'>
+                                <Tooltip
+                                  title='Format: user@host or user@host:port'
+                                  placement='top'
+                                  slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
+                                >
+                                  <IconButton size='small' sx={{ color: 'text.secondary', p: 0.25 }}>
+                                    <IconInfoCircle size={14} />
+                                  </IconButton>
+                                </Tooltip>
+                              </InputAdornment>
+                            ),
+                          }}
+                        />
+                        <TextField
+                          label='PARALLAX_PATH'
+                          size='small'
+                          fullWidth
+                          value={nodeDraft.parallax_path}
+                          onChange={(event) => setNodeDraft((prev) => ({ ...prev, parallax_path: event.target.value }))}
+                          placeholder='/path/to/parallax'
+                        />
+                      </Stack>
+                      {(nodeDraftProbeLoading || nodeDraftProbeResult || nodeDraftProbeError) && (
+                        <Stack sx={{ gap: 0.75 }}>
+                          {nodeDraftProbeLoading && (
+                            <Alert severity='info' icon={<CircularProgress size={16} color='inherit' />}>
+                              Checking SSH access and remote node environment…
+                            </Alert>
+                          )}
+                          {nodeDraftProbeError && !nodeDraftProbeLoading && (
+                            <Alert severity='warning'>
+                              {nodeDraftProbeError}
+                            </Alert>
+                          )}
+                          {nodeDraftProbeResult && !nodeDraftProbeLoading && (
+                            <Alert severity={nodeDraftProbeResult.ok ? 'success' : (nodeDraftProbeResult.ssh_reachable ? 'warning' : 'error')}>
+                              <Stack sx={{ gap: 0.5 }}>
+                                <Typography variant='body2'>
+                                  {nodeDraftProbeResult.message}
+                                </Typography>
+                                {nodeDraftProbeResult.os_name && (
+                                  <Typography variant='caption' color='text.secondary'>
+                                    Remote OS: {nodeDraftProbeResult.os_name}
+                                  </Typography>
+                                )}
+                                {(nodeDraftProbeResult.remote_user || nodeDraftProbeResult.remote_host) && (
+                                  <Typography variant='caption' color='text.secondary'>
+                                    Remote session: {(nodeDraftProbeResult.remote_user || 'unknown')}@{(nodeDraftProbeResult.remote_host || 'unknown')}
+                                  </Typography>
+                                )}
+                                <Stack direction='row' sx={{ gap: 0.5, flexWrap: 'wrap' }}>
+                                  <Chip
+                                    size='small'
+                                    color={nodeDraftProbeResult.ssh_reachable ? 'success' : 'default'}
+                                    variant='outlined'
+                                    label={nodeDraftProbeResult.ssh_reachable ? 'SSH reachable' : 'SSH unreachable'}
+                                  />
+                                  <Chip
+                                    size='small'
+                                    color={nodeDraftProbeResult.path_exists ? 'success' : 'default'}
+                                    variant='outlined'
+                                    label={nodeDraftProbeResult.path_exists ? 'Path found' : 'Path missing'}
+                                  />
+                                  <Chip
+                                    size='small'
+                                    color={nodeDraftProbeResult.has_venv_activate ? 'success' : 'default'}
+                                    variant='outlined'
+                                    label={nodeDraftProbeResult.has_venv_activate ? 'venv ok' : 'venv missing'}
+                                  />
+                                  <Chip
+                                    size='small'
+                                    color={nodeDraftProbeResult.has_parallax_bin ? 'success' : 'default'}
+                                    variant='outlined'
+                                    label={nodeDraftProbeResult.has_parallax_bin ? 'parallax ok' : 'parallax missing'}
+                                  />
+                                </Stack>
+                                {(nodeDraftProbeResult.notes || []).map((note, index) => (
+                                  <Typography key={`${nodeDraftProbeResult.os_name || 'note'}-${index}`} variant='caption' color='text.secondary'>
+                                    {note}
+                                  </Typography>
+                                ))}
+                                {(!nodeDraftProbeResult.ok || !!nodeDraftProbeResult.stderr) && (nodeDraftProbeResult.stderr || nodeDraftProbeResult.stdout) && (
+                                  <Box
+                                    component='pre'
+                                    sx={{
+                                      m: 0,
+                                      mt: 0.5,
+                                      px: 1,
+                                      py: 0.75,
+                                      borderRadius: 1.5,
+                                      bgcolor: 'rgba(0,0,0,0.06)',
+                                      fontFamily: 'monospace',
+                                      fontSize: '0.78rem',
+                                      lineHeight: 1.4,
+                                      whiteSpace: 'pre-wrap',
+                                      wordBreak: 'break-word',
+                                    }}
+                                  >
+                                    {nodeDraftProbeResult.stderr || nodeDraftProbeResult.stdout}
+                                  </Box>
+                                )}
+                              </Stack>
+                            </Alert>
+                          )}
+                        </Stack>
+                      )}
+                      <Stack sx={{ gap: 0.75, mt: 2.5 }}>
+                        <Typography variant='body2' color='text.secondary'>
+                          For nodes Parallax does not SSH into, run this command on the remote machine and then add the node from the <strong>Discovered</strong> tab after it appears.
+                        </Typography>
+                        <JoinCommand />
+                      </Stack>
                     </Stack>
-                    <Button variant='contained' onClick={onAddManualNodeDraft} disabled={!manualNodeDraft.hostname_hint.trim()}>
-                      Add remote node
-                    </Button>
-                    <Button
-                      variant='text'
-                      onClick={() => {
-                        setManualNodeEditorOpen(false);
-                        setManualNodeDraft({ display_name: '', hostname_hint: '', network_scope: 'remote' });
-                      }}
-                    >
-                      Cancel
-                    </Button>
-                  </Stack>
-                )}
+                      <Stack direction='row' sx={{ justifyContent: 'flex-end', gap: 1, mt: 'auto' }}>
+                        <Button variant='text' onClick={closeNodeEditor}>
+                          Cancel
+                        </Button>
+                        <Button
+                          variant='contained'
+                          onClick={() => void onAddNodeDraft()}
+                          disabled={
+                            nodesInventorySaving
+                            || nodeDraftProbeLoading
+                            || !nodeDraft.ssh_target.trim()
+                            || !nodeDraft.parallax_path.trim()
+                            || !nodeDraftProbeResult?.ok
+                          }
+                        >
+                          {nodesInventorySaving ? 'Adding...' : 'Add node'}
+                        </Button>
+                      </Stack>
+                    </Stack>
+                  )}
+                </Box>
               </Stack>
-              <Button variant='contained' onClick={onSaveNodesInventory} disabled={nodesInventorySaving}>
-                {nodesInventorySaving ? 'Saving...' : 'Save inventory'}
-              </Button>
-            </Stack>
-          </Stack>
-          <NodeManagementContent embedded />
+            </DialogContent>
+          </Dialog>
+          {nodesInventoryLoading && <Typography variant='body2' color='text.secondary'>Loading node inventory…</Typography>}
+          <NodeManagementContent
+            embedded
+            showLiveOnlyHosts={false}
+            refreshToken={nodesOverviewRefreshToken}
+            onRemoveConfiguredHost={onRemoveConfiguredOverviewHost}
+          />
         </Stack>
       );
     }

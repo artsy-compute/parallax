@@ -606,6 +606,24 @@ async def nodes_ping(raw_request: Request) -> JSONResponse:
     )
 
 
+@app.post("/nodes/probe")
+async def nodes_probe(raw_request: Request) -> JSONResponse:
+    if node_management is None:
+        return JSONResponse(
+            content={"type": "node_probe", "data": {"ok": False, "message": "Node management is not initialized"}},
+            status_code=503,
+        )
+    request_data = await raw_request.json()
+    result = node_management.probe_candidate_host(
+        str(request_data.get("ssh_target") or ""),
+        str(request_data.get("parallax_path") or ""),
+    )
+    return JSONResponse(
+        content={"type": "node_probe", "data": result},
+        status_code=200 if result.get("ssh_reachable") else 409,
+    )
+
+
 @app.post("/nodes/logs")
 async def nodes_logs(raw_request: Request) -> JSONResponse:
     if node_management is None:

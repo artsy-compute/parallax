@@ -486,6 +486,37 @@ export const pingNodeHost = async (sshTarget: string): Promise<{ ok: boolean; me
   return message.data;
 };
 
+export const probeNodeHost = async (sshTarget: string, parallaxPath: string): Promise<{
+  ok: boolean;
+  message: string;
+  ssh_target: string;
+  parallax_path: string;
+  ssh_reachable: boolean;
+  stdout?: string;
+  stderr?: string;
+  return_code?: number | null;
+  os_name?: string;
+  remote_user?: string;
+  remote_host?: string;
+  path_exists?: boolean;
+  has_venv_activate?: boolean;
+  has_parallax_bin?: boolean;
+  notes?: readonly string[];
+}> => {
+  const response = await fetch(`${API_BASE_URL}/nodes/probe`, {
+    method: 'POST',
+    body: JSON.stringify({ ssh_target: sshTarget, parallax_path: parallaxPath }),
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'node_probe') {
+    if (message?.detail === 'Not Found' || (response.status === 404 && message?.type === undefined)) {
+      throw new Error('SSH probe endpoint is unavailable. Restart the backend to load /nodes/probe.');
+    }
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  return message.data;
+};
+
 
 const postNodeAction = async (
   path: string,

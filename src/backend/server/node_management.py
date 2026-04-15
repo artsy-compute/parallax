@@ -1,6 +1,7 @@
 import shlex
 import subprocess
 import time
+import json
 from typing import Any
 
 from backend.server.node_lifecycle import build_node_lifecycle
@@ -756,6 +757,133 @@ fi
         elif result.get('message', '').startswith('SSH command failed:'):
             result['message'] = result['message'].replace('SSH command failed:', 'SSH ping failed:', 1).strip()
         return result
+
+    def probe_candidate_host(self, ssh_target: str, parallax_path: str) -> dict[str, Any]:
+        target = (ssh_target or '').strip()
+        path = (parallax_path or '').strip()
+        if not target:
+            return {'ok': False, 'message': 'ssh_target is required', 'ssh_target': target, 'parallax_path': path}
+        if not path:
+            return {'ok': False, 'message': 'PARALLAX_PATH is required', 'ssh_target': target, 'parallax_path': path}
+
+        quoted_path = shlex.quote(path)
+        remote_command = self._wrap_remote_login_shell(f"""
+set +e
+os_name="$(uname -s 2>/dev/null || echo unknown)"
+remote_user="$(id -un 2>/dev/null || whoami 2>/dev/null || echo unknown)"
+remote_host="$(hostname 2>/dev/null || echo unknown)"
+if [ -f /proc/version ] && grep -qi microsoft /proc/version 2>/dev/null; then
+  os_name="WSL"
+fi
+path_exists=0
+has_venv_activate=0
+has_parallax_bin=0
+if [ -d {quoted_path} ]; then
+  path_exists=1
+fi
+if [ -f {quoted_path}/venv/bin/activate ]; then
+  has_venv_activate=1
+fi
+if [ -x {quoted_path}/venv/bin/parallax ]; then
+  has_parallax_bin=1
+fi
+PROBE_OS="$os_name" \
+PROBE_USER="$remote_user" \
+PROBE_HOST="$remote_host" \
+PROBE_PATH_EXISTS="$path_exists" \
+PROBE_HAS_VENV_ACTIVATE="$has_venv_activate" \
+PROBE_HAS_PARALLAX_BIN="$has_parallax_bin" \
+python3 -c 'import json, os; print("__PARALLAX_NODE_PROBE__:" + json.dumps({{"os": os.environ.get("PROBE_OS", ""), "user": os.environ.get("PROBE_USER", ""), "host": os.environ.get("PROBE_HOST", ""), "path_exists": os.environ.get("PROBE_PATH_EXISTS", ""), "has_venv_activate": os.environ.get("PROBE_HAS_VENV_ACTIVATE", ""), "has_parallax_bin": os.environ.get("PROBE_HAS_PARALLAX_BIN", "")}}))'
+exit 0
+""")
+        result = self._run_ssh_command(target, remote_command, timeout_sec=10)
+        payload = {
+            'ok': False,
+            'message': str(result.get('message') or ''),
+            'ssh_target': target,
+            'parallax_path': path,
+            'ssh_reachable': bool(result.get('ok')),
+            'stdout': str(result.get('stdout') or ''),
+            'stderr': str(result.get('stderr') or ''),
+            'return_code': result.get('return_code'),
+            'os_name': '',
+            'remote_user': '',
+            'remote_host': '',
+            'path_exists': False,
+            'has_venv_activate': False,
+            'has_parallax_bin': False,
+            'notes': [],
+        }
+        if not result.get('ok'):
+            logger.info(
+                'Node probe failed before remote inspection for ssh_target=%s parallax_path=%s return_code=%s stderr=%r stdout=%r',
+                target,
+                path,
+                result.get('return_code'),
+                result.get('stderr'),
+                result.get('stdout'),
+            )
+            return payload
+
+        marker = '__PARALLAX_NODE_PROBE__:'
+        stdout = str(result.get('stdout') or '')
+        line = next((ln for ln in stdout.splitlines() if ln.startswith(marker)), '')
+        parsed: dict[str, str] = {}
+        if line:
+            try:
+                raw_payload = json.loads(line[len(marker):].strip())
+                if isinstance(raw_payload, dict):
+                    parsed = {str(key).strip(): str(value).strip() for key, value in raw_payload.items()}
+            except Exception:
+                logger.warning('Failed to parse node probe marker for ssh_target=%s stdout=%r', target, stdout, exc_info=True)
+        os_name = str(parsed.get('os') or '')
+        remote_user = str(parsed.get('user') or '')
+        remote_host = str(parsed.get('host') or '')
+        path_exists = parsed.get('path_exists') == '1'
+        has_venv_activate = parsed.get('has_venv_activate') == '1'
+        has_parallax_bin = parsed.get('has_parallax_bin') == '1'
+
+        notes: list[str] = []
+        if os_name == 'Darwin':
+            notes.append('On macOS, if node discovery fails after launch, allow the SSH-launched process to access the local network in Privacy & Security.')
+        elif os_name == 'WSL':
+            notes.append('If this node must join over the local network from WSL, use Mirrored networking instead of NAT so the scheduler stays reachable.')
+
+        if not path_exists:
+            message = 'SSH reachable, but PARALLAX_PATH does not exist on the remote host'
+        elif not has_venv_activate:
+            message = 'SSH reachable, but PARALLAX_PATH is missing venv/bin/activate'
+        elif not has_parallax_bin:
+            message = 'SSH reachable, but PARALLAX_PATH is missing executable venv/bin/parallax'
+        else:
+            message = 'SSH reachable and PARALLAX_PATH looks ready'
+
+        payload.update({
+            'ok': path_exists and has_venv_activate and has_parallax_bin,
+            'message': message,
+            'os_name': os_name,
+            'remote_user': remote_user,
+            'remote_host': remote_host,
+            'path_exists': path_exists,
+            'has_venv_activate': has_venv_activate,
+            'has_parallax_bin': has_parallax_bin,
+            'notes': notes,
+        })
+        logger.info(
+            'Node probe result ssh_target=%s remote_session=%s@%s parallax_path=%s ok=%s path_exists=%s has_venv_activate=%s has_parallax_bin=%s return_code=%s stderr=%r stdout=%r',
+            target,
+            remote_user or 'unknown',
+            remote_host or 'unknown',
+            path,
+            payload.get('ok'),
+            path_exists,
+            has_venv_activate,
+            has_parallax_bin,
+            payload.get('return_code'),
+            payload.get('stderr'),
+            payload.get('stdout'),
+        )
+        return payload
 
     def start_host(self, ssh_target: str) -> dict[str, Any]:
         return self._run_node_action(ssh_target, 'start')

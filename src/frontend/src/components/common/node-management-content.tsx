@@ -5,9 +5,9 @@ import {
   IconCpu,
   IconFileText,
   IconSquareFilled,
+  IconTrash,
   IconPlayerPlay,
   IconPlugConnected,
-  IconRefresh,
   IconRotateClockwise2,
 } from '@tabler/icons-react';
 import { getNodeLogs, getNodesOverview, pingNodeHost, restartNodeHost, startNodeHost, stopNodeHost, type NodeOverviewHost, type NodesOverview } from '../../services/api';
@@ -91,7 +91,7 @@ const formatUsageStat = (used?: number | null, total?: number | null, percent?: 
   return 'Unknown';
 };
 
-const HostRow = ({ host, onPing, onLogs, onStart, onStop, onRestart, pingState, actionState }: { host: NodeOverviewHost; onPing: (sshTarget: string) => Promise<void>; onLogs: (sshTarget: string) => Promise<void>; onStart: (sshTarget: string) => Promise<void>; onStop: (sshTarget: string) => Promise<void>; onRestart: (sshTarget: string) => Promise<void>; pingState?: string; actionState?: string }) => {
+const HostRow = ({ host, onPing, onLogs, onStart, onStop, onRestart, onRemoveConfiguredHost, removing, pingState, actionState }: { host: NodeOverviewHost; onPing: (sshTarget: string) => Promise<void>; onLogs: (sshTarget: string) => Promise<void>; onStart: (sshTarget: string) => Promise<void>; onStop: (sshTarget: string) => Promise<void>; onRestart: (sshTarget: string) => Promise<void>; onRemoveConfiguredHost?: (host: NodeOverviewHost) => Promise<void> | void; removing?: boolean; pingState?: string; actionState?: string }) => {
   const runtime = host.runtime || {};
   const lifecycle = host.lifecycle || {};
   const lifecycleProcess = lifecycle.process || {};
@@ -188,6 +188,11 @@ const HostRow = ({ host, onPing, onLogs, onStart, onStop, onRestart, pingState, 
             </Box>
           </Stack>
           <Stack direction='row' sx={{ gap: 0.25, flexWrap: 'wrap', alignItems: 'center', flex: 'none' }}>
+            {host.inventory_source === 'configured' && onRemoveConfiguredHost && (
+              <Tooltip title={removing ? 'Removing node' : 'Remove from configured inventory'}>
+                <span><IconButton size='small' color='error' disabled={removing || isActionRunning} onClick={() => void onRemoveConfiguredHost(host)}><IconTrash size={16} /></IconButton></span>
+              </Tooltip>
+            )}
             <Tooltip title={pingState === 'running' ? 'Pinging node' : 'Ping node over SSH'}>
               <span><IconButton size='small' color='primary' disabled={!canPing || pingState === 'running' || isActionRunning} onClick={() => onPing(host.ssh_target)}><IconPlugConnected size={16} /></IconButton></span>
             </Tooltip>
@@ -212,12 +217,13 @@ const HostRow = ({ host, onPing, onLogs, onStart, onStop, onRestart, pingState, 
   );
 };
 
-export const NodeManagementContent = ({ embedded = false }: { embedded?: boolean }) => {
+export const NodeManagementContent = ({ embedded = false, showLiveOnlyHosts = true, refreshToken = 0, onRemoveConfiguredHost }: { embedded?: boolean; showLiveOnlyHosts?: boolean; refreshToken?: number; onRemoveConfiguredHost?: (host: NodeOverviewHost) => Promise<void> | void }) => {
   const [overview, setOverview] = useState<NodesOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [pingStates, setPingStates] = useState<Record<string, string>>({});
   const [actionStates, setActionStates] = useState<Record<string, string>>({});
+  const [removingHostId, setRemovingHostId] = useState('');
   const [logsDialog, setLogsDialog] = useState<{ open: boolean; host: string; source: string; content: string; loading: boolean; error: string }>({
     open: false,
     host: '',
@@ -287,6 +293,13 @@ export const NodeManagementContent = ({ embedded = false }: { embedded?: boolean
     return () => clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    if (refreshToken <= 0) {
+      return;
+    }
+    loadOverview();
+  }, [refreshToken]);
+
   const onPing = async (sshTarget: string) => {
     if (!sshTarget) return;
     setPingStates((prev) => ({ ...prev, [sshTarget]: 'running' }));
@@ -329,6 +342,7 @@ export const NodeManagementContent = ({ embedded = false }: { embedded?: boolean
   const hosts = overview?.hosts || [];
   const configuredHostnames = new Set(hosts.filter((host) => host.inventory_source === 'configured').map((host) => (host.hostname_hint || host.runtime?.hostname || '').trim().toLowerCase()).filter(Boolean));
   const visibleHosts = hosts.filter((host) => {
+    if (!showLiveOnlyHosts && host.inventory_source === 'live_only') return false;
     if (host.inventory_source !== 'live_only') return true;
     const hostname = (host.hostname_hint || host.runtime?.hostname || '').trim().toLowerCase();
     return !hostname || !configuredHostnames.has(hostname);
@@ -344,7 +358,6 @@ export const NodeManagementContent = ({ embedded = false }: { embedded?: boolean
               <Typography variant='body2' color='text.secondary'>Live start, stop, restart, health, SSH ping, and logs for inventory hosts and joined nodes.</Typography>
             </Stack>
           )}
-          <Button onClick={loadOverview} variant='outlined' startIcon={<IconRefresh size={16} />}>Refresh</Button>
         </Stack>
 
         {!embedded && (
@@ -375,6 +388,16 @@ export const NodeManagementContent = ({ embedded = false }: { embedded?: boolean
               onStart={(sshTarget) => runHostAction(sshTarget, 'start', startNodeHost)}
               onStop={(sshTarget) => runHostAction(sshTarget, 'stop', stopNodeHost)}
               onRestart={(sshTarget) => runHostAction(sshTarget, 'restart', restartNodeHost)}
+              onRemoveConfiguredHost={onRemoveConfiguredHost ? async (selectedHost) => {
+                setRemovingHostId(selectedHost.id);
+                try {
+                  await onRemoveConfiguredHost(selectedHost);
+                  await loadOverview();
+                } finally {
+                  setRemovingHostId('');
+                }
+              } : undefined}
+              removing={removingHostId === host.id}
               pingState={host.ssh_target ? pingStates[host.ssh_target] : ''}
               actionState={host.ssh_target ? actionStates[host.ssh_target] : ''}
             />
