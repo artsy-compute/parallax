@@ -14,6 +14,7 @@ import {
   InputAdornment,
   IconButton,
   MenuItem,
+  Pagination,
   Stack,
   Tab,
   Tabs,
@@ -23,6 +24,7 @@ import {
 } from '@mui/material';
 import {
   IconCheck,
+  IconDownload,
   IconInfoCircle,
   IconLoader,
   IconPlus,
@@ -32,9 +34,11 @@ import {
 import { useCluster, useHost } from '../../services';
 import {
   addCustomModel,
+  deleteChatHistoryConversation,
   deleteCustomModel,
   deleteAllChatHistory,
   exportSettingsBundle,
+  getChatHistoryDetail,
   getChatHistoryList,
   getCustomModelList,
   getCustomModelSources,
@@ -47,6 +51,7 @@ import {
   updateAppSettings,
   type SettingsExportBundle,
   type AppClusterProfile,
+  type ChatHistorySummary,
   type CustomModelRecord,
   type CustomModelSearchResult,
   type CustomModelSourceOption,
@@ -55,6 +60,7 @@ import {
 import { useRefCallback } from '../../hooks';
 import { NodeManagementContent } from './node-management-content';
 import { JoinCommand, ModelSelect } from '../inputs';
+import { AlertDialog } from '../mui';
 
 type SettingsSectionKey = 'general' | 'cluster' | 'custom-models' | 'nodes' | 'chat' | 'advanced' | 'transfer' | 'about';
 
@@ -68,6 +74,23 @@ const SETTINGS_SECTIONS: ReadonlyArray<{ key: SettingsSectionKey; label: string 
   { key: 'transfer', label: 'Import & Export' },
   { key: 'about', label: 'About' },
 ];
+
+const CHAT_HISTORY_PAGE_SIZE = 20;
+const CHAT_HISTORY_LABEL_MAX_CHARS = 56;
+
+const cleanChatHistoryLabel = (value: string) =>
+  (value || '')
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const truncateChatHistoryLabel = (value: string, maxChars = CHAT_HISTORY_LABEL_MAX_CHARS) => {
+  if (value.length <= maxChars) {
+    return value;
+  }
+  return value.slice(0, Math.max(0, maxChars - 1)).trimEnd() + '…';
+};
 
 export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 'cluster' }) => {
   const navigate = useNavigate();
@@ -119,9 +142,15 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
   const customModelSearchRequestIdRef = useRef(0);
   const [rebalancingTopology, setRebalancingTopology] = useState(false);
   const [initializingCluster, setInitializingCluster] = useState(false);
+  const [chatHistoryItems, setChatHistoryItems] = useState<readonly ChatHistorySummary[]>([]);
   const [chatHistoryCount, setChatHistoryCount] = useState(0);
+  const [chatHistoryPage, setChatHistoryPage] = useState(1);
   const [chatHistoryLoading, setChatHistoryLoading] = useState(false);
   const [clearingChatHistory, setClearingChatHistory] = useState(false);
+  const [chatHistoryError, setChatHistoryError] = useState('');
+  const [chatHistoryExportingId, setChatHistoryExportingId] = useState('');
+  const [chatHistoryDeletingId, setChatHistoryDeletingId] = useState('');
+  const [pendingDeleteConversation, setPendingDeleteConversation] = useState<null | { id: string; label: string }>(null);
   const [nodesInventory, setNodesInventory] = useState<Array<{
     local_id: string;
     id: string;
@@ -286,6 +315,16 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     .reduce((sum, item) => sum + Math.max(0, Number(item.node?.gpuMemory || 0)), 0);
   const knownAssignedHardwareCount = assignedHostDetails.filter((item) => Number(item.node?.gpuMemory || 0) > 0).length;
   const remainingVramGap = Math.max(0, Number(modelInfo?.vram || 0) - availableAssignedVram);
+  const formatChatTimestamp = (value?: number) => {
+    if (!value) {
+      return '';
+    }
+    try {
+      return new Date(value * 1000).toLocaleString();
+    } catch {
+      return '';
+    }
+  };
   const configuredHostnames = new Set(
     nodesInventory
       .map((host) => normalizeHostname(host.hostname_hint || host.ssh_target))
@@ -408,20 +447,37 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     return null;
   })();
 
-  useEffect(() => {
-    const loadChatHistory = async () => {
-      try {
-        setChatHistoryLoading(true);
-        const history = await getChatHistoryList();
-        setChatHistoryCount(history.length);
-      } catch (error) {
-        console.error('getChatHistoryList error', error);
-      } finally {
-        setChatHistoryLoading(false);
+  const loadChatHistoryPage = useRefCallback(async (page: number) => {
+    const normalizedPage = Math.max(1, Number(page || 1));
+    try {
+      setChatHistoryLoading(true);
+      setChatHistoryError('');
+      const result = await getChatHistoryList(
+        CHAT_HISTORY_PAGE_SIZE,
+        (normalizedPage - 1) * CHAT_HISTORY_PAGE_SIZE,
+      );
+      setChatHistoryItems(result.items || []);
+      setChatHistoryCount(Number(result.total || 0));
+      const maxPage = Math.max(1, Math.ceil(Math.max(0, Number(result.total || 0)) / CHAT_HISTORY_PAGE_SIZE));
+      if (normalizedPage > maxPage) {
+        setChatHistoryPage(maxPage);
       }
-    };
-    loadChatHistory();
-  }, []);
+    } catch (error) {
+      console.error('getChatHistoryList error', error);
+      setChatHistoryItems([]);
+      setChatHistoryCount(0);
+      setChatHistoryError(error instanceof Error ? error.message : 'Failed to load chat history');
+    } finally {
+      setChatHistoryLoading(false);
+    }
+  });
+
+  useEffect(() => {
+    if (activeSection !== 'chat') {
+      return;
+    }
+    loadChatHistoryPage(chatHistoryPage);
+  }, [activeSection, chatHistoryPage, loadChatHistoryPage]);
 
   useEffect(() => {
     setClusterNameDraft(selectedCluster?.name || '');
@@ -739,16 +795,95 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
   const onClearAllChatHistory = async () => {
     try {
       setClearingChatHistory(true);
+      setChatHistoryError('');
       const result = await deleteAllChatHistory();
+      setChatHistoryItems([]);
       setChatHistoryCount(0);
+      setChatHistoryPage(1);
       if (result.deleted >= 0) {
         console.log('Deleted chat history conversations:', result.deleted);
       }
     } catch (error) {
       console.error('deleteAllChatHistory error', error);
+      setChatHistoryError(error instanceof Error ? error.message : 'Failed to clear chat history');
     } finally {
       setClearingChatHistory(false);
     }
+  };
+
+  const onExportChatConversation = async (conversation: ChatHistorySummary) => {
+    try {
+      setChatHistoryExportingId(conversation.conversation_id);
+      setChatHistoryError('');
+      const detail = await getChatHistoryDetail(conversation.conversation_id);
+      const payload = {
+        conversation_id: detail.conversation_id,
+        title: conversation.title,
+        summary: conversation.summary,
+        summary_source: detail.summary_source || conversation.summary_source || 'none',
+        created_at: detail.created_at ?? conversation.created_at,
+        updated_at: detail.updated_at ?? conversation.updated_at,
+        message_count: conversation.message_count,
+        messages: detail.messages,
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const safeTitle = String(conversation.title || conversation.conversation_id || 'conversation')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 48) || 'conversation';
+      link.href = url;
+      link.download = `${safeTitle || 'conversation'}-${conversation.conversation_id.slice(0, 8)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('getChatHistoryDetail error', error);
+      setChatHistoryError(error instanceof Error ? error.message : 'Failed to export conversation');
+    } finally {
+      setChatHistoryExportingId('');
+    }
+  };
+
+  const onDeleteChatConversation = async (conversationId: string) => {
+    try {
+      setChatHistoryDeletingId(conversationId);
+      setChatHistoryError('');
+      const result = await deleteChatHistoryConversation(conversationId);
+      if (!result.deleted) {
+        return;
+      }
+      const nextCount = Math.max(0, chatHistoryCount - 1);
+      const maxPage = Math.max(1, Math.ceil(nextCount / CHAT_HISTORY_PAGE_SIZE));
+      const nextPage = Math.min(chatHistoryPage, maxPage);
+      setChatHistoryCount(nextCount);
+      if (nextPage !== chatHistoryPage) {
+        setChatHistoryPage(nextPage);
+      } else {
+        setChatHistoryItems((prev) => prev.filter((item) => item.conversation_id !== conversationId));
+        if (chatHistoryItems.length <= 1 && nextPage > 1) {
+          setChatHistoryPage(nextPage - 1);
+        } else {
+          loadChatHistoryPage(nextPage);
+        }
+      }
+    } catch (error) {
+      console.error('deleteChatHistoryConversation error', error);
+      setChatHistoryError(error instanceof Error ? error.message : 'Failed to delete conversation');
+    } finally {
+      setChatHistoryDeletingId('');
+    }
+  };
+
+  const confirmDeleteChatConversation = async () => {
+    if (!pendingDeleteConversation) {
+      return;
+    }
+    await onDeleteChatConversation(pendingDeleteConversation.id);
+    setPendingDeleteConversation(null);
   };
 
   const closeNodeEditor = () => {
@@ -1765,12 +1900,14 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     }
 
     if (activeSection === 'chat') {
+      const chatHistoryPageCount = Math.max(1, Math.ceil(chatHistoryCount / CHAT_HISTORY_PAGE_SIZE));
       return (
-        <Stack sx={{ gap: 1 }}>
+        <Stack sx={{ gap: 1.25 }}>
           <Typography variant='h2'>Chat</Typography>
           <Typography variant='body2' color='text.secondary'>
             Manage persisted chat history for the scheduler instance.
           </Typography>
+          {chatHistoryError && <Alert severity='warning'>{chatHistoryError}</Alert>}
           <Stack direction='row' sx={{ alignItems: 'center', justifyContent: 'space-between', gap: 2 }}>
             <Typography variant='body2' color='text.secondary'>
               {chatHistoryLoading ? 'Loading chat history…' : `${chatHistoryCount} saved conversation${chatHistoryCount === 1 ? '' : 's'}`}
@@ -1779,6 +1916,133 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
               {clearingChatHistory ? 'Clearing...' : 'Clear all history'}
             </Button>
           </Stack>
+          <Stack sx={{ gap: 0.75 }}>
+            {chatHistoryLoading && (
+              <Typography variant='body2' color='text.secondary'>Loading conversation page…</Typography>
+            )}
+            {!chatHistoryLoading && chatHistoryItems.length === 0 && (
+              <Typography variant='body2' color='text.secondary'>No saved conversations yet.</Typography>
+            )}
+            {chatHistoryItems.map((conversation) => (
+              <Stack
+                key={conversation.conversation_id}
+                sx={{
+                  gap: 0.5,
+                  px: 1.25,
+                  py: 1,
+                  borderRadius: 2,
+                  border: '1px solid',
+                  borderColor: 'divider',
+                  bgcolor: 'background.paper',
+                }}
+              >
+                <Stack direction='row' sx={{ alignItems: 'flex-start', justifyContent: 'space-between', gap: 1.5 }}>
+                  <Stack sx={{ minWidth: 0, gap: 0.25, flex: 1 }}>
+                    <Typography
+                      variant='body2'
+                      sx={{
+                        minWidth: 0,
+                        display: 'flex',
+                        alignItems: 'baseline',
+                        gap: 0.75,
+                        whiteSpace: 'nowrap',
+                        overflow: 'hidden',
+                      }}
+                    >
+                      <Box component='span' sx={{ fontWeight: 600, flex: 'none' }}>
+                        {conversation.title || `Conversation ${conversation.conversation_id.slice(0, 8)}`}
+                      </Box>
+                      {(conversation.summary || conversation.last_message) && (
+                        <>
+                          <Box component='span' sx={{ color: 'text.disabled', flex: 'none' }}>|</Box>
+                          <Box
+                            component='span'
+                            sx={{
+                              color: 'text.secondary',
+                              minWidth: 0,
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                            }}
+                          >
+                            {conversation.summary || conversation.last_message}
+                          </Box>
+                        </>
+                      )}
+                    </Typography>
+                    <Stack direction='row' sx={{ gap: 0.5, flexWrap: 'wrap', pt: 0.25 }}>
+                      <Typography variant='caption' color='text.secondary'>
+                        {conversation.message_count} message{conversation.message_count === 1 ? '' : 's'}
+                      </Typography>
+                      {conversation.summary_source && conversation.summary_source !== 'none' && (
+                        <Typography variant='caption' color='text.secondary'>
+                          Summary: {conversation.summary_source}
+                        </Typography>
+                      )}
+                      {conversation.updated_at > 0 && (
+                        <Typography variant='caption' color='text.secondary'>
+                          Updated {formatChatTimestamp(conversation.updated_at)}
+                        </Typography>
+                      )}
+                    </Stack>
+                  </Stack>
+                  <Stack direction='row' sx={{ gap: 0.25, alignItems: 'center', flex: 'none' }}>
+                    <Tooltip title={chatHistoryExportingId === conversation.conversation_id ? 'Exporting conversation' : 'Export conversation JSON'}>
+                      <span>
+                        <IconButton
+                          size='small'
+                          disabled={chatHistoryExportingId === conversation.conversation_id}
+                          onClick={() => void onExportChatConversation(conversation)}
+                        >
+                          <IconDownload size={16} />
+                        </IconButton>
+                      </span>
+                    </Tooltip>
+                    <Tooltip title={chatHistoryDeletingId === conversation.conversation_id ? 'Deleting conversation' : 'Delete conversation'}>
+                      <span>
+                        <IconButton
+                          size='small'
+                          color='error'
+                          disabled={chatHistoryDeletingId === conversation.conversation_id}
+                          onClick={() => {
+                            const label = cleanChatHistoryLabel(conversation.title || conversation.last_message || '') || 'Untitled conversation';
+                            setPendingDeleteConversation({ id: conversation.conversation_id, label });
+                          }}
+                        >
+                          <IconTrash size={16} />
+                        </IconButton>
+                      </span>
+                    </Tooltip>
+                  </Stack>
+                </Stack>
+              </Stack>
+            ))}
+          </Stack>
+          {chatHistoryPageCount > 1 && (
+            <Stack direction='row' sx={{ justifyContent: 'center', pt: 0.5 }}>
+              <Pagination
+                count={chatHistoryPageCount}
+                page={Math.min(chatHistoryPage, chatHistoryPageCount)}
+                onChange={(_, page) => setChatHistoryPage(page)}
+                color='primary'
+                shape='rounded'
+              />
+            </Stack>
+          )}
+          <AlertDialog
+            open={!!pendingDeleteConversation}
+            onClose={() => setPendingDeleteConversation(null)}
+            color='warning'
+            title='Delete conversation'
+            content={
+              <Typography variant='body2'>
+                Delete {pendingDeleteConversation ? `"${truncateChatHistoryLabel(pendingDeleteConversation.label)}"` : 'this conversation'}? This cannot be undone.
+              </Typography>
+            }
+            cancelLabel='Cancel'
+            confirmLabel='Delete'
+            autoFocusAction='cancel'
+            onConfirm={confirmDeleteChatConversation}
+          />
         </Stack>
       );
     }

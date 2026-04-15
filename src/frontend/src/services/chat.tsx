@@ -180,7 +180,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     setHistoryLoading(true);
     try {
       const next = await getChatHistoryList();
-      setHistory(next);
+      setHistory(next.items);
     } catch (error) {
       console.error('getChatHistoryList error', error);
     } finally {

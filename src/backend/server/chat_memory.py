@@ -543,8 +543,12 @@ class ChatMemoryService:
             logger.info('Chat memory retrieval mode=none conversation_id=%s', conversation_id)
         return lexical
 
-    def list_conversations(self, limit: int = 50) -> List[Dict]:
+    def list_conversations(self, limit: int = 50, offset: int = 0) -> Dict:
+        normalized_limit = max(1, int(limit or 50))
+        normalized_offset = max(0, int(offset or 0))
         with self._lock, self._connect() as conn:
+            count_row = conn.execute('SELECT COUNT(*) AS count FROM conversations').fetchone()
+            total = int(count_row['count'] or 0) if count_row is not None else 0
             cur = conn.execute(
                 """
                 SELECT c.conversation_id, c.summary_text, c.summary_source, c.created_at, c.updated_at,
@@ -562,9 +566,9 @@ class ChatMemoryService:
                 LEFT JOIN messages m ON m.conversation_id = c.conversation_id
                 GROUP BY c.conversation_id, c.summary_text, c.summary_source, c.created_at, c.updated_at
                 ORDER BY c.updated_at DESC
-                LIMIT ?
+                LIMIT ? OFFSET ?
                 """,
-                (limit,),
+                (normalized_limit, normalized_offset),
             )
             rows = list(cur.fetchall())
         conversations = []
@@ -599,7 +603,12 @@ class ChatMemoryService:
                     'last_message': last_message,
                 }
             )
-        return conversations
+        return {
+            'items': conversations,
+            'total': total,
+            'limit': normalized_limit,
+            'offset': normalized_offset,
+        }
 
     def get_conversation(self, conversation_id: str) -> Dict:
         with self._lock, self._connect() as conn:

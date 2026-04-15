@@ -712,11 +712,11 @@ async def openai_v1_chat_completions(raw_request: Request):
 
 
 @app.get("/chat/history")
-async def chat_history_list(limit: int = 50):
+async def chat_history_list(limit: int = 20, offset: int = 0):
     return JSONResponse(
         content={
             "type": "chat_history_list",
-            "data": request_handler.chat_memory.list_conversations(limit=limit),
+            "data": request_handler.chat_memory.list_conversations(limit=limit, offset=offset),
         },
         status_code=200,
     )

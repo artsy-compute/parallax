@@ -293,13 +293,35 @@ export interface ChatHistoryDetail {
   readonly messages: readonly ChatHistoryMessage[];
 }
 
-export const getChatHistoryList = async (): Promise<readonly ChatHistorySummary[]> => {
-  const response = await fetch(`${API_BASE_URL}/chat/history`, { method: 'GET' });
+export const getChatHistoryList = async (
+  limit = 20,
+  offset = 0,
+): Promise<{
+  items: readonly ChatHistorySummary[];
+  total: number;
+  limit: number;
+  offset: number;
+}> => {
+  const response = await fetch(`${API_BASE_URL}/chat/history?${new URLSearchParams({ limit: String(limit), offset: String(offset) })}`, { method: 'GET' });
   const message = await parseJsonResponse(response);
   if (message.type !== 'chat_history_list') {
     throw new Error(`Invalid message type: ${message.type}.`);
   }
-  return message.data;
+  if (Array.isArray(message.data)) {
+    const items = message.data as readonly ChatHistorySummary[];
+    return {
+      items,
+      total: items.length,
+      limit,
+      offset,
+    };
+  }
+  return {
+    items: Array.isArray(message.data?.items) ? message.data.items : [],
+    total: Number(message.data?.total || 0),
+    limit: Number(message.data?.limit || limit),
+    offset: Number(message.data?.offset || offset),
+  };
 };
 
 export const getChatHistoryDetail = async (
