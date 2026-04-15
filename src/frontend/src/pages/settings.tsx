@@ -8,16 +8,11 @@ export default function PageSettings() {
   return (
     <DrawerLayout contentWidth='wide' hideConversationHistory>
       <Stack sx={{ gap: 3, minHeight: 0 }}>
-        <Stack direction='row' sx={{ alignItems: 'center', justifyContent: 'space-between', gap: 2 }}>
-          <Stack sx={{ gap: 0.5 }}>
-            <Typography variant='h3'>Settings</Typography>
-            <Typography variant='body2' color='text.secondary'>
-              Define the available node pool, then configure the active cluster with its model and startup capacity.
-            </Typography>
-          </Stack>
-          <Button component={RouterLink} to='/chat' variant='text' startIcon={<IconArrowLeft size={16} />}>
+        <Stack sx={{ gap: 1.5 }}>
+          <Button component={RouterLink} to='/chat' variant='text' startIcon={<IconArrowLeft size={16} />} sx={{ alignSelf: 'flex-start' }}>
             Back to chat
           </Button>
+          <Typography variant='h3'>Settings</Typography>
         </Stack>
         <SettingsContent routeSection={section} />
       </Stack>

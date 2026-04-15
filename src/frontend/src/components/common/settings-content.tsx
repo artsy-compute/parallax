@@ -655,7 +655,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     if (activeSection === 'general') {
       return (
         <Stack sx={{ gap: 1.25 }}>
-          <Typography variant='h6'>Overview</Typography>
+          <Typography variant='h2'>Overview</Typography>
           <Typography variant='body2' color='text.secondary'>
             Settings now separates planning from day-to-day operations. Define the available machine pool in <strong>Nodes</strong>, manage the shared model library in <strong>Custom Models</strong>, then configure each saved <strong>Cluster</strong> with its own model and startup capacity.
           </Typography>
@@ -674,7 +674,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
       return (
         <Stack sx={{ gap: 1.25 }}>
           <Stack direction='row' sx={{ alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
-            <Typography variant='h6'>Cluster</Typography>
+            <Typography variant='h2'>Cluster</Typography>
             {topologyChangeAdvisory.show && topologyChangeAdvisory.canRebalance && (
               <Button size='small' variant='outlined' color='warning' disabled={rebalancingTopology} onClick={onClickRebalanceTopology}>
                 {rebalancingTopology ? 'Rebalancing...' : 'Rebalance now'}
@@ -865,7 +865,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
       return (
         <Stack sx={{ gap: 1.25 }}>
           <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75 }}>
-            <Typography variant='h6'>Custom Models</Typography>
+            <Typography variant='h2'>Custom Models</Typography>
             <Tooltip
               title='Add Hugging Face repo ids or local model paths. These models are shared across clusters and appear in each cluster model selector.'
               placement='right'
@@ -1025,7 +1025,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     if (activeSection === 'nodes') {
       return (
         <Stack sx={{ gap: 1.25 }}>
-          <Typography variant='h6'>Nodes</Typography>
+          <Typography variant='h2'>Nodes</Typography>
           <Typography variant='body2' color='text.secondary'>
             Manage the available machine pool here. Add SSH-managed hosts when Parallax can control them directly, or add manual remote nodes when they will join on their own and this cluster cannot SSH into them.
           </Typography>
@@ -1185,7 +1185,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     if (activeSection === 'chat') {
       return (
         <Stack sx={{ gap: 1 }}>
-          <Typography variant='h6'>Chat</Typography>
+          <Typography variant='h2'>Chat</Typography>
           <Typography variant='body2' color='text.secondary'>
             Manage persisted chat history for the scheduler instance.
           </Typography>
@@ -1204,7 +1204,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     if (activeSection === 'advanced') {
       return (
         <Stack sx={{ gap: 1 }}>
-          <Typography variant='h6'>Advanced</Typography>
+          <Typography variant='h2'>Advanced</Typography>
           <Typography variant='body2' color='text.secondary'>
             Utilities for refreshing cluster metadata and navigating to operational tooling. Advanced runtime values are included in settings export/import even when they are not edited directly here yet.
           </Typography>
@@ -1230,7 +1230,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     if (activeSection === 'transfer') {
       return (
         <Stack sx={{ gap: 1.25 }}>
-          <Typography variant='h6'>Import &amp; Export</Typography>
+          <Typography variant='h2'>Import &amp; Export</Typography>
           <Typography variant='body2' color='text.secondary'>
             Export the current saved configuration as JSON, or import a JSON bundle to replace the existing saved settings. Import replaces the old configuration instead of merging it.
           </Typography>
@@ -1260,7 +1260,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
 
     return (
       <Stack sx={{ gap: 1 }}>
-        <Typography variant='h6'>About</Typography>
+        <Typography variant='h2'>About</Typography>
         <Typography variant='body2' color='text.secondary'>
           Frontend/runtime diagnostics and documentation links.
         </Typography>
@@ -1295,7 +1295,6 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
           alignSelf: { lg: 'flex-start' },
         }}
       >
-        <Typography variant='overline' color='text.secondary'>Categories</Typography>
         <Stack sx={{ gap: 0.75 }}>
           {SETTINGS_SECTIONS.map((section) => (
             <Button
