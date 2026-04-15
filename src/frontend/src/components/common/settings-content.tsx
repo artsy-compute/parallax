@@ -5,6 +5,7 @@ import {
   Autocomplete,
   Box,
   Button,
+  Checkbox,
   Chip,
   CircularProgress,
   IconButton,
@@ -41,7 +42,7 @@ import {
 } from '../../services/api';
 import { useRefCallback } from '../../hooks';
 import { NodeManagementContent } from './node-management-content';
-import { JoinCommand, ModelSelect, NumberInput } from '../inputs';
+import { JoinCommand, ModelSelect } from '../inputs';
 
 type SettingsSectionKey = 'general' | 'cluster' | 'custom-models' | 'nodes' | 'chat' | 'advanced' | 'transfer' | 'about';
 
@@ -68,6 +69,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
         initNodesNumber: clusterInitNodesNumber,
         modelName: clusterModelName,
       },
+      nodeInfoList,
     },
     {
       config: { setNetworkType, setInitNodesNumber },
@@ -99,12 +101,32 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
   const [chatHistoryCount, setChatHistoryCount] = useState(0);
   const [chatHistoryLoading, setChatHistoryLoading] = useState(false);
   const [clearingChatHistory, setClearingChatHistory] = useState(false);
-  const [nodesInventory, setNodesInventory] = useState<Array<{ local_id: string; ssh_target: string; parallax_path: string }>>([]);
+  const [nodesInventory, setNodesInventory] = useState<Array<{
+    local_id: string;
+    id: string;
+    display_name: string;
+    ssh_target: string;
+    parallax_path: string;
+    hostname_hint: string;
+    joined: boolean;
+    management_mode: 'ssh_managed' | 'manual';
+    network_scope: 'local' | 'remote';
+    linked_clusters: readonly { id: string; name: string }[];
+    linked_cluster_ids: readonly string[];
+    linked_cluster_names: readonly string[];
+    linked_cluster_count: number;
+  }>>([]);
   const [nodesInventoryLoading, setNodesInventoryLoading] = useState(false);
   const [nodesInventorySaving, setNodesInventorySaving] = useState(false);
   const [nodesInventoryMessage, setNodesInventoryMessage] = useState('');
   const [hostEditorOpen, setHostEditorOpen] = useState(false);
   const [hostDraft, setHostDraft] = useState<{ ssh_target: string; parallax_path: string }>({ ssh_target: '', parallax_path: '' });
+  const [manualNodeEditorOpen, setManualNodeEditorOpen] = useState(false);
+  const [manualNodeDraft, setManualNodeDraft] = useState<{ display_name: string; hostname_hint: string; network_scope: 'local' | 'remote' }>({
+    display_name: '',
+    hostname_hint: '',
+    network_scope: 'remote',
+  });
   const [buildStatus, setBuildStatus] = useState<any | null>(null);
   const [buildStatusLoading, setBuildStatusLoading] = useState(false);
   const [clusterNameDraft, setClusterNameDraft] = useState('');
@@ -119,6 +141,43 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     inventoryRowIdRef.current += 1;
     return `inventory-row-${inventoryRowIdRef.current}`;
   };
+  const normalizeHostname = (value: string) => {
+    let text = String(value || '').trim().toLowerCase();
+    if (!text) {
+      return '';
+    }
+    if (text.includes('@')) {
+      text = text.split('@', 2)[1] || '';
+    }
+    if (text.startsWith('[')) {
+      const closing = text.indexOf(']');
+      if (closing > 0) {
+        return text.slice(1, closing).trim().toLowerCase();
+      }
+    }
+    if (text.split(':').length === 2) {
+      const [host, port] = text.split(':');
+      if (port && /^\d+$/.test(port)) {
+        text = host || '';
+      }
+    }
+    return text.trim().toLowerCase();
+  };
+  const mapInventoryHost = (host: Awaited<ReturnType<typeof getNodesInventory>>['hosts'][number]) => ({
+    local_id: nextInventoryRowId(),
+    id: host.id || '',
+    display_name: host.display_name || host.ssh_target || host.hostname_hint || '',
+    ssh_target: host.ssh_target || '',
+    parallax_path: host.parallax_path || '',
+    hostname_hint: host.hostname_hint || '',
+    joined: !!host.joined,
+    management_mode: host.management_mode || 'ssh_managed',
+    network_scope: host.network_scope || 'remote',
+    linked_clusters: host.linked_clusters || [],
+    linked_cluster_ids: host.linked_cluster_ids || [],
+    linked_cluster_names: host.linked_cluster_names || [],
+    linked_cluster_count: Number(host.linked_cluster_count || 0),
+  });
   const loadCustomModels = async () => {
     try {
       setCustomModelLoading(true);
@@ -142,6 +201,24 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     : 'cluster';
 
   const selectedCluster = clusterProfiles.find((item) => item.id === activeClusterId) || clusterProfiles[0];
+  const selectedClusterAssignedNodeIds = new Set(selectedCluster?.assigned_node_ids || []);
+  const availableNodeByHostname = new Map(
+    nodeInfoList
+      .filter((node) => node.status === 'available')
+      .map((node) => [normalizeHostname(node.hostname), node] as const)
+      .filter(([hostname]) => !!hostname),
+  );
+  const assignedHosts = nodesInventory.filter((host) => selectedClusterAssignedNodeIds.has(host.id));
+  const assignedHostDetails = assignedHosts.map((host) => ({
+    host,
+    node: availableNodeByHostname.get(normalizeHostname(host.hostname_hint || host.ssh_target)),
+  }));
+  const availableAssignedHosts = assignedHosts.filter((host) => host.joined);
+  const availableAssignedVram = assignedHostDetails
+    .filter((item) => item.host.joined)
+    .reduce((sum, item) => sum + Math.max(0, Number(item.node?.gpuMemory || 0)), 0);
+  const knownAssignedHardwareCount = assignedHostDetails.filter((item) => Number(item.node?.gpuMemory || 0) > 0).length;
+  const remainingVramGap = Math.max(0, Number(modelInfo?.vram || 0) - availableAssignedVram);
 
   useEffect(() => {
     const loadChatHistory = async () => {
@@ -167,13 +244,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
       setNodesInventoryLoading(true);
       setNodesInventoryMessage('');
       const result = await getNodesInventory();
-      setNodesInventory(
-        (result.hosts || []).map((host) => ({
-          local_id: nextInventoryRowId(),
-          ssh_target: host.ssh_target || '',
-          parallax_path: host.parallax_path || '',
-        })),
-      );
+      setNodesInventory((result.hosts || []).map(mapInventoryHost));
     } catch (error) {
       setNodesInventoryMessage(error instanceof Error ? error.message : 'Failed to load configured node inventory');
     } finally {
@@ -354,6 +425,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     const source = selectedCluster || {
       model_name: selectedModelName,
       init_nodes_num: initNodesNumber,
+      assigned_node_ids: [],
       is_local_network: networkType === 'local',
       network_type: networkType,
       advanced: {},
@@ -362,7 +434,8 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
       id: `cluster-${Date.now()}`,
       name: `Cluster ${nextIndex}`,
       model_name: String(source.model_name || ''),
-      init_nodes_num: Math.max(1, Number(source.init_nodes_num || 1)),
+      init_nodes_num: Math.max(1, Number((source.assigned_node_ids || []).length || source.init_nodes_num || 1)),
+      assigned_node_ids: [...(source.assigned_node_ids || [])],
       is_local_network: source.network_type === 'remote' ? false : true,
       network_type: source.network_type === 'remote' ? 'remote' : 'local',
       advanced: { ...(source.advanced || {}) },
@@ -410,7 +483,16 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
 
   const updateInventoryRow = (localId: string, patch: Partial<{ ssh_target: string; parallax_path: string }>) => {
     setNodesInventory((prev) =>
-      prev.map((item) => (item.local_id === localId ? { ...item, ...patch } : item)),
+      prev.map((item) => (
+        item.local_id === localId
+          ? {
+            ...item,
+            ...patch,
+            display_name: patch.ssh_target !== undefined && item.management_mode === 'ssh_managed' ? patch.ssh_target : item.display_name,
+            hostname_hint: patch.ssh_target !== undefined ? normalizeHostname(patch.ssh_target) : item.hostname_hint,
+          }
+          : item
+      )),
     );
   };
 
@@ -422,10 +504,52 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     }
     setNodesInventory((prev) => [
       ...prev,
-      { local_id: nextInventoryRowId(), ssh_target: sshTarget, parallax_path: parallaxPath },
+      {
+        local_id: nextInventoryRowId(),
+        id: '',
+        display_name: sshTarget,
+        ssh_target: sshTarget,
+        parallax_path: parallaxPath,
+        hostname_hint: normalizeHostname(sshTarget),
+        joined: false,
+        management_mode: 'ssh_managed',
+        network_scope: 'remote',
+        linked_clusters: [],
+        linked_cluster_ids: [],
+        linked_cluster_names: [],
+        linked_cluster_count: 0,
+      },
     ]);
     setHostDraft({ ssh_target: '', parallax_path: '' });
     setHostEditorOpen(false);
+  };
+
+  const onAddManualNodeDraft = () => {
+    const hostnameHint = normalizeHostname(manualNodeDraft.hostname_hint);
+    const displayName = manualNodeDraft.display_name.trim() || hostnameHint;
+    if (!hostnameHint) {
+      return;
+    }
+    setNodesInventory((prev) => [
+      ...prev,
+      {
+        local_id: nextInventoryRowId(),
+        id: '',
+        display_name: displayName,
+        ssh_target: '',
+        parallax_path: '',
+        hostname_hint: hostnameHint,
+        joined: false,
+        management_mode: 'manual',
+        network_scope: manualNodeDraft.network_scope,
+        linked_clusters: [],
+        linked_cluster_ids: [],
+        linked_cluster_names: [],
+        linked_cluster_count: 0,
+      },
+    ]);
+    setManualNodeDraft({ display_name: '', hostname_hint: '', network_scope: 'remote' });
+    setManualNodeEditorOpen(false);
   };
 
   const onSaveNodesInventory = async () => {
@@ -434,17 +558,17 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
       setNodesInventoryMessage('');
       const result = await updateNodesInventory(
         nodesInventory.map((item) => ({
+          id: item.id || undefined,
+          display_name: item.display_name || undefined,
           ssh_target: item.ssh_target.trim(),
           parallax_path: item.parallax_path.trim(),
+          hostname_hint: item.hostname_hint || undefined,
+          management_mode: item.management_mode,
+          network_scope: item.network_scope,
         })),
       );
-      setNodesInventory(
-        (result.hosts || []).map((host) => ({
-          local_id: nextInventoryRowId(),
-          ssh_target: host.ssh_target || '',
-          parallax_path: host.parallax_path || '',
-        })),
-      );
+      setNodesInventory((result.hosts || []).map(mapInventoryHost));
+      await reloadSettings();
       setNodesInventoryMessage(result.message || 'Configured node inventory saved');
     } catch (error) {
       setNodesInventoryMessage(error instanceof Error ? error.message : 'Failed to save node inventory');
@@ -503,6 +627,30 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     }
   };
 
+  const onToggleAssignedNode = async (hostId: string) => {
+    if (!selectedCluster || !hostId) {
+      return;
+    }
+    const nextAssignedIds = new Set(selectedCluster.assigned_node_ids || []);
+    if (nextAssignedIds.has(hostId)) {
+      nextAssignedIds.delete(hostId);
+    } else {
+      nextAssignedIds.add(hostId);
+    }
+    await applyClusterProfilesState(
+      clusterProfiles.map((cluster) => (
+        cluster.id === selectedCluster.id
+          ? {
+            ...cluster,
+            assigned_node_ids: Array.from(nextAssignedIds),
+            init_nodes_num: Math.max(1, nextAssignedIds.size),
+          }
+          : cluster
+      )),
+      selectedCluster.id,
+    );
+  };
+
   const renderSectionContent = () => {
     if (activeSection === 'general') {
       return (
@@ -534,7 +682,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
             )}
           </Stack>
           <Typography variant='body2' color='text.secondary'>
-            A saved cluster profile combines model choice and startup capacity into one scheduler configuration. Parallax runs one active cluster at a time, but you can keep multiple cluster definitions here and switch between them.
+            A saved cluster profile combines model choice, assigned nodes, and startup capacity into one scheduler configuration. Parallax runs one active cluster at a time, but you can keep multiple cluster definitions here and switch between them.
           </Typography>
           <Stack sx={{ gap: 1 }}>
             <Typography variant='body1'>Saved clusters</Typography>
@@ -587,32 +735,123 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
             </Alert>
           )}
           <Typography variant='body2' color='text.secondary'>
-            Define the model for this saved cluster, then set the initial number of joined nodes the scheduler should plan around from the available node pool you defined in Nodes. Additional nodes can join later, but topology expansion is not free and may require rebalancing.
+            Define the model for this saved cluster, assign which nodes it may use, and then set the initial number of joined nodes the scheduler should plan around. Node overlap across saved clusters is allowed, but it is your decision to keep or remove that overlap.
           </Typography>
-          <Stack direction='row' sx={{ justifyContent: 'space-between', alignItems: 'center', gap: 2 }}>
-            <Typography color='text.secondary'>Startup node target</Typography>
-            <NumberInput
-              sx={{ width: '10rem', boxShadow: 'none', bgcolor: 'transparent' }}
-              slotProps={{
-                root: { sx: { bgcolor: 'transparent', '&:hover': { bgcolor: 'transparent' }, '&:focus-within': { bgcolor: 'transparent' } } },
-                input: { sx: { bgcolor: 'transparent !important', '&:focus': { outline: 'none' } } },
-              }}
-              value={initNodesNumber}
-              onChange={(e) => setInitNodesNumber(Number(e.target.value))}
-            />
+          <Stack sx={{ gap: 1 }}>
+            <Typography variant='body1'>Assigned nodes</Typography>
+            <Typography variant='body2' color='text.secondary'>
+              Only assigned nodes are intended to serve this cluster. Unassigned nodes stay out of the shard pool for this saved cluster.
+            </Typography>
+            {nodesInventory.length === 0 && (
+              <Alert severity='info'>
+                No managed hosts are defined yet. Add nodes in <strong>Settings &gt; Nodes</strong> before assigning them to this cluster.
+              </Alert>
+            )}
+            {nodesInventory.length > 0 && (
+              <Stack sx={{ gap: 1, maxHeight: '18rem', overflowY: 'auto', pr: 0.5 }}>
+                {nodesInventory.map((host) => {
+                  const linkedOtherClusters = host.linked_clusters.filter((cluster) => cluster.id !== selectedCluster?.id);
+                  const assignedHere = selectedClusterAssignedNodeIds.has(host.id);
+                  return (
+                    <Stack
+                      key={host.id || host.local_id}
+                      direction='row'
+                      sx={{
+                        alignItems: 'flex-start',
+                        justifyContent: 'space-between',
+                        gap: 1,
+                        px: 1.25,
+                        py: 1,
+                        borderRadius: 2,
+                        border: '1px solid',
+                        borderColor: assignedHere ? 'primary.main' : 'divider',
+                        bgcolor: assignedHere ? 'action.selected' : 'background.paper',
+                      }}
+                    >
+                      <Stack sx={{ minWidth: 0, flex: 1, gap: 0.5 }}>
+                        <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75, flexWrap: 'wrap' }}>
+                          <Checkbox
+                            size='small'
+                            checked={assignedHere}
+                            onChange={() => void onToggleAssignedNode(host.id)}
+                            sx={{ p: 0, mr: 0.5 }}
+                          />
+                          <Typography variant='body2' sx={{ fontWeight: 600 }}>
+                            {host.display_name || host.ssh_target || host.hostname_hint || 'Unnamed host'}
+                          </Typography>
+                          <Chip size='small' variant='outlined' label={host.management_mode === 'manual' ? 'Manual' : 'SSH managed'} />
+                          <Chip size='small' variant='outlined' label={host.network_scope === 'local' ? 'Local' : 'Remote'} />
+                          {host.joined
+                            ? <Chip size='small' color='success' label='Online' />
+                            : <Chip size='small' variant='outlined' label='Offline' />}
+                          {linkedOtherClusters.length > 0 && (
+                            <Chip
+                              size='small'
+                              color='warning'
+                              variant='outlined'
+                              label={linkedOtherClusters.length === 1 ? 'Used elsewhere' : `Used by ${linkedOtherClusters.length} clusters`}
+                            />
+                          )}
+                        </Stack>
+                        {host.parallax_path && (
+                          <Typography variant='caption' color='text.secondary'>
+                            PARALLAX_PATH: {host.parallax_path}
+                          </Typography>
+                        )}
+                        {host.management_mode === 'manual' && (
+                          <Typography variant='caption' color='text.secondary'>
+                            Manual node: Parallax cannot SSH into or restart this node.
+                          </Typography>
+                        )}
+                        <Stack direction='row' sx={{ gap: 0.5, flexWrap: 'wrap' }}>
+                          {host.linked_cluster_count === 0 && <Chip size='small' variant='outlined' label='Unassigned' />}
+                          {host.linked_clusters.map((cluster) => (
+                            <Chip
+                              key={`${host.id}-${cluster.id}`}
+                              size='small'
+                              color={cluster.id === selectedCluster?.id ? 'primary' : 'default'}
+                              variant={cluster.id === selectedCluster?.id ? 'filled' : 'outlined'}
+                              label={cluster.name}
+                            />
+                          ))}
+                        </Stack>
+                      </Stack>
+                    </Stack>
+                  );
+                })}
+              </Stack>
+            )}
           </Stack>
-          <Stack direction='row' sx={{ justifyContent: 'space-between', alignItems: 'center', gap: 2 }}>
-            <Typography color='text.secondary'>Are your nodes within the same local network?</Typography>
-            <Stack direction='row' sx={{ gap: 1 }}>
-              <Button variant={networkType === 'local' ? 'contained' : 'outlined'} onClick={() => setNetworkType('local')} sx={{ minWidth: '5rem' }}>Local</Button>
-              <Button variant={networkType === 'remote' ? 'contained' : 'outlined'} onClick={() => setNetworkType('remote')} sx={{ minWidth: '5rem' }}>Remote</Button>
+          <Stack sx={{ gap: 0.75 }}>
+            <Typography variant='body1'>Capacity summary</Typography>
+            <Stack direction={{ xs: 'column', md: 'row' }} sx={{ gap: 1, flexWrap: 'wrap' }}>
+              <Chip color='default' variant='outlined' label={`${assignedHosts.length} assigned`} />
+              <Chip color={availableAssignedHosts.length > 0 ? 'success' : 'default'} variant='outlined' label={`${availableAssignedHosts.length} online now`} />
+              <Chip color='default' variant='outlined' label={`startup target ${Math.max(1, assignedHosts.length)}`} />
+              <Chip color='info' variant='outlined' label={`${availableAssignedVram} GB live VRAM`} />
+              {modelInfo && modelInfo.vram > 0 && <Chip color='warning' variant='outlined' label={`${modelInfo.vram} GB required`} />}
             </Stack>
+            {selectedClusterAssignedNodeIds.size > 0 && (
+              <Typography variant='caption' color='text.secondary'>
+                Using currently reporting live node hardware for VRAM totals. Hardware is known for {knownAssignedHardwareCount}/{assignedHosts.length} assigned node{assignedHosts.length === 1 ? '' : 's'}.
+              </Typography>
+            )}
+            {!modelInfo || modelInfo.vram <= 0 ? (
+              <Alert severity='info'>Model VRAM requirement is unknown, so Parallax cannot confirm cluster capacity yet.</Alert>
+            ) : selectedClusterAssignedNodeIds.size === 0 ? (
+              <Alert severity='warning'>No nodes are assigned to this cluster yet.</Alert>
+            ) : availableAssignedVram >= modelInfo.vram ? (
+              <Alert severity='success'>Assigned live nodes currently report enough VRAM for this model.</Alert>
+            ) : (
+              <Alert severity='warning'>
+                Assigned live nodes currently report {availableAssignedVram} GB, about {remainingVramGap} GB short of the model requirement.
+              </Alert>
+            )}
           </Stack>
           <Alert severity='info'>
-            Startup node target is used for initial allocation. If more nodes arrive later, Parallax can extend capacity, but adding nodes may trigger layer movement and temporary performance churn while the scheduler rebalances.
+            Startup planning now follows the assigned-node list automatically. If more assigned nodes arrive later, Parallax can extend capacity, but adding nodes may trigger layer movement and temporary performance churn while the scheduler rebalances.
           </Alert>
           {topologyChangeAdvisory.show && <Alert severity='warning'>{topologyChangeAdvisory.message}</Alert>}
-          <JoinCommand />
           <Stack direction='row' sx={{ justifyContent: 'flex-end' }}>
             <Button variant='contained' onClick={onContinueToJoin} disabled={initializingCluster}>
               {initializingCluster ? 'Starting cluster...' : 'Continue to node join'}
@@ -788,17 +1027,64 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
         <Stack sx={{ gap: 1.25 }}>
           <Typography variant='h6'>Nodes</Typography>
           <Typography variant='body2' color='text.secondary'>
-            Manage the available machine pool here. The inventory editor defines which SSH-reachable hosts the scheduler can use, and the live host rows below are the operational view of that same pool.
+            Manage the available machine pool here. Add SSH-managed hosts when Parallax can control them directly, or add manual remote nodes when they will join on their own and this cluster cannot SSH into them.
           </Typography>
+          <Stack sx={{ gap: 0.75 }}>
+            <Typography variant='body1'>Join command</Typography>
+            <Typography variant='body2' color='text.secondary'>
+              Use this command to bring additional nodes into the currently active cluster or to reconnect nodes during recovery.
+            </Typography>
+            <JoinCommand />
+          </Stack>
           {nodesInventoryMessage && <Alert severity='info'>{nodesInventoryMessage}</Alert>}
           <Stack sx={{ gap: 1 }}>
             {nodesInventoryLoading && <Typography variant='body2' color='text.secondary'>Loading configured node inventory…</Typography>}
             {!nodesInventoryLoading && nodesInventory.length === 0 && <Typography variant='body2' color='text.secondary'>No configured node hosts yet.</Typography>}
-            {nodesInventory.map((host, index) => (
-              <Stack key={host.local_id} direction={{ xs: 'column', md: 'row' }} sx={{ gap: 1 }}>
-                <TextField label='SSH target' size='small' fullWidth value={host.ssh_target} onChange={(event) => updateInventoryRow(host.local_id, { ssh_target: event.target.value })} placeholder='user@host' />
-                <TextField label='PARALLAX_PATH' size='small' fullWidth value={host.parallax_path} onChange={(event) => updateInventoryRow(host.local_id, { parallax_path: event.target.value })} placeholder='/path/to/parallax' />
-                <Button color='error' variant='text' onClick={() => setNodesInventory((prev) => prev.filter((item) => item.local_id !== host.local_id))}>Remove</Button>
+            {nodesInventory.map((host) => (
+              <Stack key={host.local_id} sx={{ gap: 0.75 }}>
+                <Stack direction={{ xs: 'column', md: 'row' }} sx={{ gap: 1 }}>
+                  {host.management_mode === 'ssh_managed' ? (
+                    <>
+                      <TextField label='SSH target' size='small' fullWidth value={host.ssh_target} onChange={(event) => updateInventoryRow(host.local_id, { ssh_target: event.target.value })} placeholder='user@host' />
+                      <TextField label='PARALLAX_PATH' size='small' fullWidth value={host.parallax_path} onChange={(event) => updateInventoryRow(host.local_id, { parallax_path: event.target.value })} placeholder='/path/to/parallax' />
+                    </>
+                  ) : (
+                    <>
+                      <TextField
+                        label='Node name'
+                        size='small'
+                        fullWidth
+                        value={host.display_name}
+                        onChange={(event) => setNodesInventory((prev) => prev.map((item) => item.local_id === host.local_id ? { ...item, display_name: event.target.value } : item))}
+                        placeholder='Remote GPU node'
+                      />
+                      <TextField
+                        label='Hostname hint'
+                        size='small'
+                        fullWidth
+                        value={host.hostname_hint}
+                        onChange={(event) => setNodesInventory((prev) => prev.map((item) => item.local_id === host.local_id ? { ...item, hostname_hint: normalizeHostname(event.target.value) } : item))}
+                        placeholder='node-12'
+                      />
+                    </>
+                  )}
+                  <Button color='error' variant='text' onClick={() => setNodesInventory((prev) => prev.filter((item) => item.local_id !== host.local_id))}>Remove</Button>
+                </Stack>
+                <Stack direction='row' sx={{ gap: 0.5, flexWrap: 'wrap', pl: 0.25 }}>
+                  <Chip size='small' variant='outlined' label={host.management_mode === 'manual' ? 'Manual' : 'SSH managed'} />
+                  <Chip size='small' variant='outlined' label={host.network_scope === 'local' ? 'Local' : 'Remote'} />
+                  {host.linked_cluster_count === 0 && <Chip size='small' variant='outlined' label='Unassigned' />}
+                  {host.linked_clusters.map((cluster) => (
+                    <Chip
+                      key={`${host.id || host.local_id}-${cluster.id}`}
+                      size='small'
+                      color={cluster.id === activeClusterId ? 'primary' : 'default'}
+                      variant={cluster.id === activeClusterId ? 'filled' : 'outlined'}
+                      label={cluster.name}
+                    />
+                  ))}
+                  {host.joined && <Chip size='small' color='success' variant='outlined' label='Online' />}
+                </Stack>
               </Stack>
             ))}
             <Stack direction='row' sx={{ gap: 1, justifyContent: 'space-between' }}>
@@ -834,6 +1120,51 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                       onClick={() => {
                         setHostEditorOpen(false);
                         setHostDraft({ ssh_target: '', parallax_path: '' });
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                  </Stack>
+                )}
+                {!manualNodeEditorOpen && (
+                  <Stack direction='row' sx={{ justifyContent: 'flex-start' }}>
+                    <Button variant='outlined' onClick={() => setManualNodeEditorOpen(true)}>Add manual remote node</Button>
+                  </Stack>
+                )}
+                {manualNodeEditorOpen && (
+                  <Stack direction={{ xs: 'column', md: 'row' }} sx={{ gap: 1 }}>
+                    <TextField
+                      label='Node name'
+                      size='small'
+                      fullWidth
+                      value={manualNodeDraft.display_name}
+                      onChange={(event) => setManualNodeDraft((prev) => ({ ...prev, display_name: event.target.value }))}
+                      placeholder='Remote GPU node'
+                    />
+                    <TextField
+                      label='Hostname hint'
+                      size='small'
+                      fullWidth
+                      value={manualNodeDraft.hostname_hint}
+                      onChange={(event) => setManualNodeDraft((prev) => ({ ...prev, hostname_hint: event.target.value }))}
+                      placeholder='node-12'
+                    />
+                    <Stack direction='row' sx={{ gap: 1 }}>
+                      <Button variant={manualNodeDraft.network_scope === 'remote' ? 'contained' : 'outlined'} onClick={() => setManualNodeDraft((prev) => ({ ...prev, network_scope: 'remote' }))}>
+                        Remote
+                      </Button>
+                      <Button variant={manualNodeDraft.network_scope === 'local' ? 'contained' : 'outlined'} onClick={() => setManualNodeDraft((prev) => ({ ...prev, network_scope: 'local' }))}>
+                        Local
+                      </Button>
+                    </Stack>
+                    <Button variant='contained' onClick={onAddManualNodeDraft} disabled={!manualNodeDraft.hostname_hint.trim()}>
+                      Add remote node
+                    </Button>
+                    <Button
+                      variant='text'
+                      onClick={() => {
+                        setManualNodeEditorOpen(false);
+                        setManualNodeDraft({ display_name: '', hostname_hint: '', network_scope: 'remote' });
                       }}
                     >
                       Cancel
@@ -877,6 +1208,16 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
           <Typography variant='body2' color='text.secondary'>
             Utilities for refreshing cluster metadata and navigating to operational tooling. Advanced runtime values are included in settings export/import even when they are not edited directly here yet.
           </Typography>
+          <Stack sx={{ gap: 1 }}>
+            <Typography variant='body1'>Cluster networking mode</Typography>
+            <Typography variant='body2' color='text.secondary'>
+              This remains a cluster-wide startup setting for now. Local is for same-network discovery; remote uses the relay-assisted path.
+            </Typography>
+            <Stack direction='row' sx={{ gap: 1, flexWrap: 'wrap' }}>
+              <Button variant={networkType === 'local' ? 'contained' : 'outlined'} onClick={() => setNetworkType('local')} sx={{ minWidth: '5rem' }}>Local</Button>
+              <Button variant={networkType === 'remote' ? 'contained' : 'outlined'} onClick={() => setNetworkType('remote')} sx={{ minWidth: '5rem' }}>Remote</Button>
+            </Stack>
+          </Stack>
           <Stack direction='row' sx={{ gap: 1, flexWrap: 'wrap' }}>
             <Button variant='outlined' onClick={() => refreshModelList()}>Refresh model catalog</Button>
             <Button component={RouterLink} to='/join' variant='outlined'>Open reconnect flow</Button>
@@ -962,7 +1303,28 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
               variant={activeSection === section.key ? 'contained' : 'text'}
               color={activeSection === section.key ? 'primary' : 'inherit'}
               onClick={() => openSection(section.key)}
-              sx={{ justifyContent: 'flex-start', borderRadius: 2 }}
+              sx={{
+                justifyContent: 'flex-start',
+                borderRadius: 2,
+                textTransform: 'none',
+                fontSize: '0.95rem',
+                lineHeight: 1.25,
+                fontWeight: activeSection === section.key ? 700 : 500,
+                letterSpacing: 0,
+                px: 1.5,
+                py: 1,
+                minHeight: '2.5rem',
+                color: activeSection === section.key ? 'primary.contrastText' : 'text.secondary',
+                transition: 'background-color .15s ease, color .15s ease, transform .15s ease',
+                '&.MuiButton-root': {
+                  fontSize: '0.95rem',
+                  lineHeight: 1.25,
+                },
+                '&:hover': {
+                  bgcolor: activeSection === section.key ? undefined : 'action.hover',
+                  transform: 'translateX(2px)',
+                },
+              }}
             >
               {section.label}
             </Button>

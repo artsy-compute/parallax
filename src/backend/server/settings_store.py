@@ -75,9 +75,16 @@ class SettingsStore:
             'name': 'Primary cluster',
             'model_name': '',
             'init_nodes_num': 1,
+            'assigned_node_ids': [],
             'is_local_network': True,
             'network_type': 'local',
             'advanced': {},
+        }
+
+    @staticmethod
+    def _default_manual_node_inventory() -> dict[str, Any]:
+        return {
+            'nodes': [],
         }
 
     @classmethod
@@ -91,6 +98,16 @@ class SettingsStore:
             normalized['init_nodes_num'] = max(1, int(raw.get('init_nodes_num') or 1))
         except Exception:
             normalized['init_nodes_num'] = 1
+        assigned_node_ids = raw.get('assigned_node_ids')
+        normalized['assigned_node_ids'] = []
+        seen_node_ids: set[str] = set()
+        if isinstance(assigned_node_ids, list):
+            for item in assigned_node_ids:
+                node_id = str(item or '').strip()
+                if not node_id or node_id in seen_node_ids:
+                    continue
+                seen_node_ids.add(node_id)
+                normalized['assigned_node_ids'].append(node_id)
         normalized['is_local_network'] = bool(raw.get('is_local_network', True))
         network_type = str(raw.get('network_type') or '').strip().lower()
         if network_type not in {'local', 'remote'}:
@@ -170,6 +187,16 @@ class SettingsStore:
             )
             conn.commit()
 
+    @staticmethod
+    def _normalize_management_mode(value: str) -> str:
+        normalized = str(value or '').strip().lower()
+        return 'manual' if normalized == 'manual' else 'ssh_managed'
+
+    @staticmethod
+    def _normalize_network_scope(value: str) -> str:
+        normalized = str(value or '').strip().lower()
+        return 'local' if normalized == 'local' else 'remote'
+
     def get_cluster_settings(self) -> dict[str, Any]:
         state = self.get_clusters_state()
         active_cluster_id = str(state.get('active_cluster_id') or '')
@@ -227,6 +254,22 @@ class SettingsStore:
         self._set_json('cluster_settings', active_cluster)
         return normalized
 
+    def _filter_cluster_assignments(self, clusters: list[dict[str, Any]], valid_host_ids: set[str]) -> list[dict[str, Any]]:
+        filtered_clusters: list[dict[str, Any]] = []
+        for cluster in clusters or []:
+            filtered = dict(cluster or {})
+            assigned_node_ids = filtered.get('assigned_node_ids')
+            if isinstance(assigned_node_ids, list):
+                filtered['assigned_node_ids'] = [
+                    str(item).strip()
+                    for item in assigned_node_ids
+                    if str(item).strip() and str(item).strip() in valid_host_ids
+                ]
+            else:
+                filtered['assigned_node_ids'] = []
+            filtered_clusters.append(filtered)
+        return filtered_clusters
+
     def replace_clusters_state(self, clusters: list[dict[str, Any]], active_cluster_id: str | None = None) -> dict[str, Any]:
         return self._save_clusters_state({
             'active_cluster_id': str(active_cluster_id or '').strip(),
@@ -245,6 +288,21 @@ class SettingsStore:
 
     def list_managed_node_hosts(self, joined_hostnames: set[str] | None = None) -> list[dict[str, Any]]:
         joined_hostnames = {str(item or '').strip().lower() for item in (joined_hostnames or set()) if str(item or '').strip()}
+        clusters_state = self.get_clusters_state()
+        linked_clusters_by_host_id: dict[str, list[dict[str, str]]] = {}
+        for cluster in clusters_state.get('clusters') or []:
+            cluster_id = str(cluster.get('id') or '').strip()
+            cluster_name = str(cluster.get('name') or '').strip() or cluster_id
+            for host_id in cluster.get('assigned_node_ids') or []:
+                normalized_host_id = str(host_id or '').strip()
+                if not normalized_host_id:
+                    continue
+                linked_clusters_by_host_id.setdefault(normalized_host_id, []).append(
+                    {
+                        'id': cluster_id,
+                        'name': cluster_name,
+                    }
+                )
         with self._lock, self._connect() as conn:
             rows = conn.execute(
                 """
@@ -255,24 +313,83 @@ class SettingsStore:
             ).fetchall()
         hosts: list[dict[str, Any]] = []
         for index, row in enumerate(rows, start=1):
+            host_id = str(row['id'] or '')
             hostname_hint = str(row['hostname_hint'] or '')
+            linked_clusters = linked_clusters_by_host_id.get(host_id, [])
             hosts.append(
                 {
-                    'id': str(row['id'] or ''),
+                    'id': host_id,
+                    'display_name': str(row['ssh_target'] or ''),
                     'ssh_target': str(row['ssh_target'] or ''),
                     'parallax_path': str(row['parallax_path'] or ''),
                     'hostname_hint': hostname_hint,
                     'line_number': index,
                     'joined': bool(hostname_hint) and hostname_hint in joined_hostnames,
+                    'management_mode': 'ssh_managed',
+                    'network_scope': 'remote',
+                    'linked_clusters': linked_clusters,
+                    'linked_cluster_ids': [item['id'] for item in linked_clusters],
+                    'linked_cluster_names': [item['name'] for item in linked_clusters],
+                    'linked_cluster_count': len(linked_clusters),
                 }
             )
+        manual_inventory = self._get_json('manual_node_inventory', self._default_manual_node_inventory())
+        raw_manual_nodes = manual_inventory.get('nodes')
+        if isinstance(raw_manual_nodes, list):
+            start_index = len(hosts)
+            for offset, raw in enumerate(raw_manual_nodes, start=1):
+                if not isinstance(raw, dict):
+                    continue
+                host_id = str(raw.get('id') or '').strip()
+                hostname_hint = self._normalize_hostname(str(raw.get('hostname_hint') or ''))
+                display_name = str(raw.get('display_name') or hostname_hint or f'Manual node {offset}').strip()
+                if not host_id or not hostname_hint:
+                    continue
+                linked_clusters = linked_clusters_by_host_id.get(host_id, [])
+                hosts.append(
+                    {
+                        'id': host_id,
+                        'display_name': display_name,
+                        'ssh_target': '',
+                        'parallax_path': '',
+                        'hostname_hint': hostname_hint,
+                        'line_number': start_index + offset,
+                        'joined': bool(hostname_hint) and hostname_hint in joined_hostnames,
+                        'management_mode': 'manual',
+                        'network_scope': self._normalize_network_scope(str(raw.get('network_scope') or 'remote')),
+                        'linked_clusters': linked_clusters,
+                        'linked_cluster_ids': [item['id'] for item in linked_clusters],
+                        'linked_cluster_names': [item['name'] for item in linked_clusters],
+                        'linked_cluster_count': len(linked_clusters),
+                    }
+                )
         return hosts
 
     def replace_managed_node_hosts(self, hosts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         normalized_hosts: list[dict[str, Any]] = []
+        normalized_manual_nodes: list[dict[str, Any]] = []
         seen_targets: set[str] = set()
+        seen_manual_hostnames: set[str] = set()
         now = time.time()
         for index, raw_host in enumerate(hosts or [], start=1):
+            management_mode = self._normalize_management_mode(str((raw_host or {}).get('management_mode') or 'ssh_managed'))
+            if management_mode == 'manual':
+                hostname_hint = self._normalize_hostname(str((raw_host or {}).get('hostname_hint') or ''))
+                display_name = str((raw_host or {}).get('display_name') or hostname_hint).strip()
+                if not hostname_hint or hostname_hint in seen_manual_hostnames:
+                    continue
+                seen_manual_hostnames.add(hostname_hint)
+                normalized_manual_nodes.append(
+                    {
+                        'id': str((raw_host or {}).get('id') or f"manual-{uuid.uuid5(uuid.NAMESPACE_URL, hostname_hint)}"),
+                        'display_name': display_name or hostname_hint,
+                        'hostname_hint': hostname_hint,
+                        'network_scope': self._normalize_network_scope(str((raw_host or {}).get('network_scope') or 'remote')),
+                        'position': index,
+                    }
+                )
+                continue
+
             ssh_target = str((raw_host or {}).get('ssh_target') or '').strip()
             parallax_path = str((raw_host or {}).get('parallax_path') or '').strip()
             if not ssh_target or ssh_target in seen_targets:
@@ -312,6 +429,24 @@ class SettingsStore:
                 ],
             )
             conn.commit()
+        self._set_json(
+            'manual_node_inventory',
+            {
+                'nodes': normalized_manual_nodes,
+            }
+        )
+        valid_host_ids = {str(item['id']) for item in normalized_hosts} | {str(item['id']) for item in normalized_manual_nodes}
+        clusters_state = self.get_clusters_state()
+        filtered_clusters = self._filter_cluster_assignments(
+            list(clusters_state.get('clusters') or []),
+            valid_host_ids,
+        )
+        self._save_clusters_state(
+            {
+                'active_cluster_id': clusters_state.get('active_cluster_id') or '',
+                'clusters': filtered_clusters,
+            }
+        )
         return self.list_managed_node_hosts()
 
     def import_nodes_host_file(self, nodes_host_file: str | None) -> list[dict[str, Any]]:

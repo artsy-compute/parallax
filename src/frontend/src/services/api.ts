@@ -105,6 +105,7 @@ export interface AppClusterSettings {
   readonly name?: string;
   readonly model_name: string;
   readonly init_nodes_num: number;
+  readonly assigned_node_ids?: readonly string[];
   readonly is_local_network: boolean;
   readonly network_type: 'local' | 'remote';
   readonly advanced?: Record<string, unknown>;
@@ -151,7 +152,17 @@ export interface SettingsExportBundle {
   readonly cluster_settings: AppClusterSettings;
   readonly clusters?: readonly AppClusterProfile[];
   readonly active_cluster_id?: string;
-  readonly managed_node_hosts: readonly { ssh_target: string; parallax_path: string; hostname_hint?: string; line_number?: number; joined?: boolean }[];
+  readonly managed_node_hosts: readonly {
+    id?: string;
+    ssh_target: string;
+    parallax_path: string;
+    hostname_hint?: string;
+    line_number?: number;
+    joined?: boolean;
+    linked_cluster_ids?: readonly string[];
+    linked_cluster_names?: readonly string[];
+    linked_cluster_count?: number;
+  }[];
   readonly custom_models: readonly { source_type: 'huggingface' | 'local_path'; source_value: string; display_name?: string }[];
 }
 
@@ -279,11 +290,19 @@ export const deleteAllChatHistory = async (): Promise<{ deleted: number }> => {
 };
 
 export interface ConfiguredNodeInventoryHost {
+  readonly id: string;
+  readonly display_name: string;
   readonly ssh_target: string;
   readonly hostname_hint: string;
   readonly line_number: number;
   readonly parallax_path: string;
   readonly joined: boolean;
+  readonly management_mode: 'ssh_managed' | 'manual';
+  readonly network_scope: 'local' | 'remote';
+  readonly linked_clusters: readonly { id: string; name: string }[];
+  readonly linked_cluster_ids: readonly string[];
+  readonly linked_cluster_names: readonly string[];
+  readonly linked_cluster_count: number;
 }
 
 export const getNodesInventory = async (): Promise<{ hosts: readonly ConfiguredNodeInventoryHost[] }> => {
@@ -295,7 +314,15 @@ export const getNodesInventory = async (): Promise<{ hosts: readonly ConfiguredN
   return message.data;
 };
 
-export const updateNodesInventory = async (hosts: readonly { ssh_target: string; parallax_path: string }[]) => {
+export const updateNodesInventory = async (hosts: readonly {
+  id?: string;
+  display_name?: string;
+  ssh_target: string;
+  parallax_path: string;
+  hostname_hint?: string;
+  management_mode?: 'ssh_managed' | 'manual';
+  network_scope?: 'local' | 'remote';
+}[]) => {
   const response = await fetch(`${API_BASE_URL}/nodes/inventory`, {
     method: 'PUT',
     body: JSON.stringify({ hosts }),

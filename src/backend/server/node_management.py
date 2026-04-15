@@ -175,6 +175,7 @@ exit 0
         for index, item in enumerate(configured_hosts, start=1):
             hostname_hint = self._normalize_hostname(str(item.get('hostname_hint') or ''))
             ssh_target = str(item.get('ssh_target') or '')
+            management_mode = str(item.get('management_mode') or ('ssh_managed' if ssh_target else 'manual')).strip()
             action_override = self._recent_action_override(ssh_target)
             live_match = None
             live_match_key = ''
@@ -187,7 +188,7 @@ exit 0
                     break
             if action_override and not bool(action_override.get('running')):
                 live_match = None
-            can_remote_manage = bool(item.get('ssh_target')) and bool(item.get('parallax_path'))
+            can_remote_manage = management_mode == 'ssh_managed' and bool(item.get('ssh_target')) and bool(item.get('parallax_path'))
             process_status = {
                 'running': bool(live_match),
                 'confirmed_running': bool(live_match),
@@ -204,7 +205,7 @@ exit 0
                     str(item.get('parallax_path') or ''),
                 )
             lifecycle = build_node_lifecycle(
-                management_mode='ssh_managed' if can_remote_manage else ('unmanaged' if not ssh_target else 'manual'),
+                management_mode='ssh_managed' if can_remote_manage else 'manual',
                 process_status=process_status,
                 scheduler_joined=bool(live_match),
                 scheduler_node_id=live_match.get('node_id') if live_match else None,
@@ -214,11 +215,13 @@ exit 0
                 serving_total_layers=live_match.get('total_layers') if live_match else None,
             )
             host_entries.append({
-                'id': str(item.get('ssh_target') or hostname_hint or item.get('line_number') or index),
-                'display_name': str(item.get('ssh_target') or item.get('hostname_hint') or 'Configured host'),
+                'id': str(item.get('id') or item.get('ssh_target') or hostname_hint or item.get('line_number') or index),
+                'display_name': str(item.get('display_name') or item.get('ssh_target') or item.get('hostname_hint') or 'Configured host'),
                 'ssh_target': ssh_target,
                 'hostname_hint': str(item.get('hostname_hint') or ''),
                 'parallax_path': str(item.get('parallax_path') or ''),
+                'management_mode': management_mode,
+                'network_scope': str(item.get('network_scope') or 'remote'),
                 'inventory_source': 'configured',
                 'joined': bool(live_match),
                 'ssh_reachable': None,

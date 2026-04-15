@@ -418,9 +418,10 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
               </Box>
             </Stack>
           )}
-          <Stack sx={{ minWidth: 0, flex: 1 }}>
-            <Typography variant='caption' color='text.secondary'>Cluster</Typography>
-            {!hideConversationHistory && clusterProfiles.length > 0 ? (
+          {!hideConversationHistory ? (
+            <Stack sx={{ minWidth: 0, flex: 1 }}>
+              <Typography variant='caption' color='text.secondary'>Cluster</Typography>
+              {clusterProfiles.length > 0 ? (
               <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75, minWidth: 0 }}>
                 <TextField
                   select
@@ -541,12 +542,15 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
                   </IconButton>
                 </Tooltip>
               </Stack>
-            ) : (
-              <Typography variant='body2' sx={{ fontWeight: 600 }} noWrap>
-                {clusterProfiles.find((item) => item.id === activeClusterId)?.name || clusterModelName || configModelName || 'No cluster selected'}
-              </Typography>
-            )}
-          </Stack>
+              ) : (
+                <Typography variant='body2' sx={{ fontWeight: 600 }} noWrap>
+                  {clusterProfiles.find((item) => item.id === activeClusterId)?.name || clusterModelName || configModelName || 'No cluster selected'}
+                </Typography>
+              )}
+            </Stack>
+          ) : (
+            <Box sx={{ flex: 1 }} />
+          )}
         </DrawerLayoutHeader>
 
         <DrawerLayoutContent contentWidth={contentWidth}>

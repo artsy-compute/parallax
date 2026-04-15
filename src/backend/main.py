@@ -407,7 +407,7 @@ async def app_settings_export():
         content={
             "type": "settings_export",
             "data": {
-                "schema_version": 2,
+                "schema_version": 3,
                 "cluster_settings": cluster_settings,
                 "clusters": clusters_state.get("clusters") or [],
                 "active_cluster_id": clusters_state.get("active_cluster_id") or "",
