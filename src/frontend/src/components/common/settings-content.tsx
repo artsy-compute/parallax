@@ -15,6 +15,7 @@ import {
   IconButton,
   MenuItem,
   Pagination,
+  Paper,
   Stack,
   Tab,
   Tabs,
@@ -67,10 +68,9 @@ import { NodeManagementContent } from './node-management-content';
 import { JoinCommand, ModelSelect } from '../inputs';
 import { AlertDialog } from '../mui';
 
-type SettingsSectionKey = 'general' | 'cluster' | 'custom-models' | 'nodes' | 'chat' | 'transfer';
+type SettingsSectionKey = 'cluster' | 'custom-models' | 'nodes' | 'chat' | 'transfer';
 
 const SETTINGS_SECTIONS: ReadonlyArray<{ key: SettingsSectionKey; label: string; icon: FC<{ size?: number }> }> = [
-  { key: 'general', label: 'Overview', icon: IconSettings2 },
   { key: 'nodes', label: 'Nodes', icon: IconCirclesRelation },
   { key: 'cluster', label: 'Clusters', icon: IconStack3 },
   { key: 'custom-models', label: 'Custom Models', icon: IconAdjustments },
@@ -113,6 +113,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
       config: { modelInfo, modelInfoList, networkType, initNodesNumber, modelName: selectedModelName, activeClusterId, clusterProfiles },
       clusterInfo: {
         status: clusterStatus,
+        needMoreNodes,
         topologyChangeAdvisory,
         initNodesNumber: clusterInitNodesNumber,
         modelName: clusterModelName,
@@ -1365,24 +1366,6 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
   };
 
   const renderSectionContent = () => {
-    if (activeSection === 'general') {
-      return (
-        <Stack sx={{ gap: 1.25 }}>
-          <Typography variant='h2'>Overview</Typography>
-          <Typography variant='body2' color='text.secondary'>
-            Settings now separates planning from day-to-day operations. Define the available machine pool in <strong>Nodes</strong>, manage the shared model library in <strong>Custom Models</strong>, then configure each saved <strong>Cluster</strong> with its own model and startup capacity.
-          </Typography>
-          <Alert severity='info'>
-            Each saved cluster profile represents one scheduler configuration. The runtime still serves one active cluster at a time, but you can keep multiple cluster definitions and switch between them.
-          </Alert>
-          <Stack direction={{ xs: 'column', md: 'row' }} sx={{ gap: 1, flexWrap: 'wrap' }}>
-            <Button variant='outlined' onClick={() => openSection('nodes')}>Define available nodes</Button>
-            <Button variant='contained' onClick={() => openSection('cluster')}>Configure cluster</Button>
-          </Stack>
-        </Stack>
-      );
-    }
-
     if (activeSection === 'cluster') {
       return (
         <Stack sx={{ gap: 1.25 }}>
