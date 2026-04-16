@@ -210,6 +210,7 @@ export interface ModelSelectProps {
   autoCommit?: boolean;
   showNodeCounts?: boolean;
   onNodeCountsClick?: () => void;
+  capacityGb?: number;
 }
 
 export const ModelSelect: FC<ModelSelectProps> = ({
@@ -217,6 +218,7 @@ export const ModelSelect: FC<ModelSelectProps> = ({
   autoCommit = false,
   showNodeCounts = false,
   onNodeCountsClick,
+  capacityGb = 0,
 }) => {
   const [{ type: hostType }] = useHost();
   const [
@@ -258,8 +260,7 @@ export const ModelSelect: FC<ModelSelectProps> = ({
   const [canAutoCommit, setCanAutoCommit] = useState(false);
   const activeNodes = nodeInfoList.filter((node) => node.status === 'available').length;
   const inactiveNodes = nodeInfoList.length - activeNodes;
-  const clusterVramGb = nodeInfoList.reduce((total, node) => total + ((node.gpuMemory || 0) * Math.max(1, node.gpuNumber || 1)), 0);
-  const canEvaluateCapacity = clusterVramGb > 0;
+  const canEvaluateCapacity = capacityGb > 0;
 
   const handleNodeCountsClick = useRefCallback((event: MouseEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -310,8 +311,8 @@ export const ModelSelect: FC<ModelSelectProps> = ({
               clusterStatus !== 'idle'
               && name === configModelName
               && configModelName !== clusterModelName;
-            const disabledForCapacity = !selected && canEvaluateCapacity && model.vram > 0 && model.vram > clusterVramGb;
-            const disabledReason = disabledForCapacity ? `Needs ${formatRequiredMemory(model.vram)}; cluster has ${formatRequiredMemory(clusterVramGb)}` : '';
+            const disabledForCapacity = !selected && canEvaluateCapacity && model.vram > 0 && model.vram > capacityGb;
+            const disabledReason = disabledForCapacity ? `Needs ${formatRequiredMemory(model.vram)}; assigned nodes provide ${formatRequiredMemory(capacityGb)}` : '';
             return renderOption(model, { selected, loading, disabled: disabledForCapacity, disabledReason });
           })}
         </ModelSelectRoot>

@@ -15,7 +15,6 @@ import {
   IconButton,
   MenuItem,
   Pagination,
-  Paper,
   Stack,
   Tab,
   Tabs,
@@ -32,7 +31,6 @@ import {
   IconInfoCircle,
   IconLoader,
   IconPlus,
-  IconSettings2,
   IconStack3,
   IconTransfer,
   IconTrash,
@@ -105,6 +103,15 @@ const renderModelVramRequirement = (vram?: number) => (
   ) : null
 );
 
+const getModelCapacityDisabledReason = (requiredGb?: number, availableGb?: number) => {
+  const normalizedRequired = Math.max(0, Number(requiredGb || 0));
+  const normalizedAvailable = Math.max(0, Number(availableGb || 0));
+  if (normalizedRequired <= 0 || normalizedAvailable <= 0 || normalizedRequired <= normalizedAvailable) {
+    return '';
+  }
+  return `Needs ${normalizedRequired} GB; assigned nodes provide ${normalizedAvailable} GB`;
+};
+
 export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 'cluster' }) => {
   const navigate = useNavigate();
   const [{ type: hostType }] = useHost();
@@ -113,7 +120,6 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
       config: { modelInfo, modelInfoList, networkType, initNodesNumber, modelName: selectedModelName, activeClusterId, clusterProfiles },
       clusterInfo: {
         status: clusterStatus,
-        needMoreNodes,
         topologyChangeAdvisory,
         initNodesNumber: clusterInitNodesNumber,
         modelName: clusterModelName,
@@ -121,7 +127,6 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
       nodeInfoList,
     },
     {
-      config: { setNetworkType, setInitNodesNumber },
       rebalanceTopology,
       refreshModelList,
       init,
@@ -930,6 +935,16 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     setClusterModalOpen(true);
   };
 
+  const openClusterChat = async (clusterId: string) => {
+    if (!clusterId) {
+      return;
+    }
+    if (clusterId !== activeClusterId) {
+      await onSelectClusterProfile(clusterId);
+    }
+    navigate('/chat');
+  };
+
   const openClusterEditor = () => {
     const nextIndex = clusterProfiles.length + 1;
     const source = selectedCluster || {
@@ -1441,6 +1456,11 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                   </Stack>
                 </Stack>
                 <Stack direction='row' sx={{ gap: 0.25, alignItems: 'center', flex: 'none' }}>
+                  <Tooltip title='Open chat with this cluster'>
+                    <IconButton size='small' onClick={() => void openClusterChat(cluster.id)}>
+                      <IconMessageCircle size={16} />
+                    </IconButton>
+                  </Tooltip>
                   <Tooltip title='Configure cluster'>
                     <IconButton size='small' onClick={() => void openClusterConfig(cluster.id)}>
                       <IconAdjustments size={16} />
@@ -1475,11 +1495,6 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
             </DialogTitle>
             <DialogContent dividers>
               <Stack sx={{ gap: 1.25, pt: 0.5 }}>
-                {clusterModalMode === 'add' ? (
-                  <Typography variant='body2' color='text.secondary'>
-                    New clusters start from the current cluster’s model and assigned nodes, but you can adjust them before creating the cluster.
-                  </Typography>
-                ) : null}
                 <Stack direction={{ xs: 'column', md: 'row' }} sx={{ gap: 1 }}>
                   <TextField
                     label='Cluster name'
@@ -1509,7 +1524,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                 <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75 }}>
                   <Typography variant='body1'>Model</Typography>
                   <Tooltip
-                    title={clusterModalMode === 'add' ? 'Choose the model this new cluster should host.' : 'Choose the model this saved cluster should host, then size startup capacity around it.'}
+                    title={clusterModalMode === 'add' ? 'Choose the model this cluster should host.' : 'Update the model this cluster should host.'}
                     placement='right'
                     slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
                   >
@@ -1578,8 +1593,11 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                       },
                     }}
                   >
-                    {modelInfoList.map((item) => (
-                      <MenuItem key={item.name} value={item.name}>
+                    {modelInfoList.map((item) => {
+                      const disabledReason = getModelCapacityDisabledReason(item.vram, draftAvailableAssignedMemory);
+                      const disabledForCapacity = item.name !== clusterDraftModelName && !!disabledReason;
+                      return (
+                      <MenuItem key={item.name} value={item.name} disabled={disabledForCapacity}>
                         <Stack direction='row' sx={{ alignItems: 'center', gap: 1, minWidth: 0, width: '100%' }}>
                           <Box
                             component='img'
@@ -1600,7 +1618,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                               {item.displayName}
                             </Typography>
                             <Typography variant='body2' color='text.secondary' sx={{ fontSize: '0.75rem', lineHeight: '1rem', fontWeight: 300 }}>
-                              {item.name}
+                              {disabledReason || item.name}
                             </Typography>
                           </Stack>
                           {item.vram > 0 && (
@@ -1608,20 +1626,26 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                           )}
                         </Stack>
                       </MenuItem>
-                    ))}
+                    );
+                    })}
                   </TextField>
                 ) : (
-                  <ModelSelect autoCommit />
+                  <ModelSelect autoCommit capacityGb={assignedTotalMemory} />
                 )}
                 {renderModelVramRequirement(clusterModalMode === 'add' ? draftModelInfo?.vram : modelInfo?.vram)}
-                <Typography variant='body2' color='text.secondary'>
-                  Define the model for this saved cluster, assign which nodes it may use, and then set the initial number of joined nodes the scheduler should plan around.
-                </Typography>
                 <Stack sx={{ gap: 1 }}>
-                  <Typography variant='body1'>Assigned nodes</Typography>
-                  <Typography variant='body2' color='text.secondary'>
-                    Only assigned nodes are intended to serve this cluster. Unassigned nodes stay out of the shard pool for this saved cluster.
-                  </Typography>
+                  <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75 }}>
+                    <Typography variant='body1'>Assigned nodes</Typography>
+                    <Tooltip
+                      title='Assigned nodes are the only machines Parallax will use for this cluster.'
+                      placement='right'
+                      slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
+                    >
+                      <IconButton size='small' sx={{ color: 'text.secondary', p: 0.25 }}>
+                        <IconInfoCircle size={16} />
+                      </IconButton>
+                    </Tooltip>
+                  </Stack>
                   {nodesInventory.length === 0 && (
                     <Alert severity='info'>
                       No managed hosts are defined yet. Add nodes in <strong>Settings &gt; Nodes</strong> before assigning them to this cluster.
@@ -1720,7 +1744,18 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                   )}
                 </Stack>
                 <Stack sx={{ gap: 0.75 }}>
-                  <Typography variant='body1'>Capacity summary</Typography>
+                  <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75 }}>
+                    <Typography variant='body1'>Capacity summary</Typography>
+                    <Tooltip
+                      title='Capacity uses live node telemetry when available and stored node hardware otherwise.'
+                      placement='right'
+                      slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
+                    >
+                      <IconButton size='small' sx={{ color: 'text.secondary', p: 0.25 }}>
+                        <IconInfoCircle size={16} />
+                      </IconButton>
+                    </Tooltip>
+                  </Stack>
                   <Stack direction={{ xs: 'column', md: 'row' }} sx={{ gap: 1, flexWrap: 'wrap' }}>
                     <Chip color='default' variant='outlined' label={`${clusterModalMode === 'add' ? draftAssignedHosts.length : assignedHosts.length} assigned`} />
                     <Chip color={(clusterModalMode === 'add' ? draftAvailableAssignedHosts.length : availableAssignedHosts.length) > 0 ? 'success' : 'default'} variant='outlined' label={`${clusterModalMode === 'add' ? draftAvailableAssignedHosts.length : availableAssignedHosts.length} online now`} />
@@ -1732,14 +1767,11 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                   </Stack>
                   {(clusterModalMode === 'add' ? clusterDraftAssignedNodeIds.length : selectedClusterAssignedNodeIds.size) > 0 && (
                     <Typography variant='caption' color='text.secondary'>
-                      Using live telemetry when available and stored node hardware otherwise. Hardware is known for {clusterModalMode === 'add' ? draftKnownAssignedHardwareCount : knownAssignedHardwareCount}/{clusterModalMode === 'add' ? draftAssignedHosts.length : assignedHosts.length} assigned node{(clusterModalMode === 'add' ? draftAssignedHosts.length : assignedHosts.length) === 1 ? '' : 's'}.
+                      Hardware known for {clusterModalMode === 'add' ? draftKnownAssignedHardwareCount : knownAssignedHardwareCount}/{clusterModalMode === 'add' ? draftAssignedHosts.length : assignedHosts.length} assigned node{(clusterModalMode === 'add' ? draftAssignedHosts.length : assignedHosts.length) === 1 ? '' : 's'}.
                     </Typography>
                   )}
                   {clusterModalCapacityAlert}
                 </Stack>
-                <Alert severity='info'>
-                  Startup planning now follows the assigned-node list automatically. If more assigned nodes arrive later, Parallax can extend capacity, but adding nodes may trigger layer movement and temporary performance churn while the scheduler rebalances.
-                </Alert>
                 {topologyChangeAdvisory.show && <Alert severity='warning'>{topologyChangeAdvisory.message}</Alert>}
                 <Stack direction='row' sx={{ justifyContent: 'flex-end', gap: 1 }}>
                   <Button variant='text' onClick={closeClusterModal}>
