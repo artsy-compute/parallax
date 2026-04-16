@@ -406,26 +406,40 @@ class Scheduler:
         )
         existing_node = self.node_manager.get(node.node_id)
         existing_state = self.node_manager.state_of(node.node_id)
-        should_deallocate_existing_manual = (
-            node.manual_layer_assignment
-            and existing_state == NodeState.ACTIVE
-            and existing_node is not None
-            and (
-                existing_node.start_layer != node.start_layer
-                or existing_node.end_layer != node.end_layer
-            )
-        )
-        if should_deallocate_existing_manual:
-            logger.info(
-                "Node %s rejoined with updated retained layers [%s, %s); deallocating previous ACTIVE range [%s, %s) first",
-                node.node_id,
-                node.start_layer,
-                node.end_layer,
-                existing_node.start_layer,
-                existing_node.end_layer,
-            )
-            self.layer_allocator.deallocate(existing_node)
-            existing_state = self.node_manager.state_of(node.node_id)
+        if node.manual_layer_assignment and existing_state == NodeState.ACTIVE:
+            if (
+                existing_node is not None
+                and existing_node.start_layer == node.start_layer
+                and existing_node.end_layer == node.end_layer
+            ):
+                logger.info(
+                    "Node %s is already active with retained layers [%s, %s); keeping existing ACTIVE state",
+                    node.node_id,
+                    node.start_layer,
+                    node.end_layer,
+                )
+            elif (
+                existing_node is not None
+                and existing_node.start_layer is not None
+                and existing_node.end_layer is not None
+            ):
+                logger.info(
+                    "Node %s rejoined with retained layers [%s, %s); deallocating previous ACTIVE range [%s, %s) first",
+                    node.node_id,
+                    node.start_layer,
+                    node.end_layer,
+                    existing_node.start_layer,
+                    existing_node.end_layer,
+                )
+                self.layer_allocator.deallocate(existing_node)
+                existing_state = self.node_manager.state_of(node.node_id)
+            else:
+                logger.info(
+                    "Node %s is marked ACTIVE without a usable retained allocation; forcing it back to STANDBY before recovery",
+                    node.node_id,
+                )
+                self.node_manager.standby([node.node_id])
+                existing_state = self.node_manager.state_of(node.node_id)
         if existing_node is None:
             self.node_manager.upsert(node)
             if bootstrapped:
@@ -451,11 +465,13 @@ class Scheduler:
                 f"Manual layer assignment for node {node.node_id}: "
                 f"layers [{node.start_layer}, {node.end_layer})"
             )
+            current_node = self.node_manager.get(node.node_id)
+            current_state = self.node_manager.state_of(node.node_id)
             if (
-                existing_state == NodeState.ACTIVE
-                and existing_node is not None
-                and existing_node.start_layer == node.start_layer
-                and existing_node.end_layer == node.end_layer
+                current_state == NodeState.ACTIVE
+                and current_node is not None
+                and current_node.start_layer == node.start_layer
+                and current_node.end_layer == node.end_layer
             ):
                 logger.info(
                     "Node %s is already active with retained layers [%s, %s); skipping re-activation",

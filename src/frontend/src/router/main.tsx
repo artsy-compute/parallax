@@ -5,13 +5,11 @@ import { useCluster } from '../services';
 import { useConstCallback, useRefCallback } from '../hooks';
 
 const PATH_SETUP = '/setup';
-const PATH_JOIN = '/join';
 const PATH_CHAT = '/chat';
 const PATH_NODES = '/nodes';
 const PATH_SETTINGS = '/settings';
 
 const PageSetup = lazy(() => import('../pages/setup'));
-const PageJoin = lazy(() => import('../pages/join'));
 const PageChat = lazy(() => import('../pages/chat'));
 const PageNodes = lazy(() => import('../pages/nodes'));
 const PageSettings = lazy(() => import('../pages/settings'));
@@ -62,14 +60,6 @@ export const MainRouter = () => {
       element: (
         <Suspense fallback={<div>Loading...</div>}>
           <PageSetup />
-        </Suspense>
-      ),
-    },
-    {
-      path: PATH_JOIN,
-      element: (
-        <Suspense fallback={<div>Loading...</div>}>
-          <PageJoin />
         </Suspense>
       ),
     },

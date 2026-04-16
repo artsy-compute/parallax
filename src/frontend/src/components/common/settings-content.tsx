@@ -721,20 +721,20 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     }
   };
 
-  const onContinueToJoin = useRefCallback(async () => {
+  const onSaveClusterSettings = useRefCallback(async () => {
     const shouldInit =
       clusterStatus === 'idle'
       || clusterStatus === 'failed'
       || clusterInitNodesNumber !== initNodesNumber
       || clusterModelName !== selectedModelName;
     if (!shouldInit) {
-      navigate('/join');
+      closeClusterModal();
       return;
     }
     try {
       setInitializingCluster(true);
       await init();
-      navigate('/join');
+      closeClusterModal();
     } catch (error) {
       console.error('init error', error);
     } finally {
@@ -1791,8 +1791,8 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                       Add cluster
                     </Button>
                   ) : (
-                    <Button variant='contained' onClick={onContinueToJoin} disabled={initializingCluster || !canProceedWithConfiguredCluster}>
-                      {initializingCluster ? 'Applying cluster settings...' : 'Apply cluster settings'}
+                    <Button variant='contained' onClick={onSaveClusterSettings} disabled={initializingCluster || !canProceedWithConfiguredCluster}>
+                      {initializingCluster ? 'Saving...' : 'Save'}
                     </Button>
                   )}
                 </Stack>
@@ -2666,7 +2666,6 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
           </Stack>
           <Stack direction='row' sx={{ gap: 1, flexWrap: 'wrap' }}>
             <Button variant='outlined' onClick={() => refreshModelList()}>Refresh model catalog</Button>
-            <Button component={RouterLink} to='/join' variant='outlined'>Open reconnect flow</Button>
             <Button onClick={() => openSection('nodes')} variant='outlined'>Open nodes</Button>
           </Stack>
         </Stack>

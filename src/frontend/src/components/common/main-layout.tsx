@@ -141,9 +141,6 @@ const DebugInfo: FC = () => {
           <Link component={RouterLink} to='/settings'>
             Settings
           </Link>
-          <Link component={RouterLink} to='/join'>
-            Join
-          </Link>
           <Link component={RouterLink} to='/chat'>
             Chat
           </Link>
