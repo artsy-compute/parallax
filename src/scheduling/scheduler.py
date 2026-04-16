@@ -168,6 +168,14 @@ class Scheduler:
             # This also detaches member nodes and clears their layer allocations.
             logger.info("[Scheduler] Rebooting, moving every node to standby")
             self.node_manager.clear_registered_pipelines()
+            remaining_active_ids = [n.node_id for n in self.node_manager.active_nodes]
+            if remaining_active_ids:
+                logger.info(
+                    "[Scheduler] Rebooting, moving %d remaining active node(s) to standby: %s",
+                    len(remaining_active_ids),
+                    remaining_active_ids,
+                )
+                self.node_manager.standby(remaining_active_ids)
             self._bootstrapped_event.clear()
             overide_min_node_check = True
         else:
@@ -637,14 +645,18 @@ class Scheduler:
         """Process joins/leaves/updates and perform heartbeat checks."""
         last_hb_check = 0.0
         while not self._stop_event.is_set():
-            self._process_node_updates()
-            self._process_joins()
-            self._process_rebalances()
-            self._process_leaves()
-            now = time.time()
-            if now - last_hb_check >= max(0.5, poll_interval):
-                self.checking_node_heartbeat()
-                last_hb_check = now
+            try:
+                self._process_node_updates()
+                self._process_joins()
+                self._process_rebalances()
+                self._process_leaves()
+                now = time.time()
+                if now - last_hb_check >= max(0.5, poll_interval):
+                    self.checking_node_heartbeat()
+                    last_hb_check = now
+            except Exception as exc:
+                logger.exception("Scheduler event loop iteration failed: %s", exc)
+                time.sleep(max(0.1, poll_interval))
             self._wake_event.wait(timeout=poll_interval)
             self._wake_event.clear()
 

@@ -365,6 +365,13 @@ export interface ConfiguredNodeInventoryHost {
   readonly joined: boolean;
   readonly management_mode: 'ssh_managed' | 'manual';
   readonly network_scope: 'local' | 'remote';
+  readonly hardware?: {
+    readonly gpu_name?: string;
+    readonly gpu_num?: number;
+    readonly gpu_memory_gb?: number;
+    readonly ram_total_gb?: number;
+    readonly updated_at?: number;
+  };
   readonly linked_clusters: readonly { id: string; name: string }[];
   readonly linked_cluster_ids: readonly string[];
   readonly linked_cluster_names: readonly string[];
@@ -388,6 +395,13 @@ export const updateNodesInventory = async (hosts: readonly {
   hostname_hint?: string;
   management_mode?: 'ssh_managed' | 'manual';
   network_scope?: 'local' | 'remote';
+  hardware?: {
+    gpu_name?: string;
+    gpu_num?: number;
+    gpu_memory_gb?: number;
+    ram_total_gb?: number;
+    updated_at?: number;
+  };
 }[]) => {
   const response = await fetch(`${API_BASE_URL}/nodes/inventory`, {
     method: 'PUT',
@@ -520,6 +534,10 @@ export const probeNodeHost = async (sshTarget: string, parallaxPath: string): Pr
   os_name?: string;
   remote_user?: string;
   remote_host?: string;
+  ram_total_gb?: number;
+  gpu_name?: string;
+  gpu_num?: number;
+  gpu_memory_gb?: number;
   path_exists?: boolean;
   has_venv_activate?: boolean;
   has_parallax_bin?: boolean;

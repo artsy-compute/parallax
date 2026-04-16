@@ -40,16 +40,51 @@ class SettingsStore:
                 );
                 CREATE TABLE IF NOT EXISTS managed_node_hosts (
                     id TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL DEFAULT '',
                     ssh_target TEXT NOT NULL UNIQUE,
                     parallax_path TEXT NOT NULL DEFAULT '',
                     hostname_hint TEXT NOT NULL DEFAULT '',
+                    hardware_json TEXT NOT NULL DEFAULT '{}',
                     position INTEGER NOT NULL DEFAULT 0,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
                 );
                 """
             )
+            columns = {row['name'] for row in conn.execute("PRAGMA table_info(managed_node_hosts)").fetchall()}
+            if 'display_name' not in columns:
+                conn.execute("ALTER TABLE managed_node_hosts ADD COLUMN display_name TEXT NOT NULL DEFAULT ''")
+            if 'hardware_json' not in columns:
+                conn.execute("ALTER TABLE managed_node_hosts ADD COLUMN hardware_json TEXT NOT NULL DEFAULT '{}'")
             conn.commit()
+
+    @staticmethod
+    def _normalize_node_hardware(value: dict[str, Any] | None) -> dict[str, Any]:
+        raw = dict(value or {})
+        gpu_name = str(raw.get('gpu_name') or '').strip()
+        try:
+            gpu_num = max(0, int(raw.get('gpu_num') or 0))
+        except Exception:
+            gpu_num = 0
+        try:
+            gpu_memory_gb = max(0, int(raw.get('gpu_memory_gb') or 0))
+        except Exception:
+            gpu_memory_gb = 0
+        try:
+            ram_total_gb = max(0, int(raw.get('ram_total_gb') or 0))
+        except Exception:
+            ram_total_gb = 0
+        try:
+            updated_at = float(raw.get('updated_at') or 0)
+        except Exception:
+            updated_at = 0.0
+        return {
+            'gpu_name': gpu_name,
+            'gpu_num': gpu_num,
+            'gpu_memory_gb': gpu_memory_gb,
+            'ram_total_gb': ram_total_gb,
+            'updated_at': updated_at,
+        }
 
     @staticmethod
     def _normalize_hostname(value: str) -> str:
@@ -306,7 +341,7 @@ class SettingsStore:
         with self._lock, self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, ssh_target, parallax_path, hostname_hint, position, created_at, updated_at
+                SELECT id, display_name, ssh_target, parallax_path, hostname_hint, hardware_json, position, created_at, updated_at
                 FROM managed_node_hosts
                 ORDER BY position ASC, created_at ASC
                 """
@@ -315,11 +350,15 @@ class SettingsStore:
         for index, row in enumerate(rows, start=1):
             host_id = str(row['id'] or '')
             hostname_hint = str(row['hostname_hint'] or '')
+            try:
+                hardware = self._normalize_node_hardware(json.loads(str(row['hardware_json'] or '{}')))
+            except Exception:
+                hardware = self._normalize_node_hardware({})
             linked_clusters = linked_clusters_by_host_id.get(host_id, [])
             hosts.append(
                 {
                     'id': host_id,
-                    'display_name': str(row['ssh_target'] or ''),
+                    'display_name': str(row['display_name'] or row['ssh_target'] or ''),
                     'ssh_target': str(row['ssh_target'] or ''),
                     'parallax_path': str(row['parallax_path'] or ''),
                     'hostname_hint': hostname_hint,
@@ -327,6 +366,7 @@ class SettingsStore:
                     'joined': bool(hostname_hint) and hostname_hint in joined_hostnames,
                     'management_mode': 'ssh_managed',
                     'network_scope': 'remote',
+                    'hardware': hardware,
                     'linked_clusters': linked_clusters,
                     'linked_cluster_ids': [item['id'] for item in linked_clusters],
                     'linked_cluster_names': [item['name'] for item in linked_clusters],
@@ -346,6 +386,7 @@ class SettingsStore:
                 if not host_id or not hostname_hint:
                     continue
                 linked_clusters = linked_clusters_by_host_id.get(host_id, [])
+                hardware = self._normalize_node_hardware(raw.get('hardware') if isinstance(raw.get('hardware'), dict) else {})
                 hosts.append(
                     {
                         'id': host_id,
@@ -357,6 +398,7 @@ class SettingsStore:
                         'joined': bool(hostname_hint) and hostname_hint in joined_hostnames,
                         'management_mode': 'manual',
                         'network_scope': self._normalize_network_scope(str(raw.get('network_scope') or 'remote')),
+                        'hardware': hardware,
                         'linked_clusters': linked_clusters,
                         'linked_cluster_ids': [item['id'] for item in linked_clusters],
                         'linked_cluster_names': [item['name'] for item in linked_clusters],
@@ -385,6 +427,7 @@ class SettingsStore:
                         'display_name': display_name or hostname_hint,
                         'hostname_hint': hostname_hint,
                         'network_scope': self._normalize_network_scope(str((raw_host or {}).get('network_scope') or 'remote')),
+                        'hardware': self._normalize_node_hardware((raw_host or {}).get('hardware') if isinstance((raw_host or {}).get('hardware'), dict) else {}),
                         'position': index,
                     }
                 )
@@ -398,9 +441,14 @@ class SettingsStore:
             normalized_hosts.append(
                 {
                     'id': str((raw_host or {}).get('id') or f"host-{uuid.uuid5(uuid.NAMESPACE_URL, ssh_target)}"),
+                    'display_name': str((raw_host or {}).get('display_name') or ssh_target).strip(),
                     'ssh_target': ssh_target,
                     'parallax_path': parallax_path,
                     'hostname_hint': self._normalize_hostname(ssh_target),
+                    'hardware_json': json.dumps(
+                        self._normalize_node_hardware((raw_host or {}).get('hardware') if isinstance((raw_host or {}).get('hardware'), dict) else {}),
+                        ensure_ascii=False,
+                    ),
                     'position': index,
                     'created_at': now,
                     'updated_at': now,
@@ -412,15 +460,17 @@ class SettingsStore:
             conn.executemany(
                 """
                 INSERT INTO managed_node_hosts (
-                    id, ssh_target, parallax_path, hostname_hint, position, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    id, display_name, ssh_target, parallax_path, hostname_hint, hardware_json, position, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
                         item['id'],
+                        item['display_name'],
                         item['ssh_target'],
                         item['parallax_path'],
                         item['hostname_hint'],
+                        item['hardware_json'],
                         item['position'],
                         item['created_at'],
                         item['updated_at'],

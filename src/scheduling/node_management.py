@@ -455,10 +455,28 @@ class NodeManager:
 
     def clear_registered_pipelines(self) -> None:
         """Clear any fixed pipeline registrations and detach member nodes."""
-        self.standby(list(self._node_to_pipeline.keys()))
+        nodes_to_clear: List[Node] = []
         with self._lock:
+            pipeline_node_ids = list(self._node_to_pipeline.keys())
+            seen_node_ids: set[str] = set()
+            for nid in pipeline_node_ids:
+                if nid in seen_node_ids:
+                    continue
+                seen_node_ids.add(nid)
+                node = self._nodes.get(nid)
+                if node is None:
+                    continue
+                # Reboot/rebalance paths may already have moved a registered node to
+                # STANDBY. Clearing the registry should still detach it cleanly.
+                if self._state.get(nid) == NodeState.ACTIVE:
+                    self._state[nid] = NodeState.STANDBY
+                self.node_assigned_request_count.pop(nid, None)
+                nodes_to_clear.append(node)
             self._registered_pipelines = {}
             self._node_to_pipeline = {}
+
+        for node in nodes_to_clear:
+            node.clear_serving_state()
 
     def get_registered_pipelines(self) -> Dict[int, Pipeline]:
         """Return the currently registered RR fixed pipelines as `Pipeline` objects.

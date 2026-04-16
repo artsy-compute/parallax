@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Alert, Box, Button, Chip, Dialog, DialogContent, DialogTitle, IconButton, Paper, Stack, Tooltip, Typography } from '@mui/material';
 import {
+  IconAdjustments,
   IconBrandApple,
   IconCpu,
   IconFileText,
@@ -91,7 +92,7 @@ const formatUsageStat = (used?: number | null, total?: number | null, percent?: 
   return 'Unknown';
 };
 
-const HostRow = ({ host, onPing, onLogs, onStart, onStop, onRestart, onRemoveConfiguredHost, removing, pingState, actionState }: { host: NodeOverviewHost; onPing: (sshTarget: string) => Promise<void>; onLogs: (sshTarget: string) => Promise<void>; onStart: (sshTarget: string) => Promise<void>; onStop: (sshTarget: string) => Promise<void>; onRestart: (sshTarget: string) => Promise<void>; onRemoveConfiguredHost?: (host: NodeOverviewHost) => Promise<void> | void; removing?: boolean; pingState?: string; actionState?: string }) => {
+const HostRow = ({ host, onPing, onLogs, onStart, onStop, onRestart, onConfigureConfiguredHost, onRemoveConfiguredHost, removing, pingState, actionState }: { host: NodeOverviewHost; onPing: (sshTarget: string) => Promise<void>; onLogs: (sshTarget: string) => Promise<void>; onStart: (sshTarget: string) => Promise<void>; onStop: (sshTarget: string) => Promise<void>; onRestart: (sshTarget: string) => Promise<void>; onConfigureConfiguredHost?: (host: NodeOverviewHost) => Promise<void> | void; onRemoveConfiguredHost?: (host: NodeOverviewHost) => Promise<void> | void; removing?: boolean; pingState?: string; actionState?: string }) => {
   const runtime = host.runtime || {};
   const lifecycle = host.lifecycle || {};
   const lifecycleProcess = lifecycle.process || {};
@@ -188,6 +189,11 @@ const HostRow = ({ host, onPing, onLogs, onStart, onStop, onRestart, onRemoveCon
             </Box>
           </Stack>
           <Stack direction='row' sx={{ gap: 0.25, flexWrap: 'wrap', alignItems: 'center', flex: 'none' }}>
+            {host.inventory_source === 'configured' && onConfigureConfiguredHost && (
+              <Tooltip title='Configure node'>
+                <span><IconButton size='small' disabled={removing || isActionRunning} onClick={() => void onConfigureConfiguredHost(host)}><IconAdjustments size={16} /></IconButton></span>
+              </Tooltip>
+            )}
             {host.inventory_source === 'configured' && onRemoveConfiguredHost && (
               <Tooltip title={removing ? 'Removing node' : 'Remove from configured inventory'}>
                 <span><IconButton size='small' color='error' disabled={removing || isActionRunning} onClick={() => void onRemoveConfiguredHost(host)}><IconTrash size={16} /></IconButton></span>
@@ -217,7 +223,7 @@ const HostRow = ({ host, onPing, onLogs, onStart, onStop, onRestart, onRemoveCon
   );
 };
 
-export const NodeManagementContent = ({ embedded = false, showLiveOnlyHosts = true, refreshToken = 0, onRemoveConfiguredHost }: { embedded?: boolean; showLiveOnlyHosts?: boolean; refreshToken?: number; onRemoveConfiguredHost?: (host: NodeOverviewHost) => Promise<void> | void }) => {
+export const NodeManagementContent = ({ embedded = false, showLiveOnlyHosts = true, refreshToken = 0, onConfigureConfiguredHost, onRemoveConfiguredHost }: { embedded?: boolean; showLiveOnlyHosts?: boolean; refreshToken?: number; onConfigureConfiguredHost?: (host: NodeOverviewHost) => Promise<void> | void; onRemoveConfiguredHost?: (host: NodeOverviewHost) => Promise<void> | void }) => {
   const [overview, setOverview] = useState<NodesOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -388,6 +394,7 @@ export const NodeManagementContent = ({ embedded = false, showLiveOnlyHosts = tr
               onStart={(sshTarget) => runHostAction(sshTarget, 'start', startNodeHost)}
               onStop={(sshTarget) => runHostAction(sshTarget, 'stop', stopNodeHost)}
               onRestart={(sshTarget) => runHostAction(sshTarget, 'restart', restartNodeHost)}
+              onConfigureConfiguredHost={onConfigureConfiguredHost}
               onRemoveConfiguredHost={onRemoveConfiguredHost ? async (selectedHost) => {
                 setRemovingHostId(selectedHost.id);
                 try {

@@ -190,6 +190,7 @@ exit 0
             if action_override and not bool(action_override.get('running')):
                 live_match = None
             can_remote_manage = management_mode == 'ssh_managed' and bool(item.get('ssh_target')) and bool(item.get('parallax_path'))
+            stored_hardware = dict(item.get('hardware') or {})
             process_status = {
                 'running': bool(live_match),
                 'confirmed_running': bool(live_match),
@@ -232,9 +233,9 @@ exit 0
                     'node_id': live_match.get('node_id') if live_match else None,
                     'status': live_match.get('status') if live_match else 'waiting',
                     'hostname': live_match.get('hostname') if live_match else None,
-                    'gpu_name': live_match.get('gpu_name') if live_match else None,
-                    'gpu_memory': live_match.get('gpu_memory') if live_match else None,
-                    'gpu_num': live_match.get('gpu_num') if live_match else None,
+                    'gpu_name': live_match.get('gpu_name') if live_match else stored_hardware.get('gpu_name'),
+                    'gpu_memory': live_match.get('gpu_memory') if live_match else stored_hardware.get('gpu_memory_gb'),
+                    'gpu_num': live_match.get('gpu_num') if live_match else stored_hardware.get('gpu_num'),
                     'start_layer': live_match.get('start_layer') if live_match else None,
                     'end_layer': live_match.get('end_layer') if live_match else None,
                     'total_layers': live_match.get('total_layers') if live_match else None,
@@ -243,7 +244,7 @@ exit 0
                 'system': {
                     'cpu_percent': live_match.get('cpu_percent') if live_match else None,
                     'ram_used_gb': live_match.get('ram_used_gb') if live_match else None,
-                    'ram_total_gb': live_match.get('ram_total_gb') if live_match else None,
+                    'ram_total_gb': live_match.get('ram_total_gb') if live_match else stored_hardware.get('ram_total_gb'),
                     'ram_used_percent': live_match.get('ram_used_percent') if live_match else None,
                     'disk_used_gb': live_match.get('disk_used_gb') if live_match else None,
                     'disk_total_gb': live_match.get('disk_total_gb') if live_match else None,
@@ -775,6 +776,29 @@ remote_host="$(hostname 2>/dev/null || echo unknown)"
 if [ -f /proc/version ] && grep -qi microsoft /proc/version 2>/dev/null; then
   os_name="WSL"
 fi
+ram_total_gb=0
+if [ -r /proc/meminfo ]; then
+  ram_total_gb=$(awk '/MemTotal:/ {{printf "%d", ($2/1024/1024)+0.5}}' /proc/meminfo 2>/dev/null || echo 0)
+elif command -v sysctl >/dev/null 2>&1; then
+  ram_bytes=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
+  if [ -n "$ram_bytes" ] && [ "$ram_bytes" -gt 0 ] 2>/dev/null; then
+    ram_total_gb=$(python3 -c "print(int(round(${{ram_bytes}}/(1024**3))))" 2>/dev/null || echo 0)
+  fi
+fi
+gpu_name=""
+gpu_num=0
+gpu_memory_gb=0
+if command -v nvidia-smi >/dev/null 2>&1; then
+  gpu_info="$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits 2>/dev/null || true)"
+  if [ -n "$gpu_info" ]; then
+    gpu_name="$(printf "%s\n" "$gpu_info" | head -n 1 | cut -d',' -f1 | xargs)"
+    gpu_num="$(printf "%s\n" "$gpu_info" | grep -c . || echo 0)"
+    gpu_memory_mb="$(printf "%s\n" "$gpu_info" | awk -F',' '{{gsub(/ /, "", $2); sum += $2}} END {{printf "%d", sum}}')"
+    if [ -n "$gpu_memory_mb" ] && [ "$gpu_memory_mb" -gt 0 ] 2>/dev/null; then
+      gpu_memory_gb="$(python3 -c "print(int(round(${{gpu_memory_mb}}/1024)))" 2>/dev/null || echo 0)"
+    fi
+  fi
+fi
 path_exists=0
 has_venv_activate=0
 has_parallax_bin=0
@@ -790,10 +814,14 @@ fi
 PROBE_OS="$os_name" \
 PROBE_USER="$remote_user" \
 PROBE_HOST="$remote_host" \
+PROBE_RAM_TOTAL_GB="$ram_total_gb" \
+PROBE_GPU_NAME="$gpu_name" \
+PROBE_GPU_NUM="$gpu_num" \
+PROBE_GPU_MEMORY_GB="$gpu_memory_gb" \
 PROBE_PATH_EXISTS="$path_exists" \
 PROBE_HAS_VENV_ACTIVATE="$has_venv_activate" \
 PROBE_HAS_PARALLAX_BIN="$has_parallax_bin" \
-python3 -c 'import json, os; print("__PARALLAX_NODE_PROBE__:" + json.dumps({{"os": os.environ.get("PROBE_OS", ""), "user": os.environ.get("PROBE_USER", ""), "host": os.environ.get("PROBE_HOST", ""), "path_exists": os.environ.get("PROBE_PATH_EXISTS", ""), "has_venv_activate": os.environ.get("PROBE_HAS_VENV_ACTIVATE", ""), "has_parallax_bin": os.environ.get("PROBE_HAS_PARALLAX_BIN", "")}}))'
+python3 -c 'import json, os; print("__PARALLAX_NODE_PROBE__:" + json.dumps({{"os": os.environ.get("PROBE_OS", ""), "user": os.environ.get("PROBE_USER", ""), "host": os.environ.get("PROBE_HOST", ""), "ram_total_gb": os.environ.get("PROBE_RAM_TOTAL_GB", ""), "gpu_name": os.environ.get("PROBE_GPU_NAME", ""), "gpu_num": os.environ.get("PROBE_GPU_NUM", ""), "gpu_memory_gb": os.environ.get("PROBE_GPU_MEMORY_GB", ""), "path_exists": os.environ.get("PROBE_PATH_EXISTS", ""), "has_venv_activate": os.environ.get("PROBE_HAS_VENV_ACTIVATE", ""), "has_parallax_bin": os.environ.get("PROBE_HAS_PARALLAX_BIN", "")}}))'
 exit 0
 """)
         result = self._run_ssh_command(target, remote_command, timeout_sec=10)
@@ -809,6 +837,10 @@ exit 0
             'os_name': '',
             'remote_user': '',
             'remote_host': '',
+            'ram_total_gb': 0,
+            'gpu_name': '',
+            'gpu_num': 0,
+            'gpu_memory_gb': 0,
             'path_exists': False,
             'has_venv_activate': False,
             'has_parallax_bin': False,
@@ -842,6 +874,19 @@ exit 0
         path_exists = parsed.get('path_exists') == '1'
         has_venv_activate = parsed.get('has_venv_activate') == '1'
         has_parallax_bin = parsed.get('has_parallax_bin') == '1'
+        try:
+            ram_total_gb = max(0, int(parsed.get('ram_total_gb') or 0))
+        except Exception:
+            ram_total_gb = 0
+        gpu_name = str(parsed.get('gpu_name') or '')
+        try:
+            gpu_num = max(0, int(parsed.get('gpu_num') or 0))
+        except Exception:
+            gpu_num = 0
+        try:
+            gpu_memory_gb = max(0, int(parsed.get('gpu_memory_gb') or 0))
+        except Exception:
+            gpu_memory_gb = 0
 
         notes: list[str] = []
         if os_name == 'Darwin':
@@ -864,6 +909,10 @@ exit 0
             'os_name': os_name,
             'remote_user': remote_user,
             'remote_host': remote_host,
+            'ram_total_gb': ram_total_gb,
+            'gpu_name': gpu_name,
+            'gpu_num': gpu_num,
+            'gpu_memory_gb': gpu_memory_gb,
             'path_exists': path_exists,
             'has_venv_activate': has_venv_activate,
             'has_parallax_bin': has_parallax_bin,

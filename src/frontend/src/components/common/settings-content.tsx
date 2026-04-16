@@ -23,11 +23,18 @@ import {
   Typography,
 } from '@mui/material';
 import {
+  IconAdjustments,
   IconCheck,
+  IconCirclesRelation,
   IconDownload,
+  IconMessageCircle,
   IconInfoCircle,
   IconLoader,
   IconPlus,
+  IconQuestionMark,
+  IconSettings2,
+  IconStack3,
+  IconTransfer,
   IconTrash,
   IconX,
 } from '@tabler/icons-react';
@@ -64,15 +71,15 @@ import { AlertDialog } from '../mui';
 
 type SettingsSectionKey = 'general' | 'cluster' | 'custom-models' | 'nodes' | 'chat' | 'advanced' | 'transfer' | 'about';
 
-const SETTINGS_SECTIONS: ReadonlyArray<{ key: SettingsSectionKey; label: string }> = [
-  { key: 'general', label: 'Overview' },
-  { key: 'nodes', label: 'Nodes' },
-  { key: 'cluster', label: 'Cluster' },
-  { key: 'custom-models', label: 'Custom Models' },
-  { key: 'chat', label: 'Chat' },
-  { key: 'advanced', label: 'Advanced' },
-  { key: 'transfer', label: 'Import & Export' },
-  { key: 'about', label: 'About' },
+const SETTINGS_SECTIONS: ReadonlyArray<{ key: SettingsSectionKey; label: string; icon: FC<{ size?: number }> }> = [
+  { key: 'general', label: 'Overview', icon: IconSettings2 },
+  { key: 'nodes', label: 'Nodes', icon: IconCirclesRelation },
+  { key: 'cluster', label: 'Clusters', icon: IconStack3 },
+  { key: 'custom-models', label: 'Custom Models', icon: IconAdjustments },
+  { key: 'chat', label: 'Chats', icon: IconMessageCircle },
+  { key: 'advanced', label: 'Advanced', icon: IconSettings2 },
+  { key: 'transfer', label: 'Import & Export', icon: IconTransfer },
+  { key: 'about', label: 'About', icon: IconQuestionMark },
 ];
 
 const CHAT_HISTORY_PAGE_SIZE = 20;
@@ -92,12 +99,22 @@ const truncateChatHistoryLabel = (value: string, maxChars = CHAT_HISTORY_LABEL_M
   return value.slice(0, Math.max(0, maxChars - 1)).trimEnd() + '…';
 };
 
+const renderModelVramRequirement = (vram?: number) => (
+  Number(vram || 0) > 0 ? (
+    <Alert severity='warning' icon={false}>
+      <Box component='span' sx={{ whiteSpace: 'nowrap' }}>
+        You&apos;ll need a <strong>{`minimum of ${Number(vram)} GB of total VRAM`}</strong> to host this model.
+      </Box>
+    </Alert>
+  ) : null
+);
+
 export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 'cluster' }) => {
   const navigate = useNavigate();
   const [{ type: hostType }] = useHost();
   const [
     {
-      config: { modelInfo, networkType, initNodesNumber, modelName: selectedModelName, activeClusterId, clusterProfiles },
+      config: { modelInfo, modelInfoList, networkType, initNodesNumber, modelName: selectedModelName, activeClusterId, clusterProfiles },
       clusterInfo: {
         status: clusterStatus,
         topologyChangeAdvisory,
@@ -127,6 +144,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
   const [customModelSourceOptions, setCustomModelSourceOptions] = useState<readonly CustomModelSourceOption[]>([]);
   const [customModelSubmitting, setCustomModelSubmitting] = useState(false);
   const [customModelDeletingId, setCustomModelDeletingId] = useState('');
+  const [pendingDeleteCustomModel, setPendingDeleteCustomModel] = useState<null | { id: string; label: string }>(null);
   const [customModelEditorOpen, setCustomModelEditorOpen] = useState(false);
   const [customModelSearchLoading, setCustomModelSearchLoading] = useState(false);
   const [customModelSearchResults, setCustomModelSearchResults] = useState<readonly CustomModelSearchResult[]>([]);
@@ -151,6 +169,8 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
   const [chatHistoryExportingId, setChatHistoryExportingId] = useState('');
   const [chatHistoryDeletingId, setChatHistoryDeletingId] = useState('');
   const [pendingDeleteConversation, setPendingDeleteConversation] = useState<null | { id: string; label: string }>(null);
+  const [pendingDeleteCluster, setPendingDeleteCluster] = useState<null | { id: string; label: string }>(null);
+  const [pendingDeleteNode, setPendingDeleteNode] = useState<null | { id: string; label: string }>(null);
   const [nodesInventory, setNodesInventory] = useState<Array<{
     local_id: string;
     id: string;
@@ -161,6 +181,13 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     joined: boolean;
     management_mode: 'ssh_managed' | 'manual';
     network_scope: 'local' | 'remote';
+    hardware?: {
+      gpu_name?: string;
+      gpu_num?: number;
+      gpu_memory_gb?: number;
+      ram_total_gb?: number;
+      updated_at?: number;
+    };
     linked_clusters: readonly { id: string; name: string }[];
     linked_cluster_ids: readonly string[];
     linked_cluster_names: readonly string[];
@@ -171,13 +198,21 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
   const [nodesInventoryMessage, setNodesInventoryMessage] = useState('');
   const [nodesOverviewRefreshToken, setNodesOverviewRefreshToken] = useState(0);
   const [nodeEditorOpen, setNodeEditorOpen] = useState(false);
+  const [nodeEditorMode, setNodeEditorMode] = useState<'add' | 'edit'>('add');
+  const [nodeEditingLocalId, setNodeEditingLocalId] = useState('');
   const [nodeEditorTab, setNodeEditorTab] = useState<'discovered' | 'manual'>('manual');
   const [nodeDraft, setNodeDraft] = useState<{
+    display_name: string;
     ssh_target: string;
     parallax_path: string;
+    hostname_hint: string;
+    management_mode: 'ssh_managed' | 'manual';
   }>({
+    display_name: '',
     ssh_target: '',
     parallax_path: '',
+    hostname_hint: '',
+    management_mode: 'ssh_managed',
   });
   const [nodeDraftProbeLoading, setNodeDraftProbeLoading] = useState(false);
   const [nodeDraftProbeResult, setNodeDraftProbeResult] = useState<null | {
@@ -192,6 +227,10 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     os_name?: string;
     remote_user?: string;
     remote_host?: string;
+    ram_total_gb?: number;
+    gpu_name?: string;
+    gpu_num?: number;
+    gpu_memory_gb?: number;
     path_exists?: boolean;
     has_venv_activate?: boolean;
     has_parallax_bin?: boolean;
@@ -201,6 +240,11 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
   const [buildStatus, setBuildStatus] = useState<any | null>(null);
   const [buildStatusLoading, setBuildStatusLoading] = useState(false);
   const [clusterNameDraft, setClusterNameDraft] = useState('');
+  const [clusterModalOpen, setClusterModalOpen] = useState(false);
+  const [clusterModalMode, setClusterModalMode] = useState<'add' | 'configure'>('configure');
+  const [clusterDraftName, setClusterDraftName] = useState('');
+  const [clusterDraftModelName, setClusterDraftModelName] = useState('');
+  const [clusterDraftAssignedNodeIds, setClusterDraftAssignedNodeIds] = useState<readonly string[]>([]);
   const [transferMessage, setTransferMessage] = useState('');
   const [transferError, setTransferError] = useState('');
   const [importingSettings, setImportingSettings] = useState(false);
@@ -244,6 +288,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     joined: !!host.joined,
     management_mode: host.management_mode || 'ssh_managed',
     network_scope: host.network_scope || 'remote',
+    hardware: host.hardware || {},
     linked_clusters: host.linked_clusters || [],
     linked_cluster_ids: host.linked_cluster_ids || [],
     linked_cluster_names: host.linked_cluster_names || [],
@@ -304,17 +349,30 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
       .map((node) => [normalizeHostname(node.hostname), node] as const)
       .filter(([hostname]) => !!hostname),
   );
+  const getHostGpuMemoryGb = (
+    host: { hardware?: { gpu_memory_gb?: number; ram_total_gb?: number } },
+    node?: { gpuMemory?: number; ramTotalGb?: number },
+  ) => Math.max(0, Number(node?.gpuMemory || host.hardware?.gpu_memory_gb || 0));
+  const getHostClusterMemoryGb = (
+    host: { hardware?: { gpu_memory_gb?: number; ram_total_gb?: number } },
+    node?: { gpuMemory?: number; ramTotalGb?: number },
+  ) => {
+    const gpuMemoryGb = getHostGpuMemoryGb(host, node);
+    if (gpuMemoryGb > 0) {
+      return gpuMemoryGb;
+    }
+    return Math.max(0, Number(node?.ramTotalGb || host.hardware?.ram_total_gb || 0));
+  };
   const assignedHosts = nodesInventory.filter((host) => selectedClusterAssignedNodeIds.has(host.id));
   const assignedHostDetails = assignedHosts.map((host) => ({
     host,
     node: availableNodeByHostname.get(normalizeHostname(host.hostname_hint || host.ssh_target)),
   }));
   const availableAssignedHosts = assignedHosts.filter((host) => host.joined);
-  const availableAssignedVram = assignedHostDetails
-    .filter((item) => item.host.joined)
-    .reduce((sum, item) => sum + Math.max(0, Number(item.node?.gpuMemory || 0)), 0);
-  const knownAssignedHardwareCount = assignedHostDetails.filter((item) => Number(item.node?.gpuMemory || 0) > 0).length;
-  const remainingVramGap = Math.max(0, Number(modelInfo?.vram || 0) - availableAssignedVram);
+  const assignedTotalMemory = assignedHostDetails
+    .reduce((sum, item) => sum + getHostClusterMemoryGb(item.host, item.node), 0);
+  const knownAssignedHardwareCount = assignedHostDetails.filter((item) => getHostClusterMemoryGb(item.host, item.node) > 0).length;
+  const remainingMemoryGap = Math.max(0, Number(modelInfo?.vram || 0) - assignedTotalMemory);
   const formatChatTimestamp = (value?: number) => {
     if (!value) {
       return '';
@@ -330,6 +388,53 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
       .map((host) => normalizeHostname(host.hostname_hint || host.ssh_target))
       .filter((hostname) => !!hostname),
   );
+  const draftAssignedHosts = nodesInventory.filter((host) => clusterDraftAssignedNodeIds.includes(host.id));
+  const draftAvailableAssignedHosts = draftAssignedHosts.filter((host) =>
+    nodeInfoList.some((node) => node.id === host.id && node.status === 'available'),
+  );
+  const draftAssignedHostDetails = draftAssignedHosts.map((host) => ({
+    host,
+    node: nodeInfoList.find((node) => node.id === host.id),
+  }));
+  const draftAvailableAssignedMemory = draftAssignedHostDetails
+    .reduce((sum, item) => sum + getHostClusterMemoryGb(item.host, item.node), 0);
+  const draftKnownAssignedHardwareCount = draftAssignedHostDetails.filter((item) => getHostClusterMemoryGb(item.host, item.node) > 0).length;
+  const draftModelInfo = modelInfoList.find((item) => item.name === clusterDraftModelName);
+  const draftRemainingMemoryGap = Math.max(0, Number(draftModelInfo?.vram || 0) - draftAvailableAssignedMemory);
+  const clusterModalCapacityAlert = (() => {
+    if (clusterModalMode === 'add') {
+      if (!draftModelInfo || draftModelInfo.vram <= 0) {
+        return <Alert severity='info'>Model memory requirement is unknown, so Parallax cannot confirm cluster capacity yet.</Alert>;
+      }
+      if (clusterDraftAssignedNodeIds.length === 0) {
+        return <Alert severity='warning'>No nodes are assigned to this cluster yet.</Alert>;
+      }
+      if (draftAvailableAssignedMemory >= draftModelInfo.vram) {
+        return <Alert severity='success'>Assigned nodes currently report enough memory for this model.</Alert>;
+      }
+      return (
+        <Alert severity='warning'>
+          Assigned nodes currently report {draftAvailableAssignedMemory} GB, about {draftRemainingMemoryGap} GB short of the model requirement.
+        </Alert>
+      );
+    }
+    if (!modelInfo || modelInfo.vram <= 0) {
+      return <Alert severity='info'>Model memory requirement is unknown, so Parallax cannot confirm cluster capacity yet.</Alert>;
+    }
+    if (selectedClusterAssignedNodeIds.size === 0) {
+      return <Alert severity='warning'>No nodes are assigned to this cluster yet.</Alert>;
+    }
+    if (assignedTotalMemory >= modelInfo.vram) {
+      return <Alert severity='success'>Assigned nodes currently provide enough memory for this model.</Alert>;
+    }
+    return (
+      <Alert severity='warning'>
+        Assigned nodes currently provide {assignedTotalMemory} GB, about {remainingMemoryGap} GB short of the model requirement.
+      </Alert>
+    );
+  })();
+  const canProceedWithAddCluster = !!draftModelInfo && draftModelInfo.vram > 0 && draftAvailableAssignedMemory >= draftModelInfo.vram;
+  const canProceedWithConfiguredCluster = !!modelInfo && modelInfo.vram > 0 && assignedTotalMemory >= modelInfo.vram;
   const discoveredNodeCandidates = nodeInfoList
     .filter((node) => !!normalizeHostname(node.hostname))
     .filter((node) => !configuredHostnames.has(normalizeHostname(node.hostname)));
@@ -344,7 +449,13 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
   }, [discoveredNodeCandidates.length, nodeEditorOpen, nodeEditorTab]);
 
   useEffect(() => {
-    if (!nodeEditorOpen || nodeEditorTab !== 'manual') {
+    if (!nodeEditorOpen || (nodeEditorMode === 'add' && nodeEditorTab !== 'manual')) {
+      setNodeDraftProbeLoading(false);
+      setNodeDraftProbeResult(null);
+      setNodeDraftProbeError('');
+      return;
+    }
+    if (nodeDraft.management_mode !== 'ssh_managed') {
       setNodeDraftProbeLoading(false);
       setNodeDraftProbeResult(null);
       setNodeDraftProbeError('');
@@ -385,7 +496,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
       cancelled = true;
       window.clearTimeout(timeoutId);
     };
-  }, [nodeDraft.parallax_path, nodeDraft.ssh_target, nodeEditorOpen, nodeEditorTab]);
+  }, [nodeDraft.management_mode, nodeDraft.parallax_path, nodeDraft.ssh_target, nodeEditorMode, nodeEditorOpen, nodeEditorTab]);
   const customModelUrlValidationError = (() => {
     if (customModelSourceType !== 'url') {
       return '';
@@ -668,6 +779,14 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     }
   };
 
+  const confirmDeleteCustomModel = async () => {
+    if (!pendingDeleteCustomModel) {
+      return;
+    }
+    await onDeleteCustomModel(pendingDeleteCustomModel.id);
+    setPendingDeleteCustomModel(null);
+  };
+
   const onLoadMoreCustomModelSearchResults = useRefCallback(async () => {
     const query = customModelSourceValue.trim();
     if (
@@ -746,7 +865,11 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     await setActiveCluster(clusterId);
   };
 
-  const onCreateClusterProfile = async () => {
+  const onCreateClusterProfile = async (params?: {
+    name?: string;
+    model_name?: string;
+    assigned_node_ids?: readonly string[];
+  }) => {
     const nextIndex = clusterProfiles.length + 1;
     const source = selectedCluster || {
       model_name: selectedModelName,
@@ -756,17 +879,34 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
       network_type: networkType,
       advanced: {},
     };
+    const assignedNodeIds = [...(params?.assigned_node_ids || source.assigned_node_ids || [])];
     const newCluster: AppClusterProfile = {
       id: `cluster-${Date.now()}`,
-      name: `Cluster ${nextIndex}`,
-      model_name: String(source.model_name || ''),
-      init_nodes_num: Math.max(1, Number((source.assigned_node_ids || []).length || source.init_nodes_num || 1)),
-      assigned_node_ids: [...(source.assigned_node_ids || [])],
+      name: String(params?.name || '').trim() || `Cluster ${nextIndex}`,
+      model_name: String(params?.model_name || source.model_name || ''),
+      init_nodes_num: Math.max(1, Number(assignedNodeIds.length || source.init_nodes_num || 1)),
+      assigned_node_ids: assignedNodeIds,
       is_local_network: source.network_type === 'remote' ? false : true,
       network_type: source.network_type === 'remote' ? 'remote' : 'local',
       advanced: { ...(source.advanced || {}) },
     };
     await applyClusterProfilesState([...clusterProfiles, newCluster], newCluster.id);
+  };
+
+  const closeClusterModal = () => {
+    setClusterModalOpen(false);
+    setClusterDraftName('');
+    setClusterDraftModelName('');
+    setClusterDraftAssignedNodeIds([]);
+  };
+
+  const onSubmitCreateClusterProfile = async () => {
+    await onCreateClusterProfile({
+      name: clusterDraftName,
+      model_name: clusterDraftModelName,
+      assigned_node_ids: clusterDraftAssignedNodeIds,
+    });
+    closeClusterModal();
   };
 
   const onSaveClusterName = async () => {
@@ -783,13 +923,62 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     );
   };
 
-  const onDeleteClusterProfile = async () => {
-    if (!selectedCluster || clusterProfiles.length <= 1) {
+  const onDeleteClusterProfile = async (clusterId?: string) => {
+    const targetId = String(clusterId || selectedCluster?.id || '').trim();
+    if (!targetId || clusterProfiles.length <= 1) {
       return;
     }
-    const remaining = clusterProfiles.filter((item) => item.id !== selectedCluster.id);
-    const nextActiveId = remaining[0]?.id || '';
+    const remaining = clusterProfiles.filter((item) => item.id !== targetId);
+    const nextActiveId = targetId === activeClusterId
+      ? (remaining[0]?.id || '')
+      : (activeClusterId || remaining[0]?.id || '');
     await applyClusterProfilesState(remaining, nextActiveId);
+    if (targetId === activeClusterId) {
+      setClusterModalOpen(false);
+    }
+  };
+
+  const openClusterConfig = async (clusterId: string) => {
+    if (!clusterId) {
+      return;
+    }
+    if (clusterId !== activeClusterId) {
+      await onSelectClusterProfile(clusterId);
+    }
+    setClusterModalMode('configure');
+    setClusterModalOpen(true);
+  };
+
+  const openClusterEditor = () => {
+    const nextIndex = clusterProfiles.length + 1;
+    const source = selectedCluster || {
+      model_name: selectedModelName,
+      assigned_node_ids: [],
+    };
+    setClusterDraftName(`Cluster ${nextIndex}`);
+    setClusterDraftModelName(String(source.model_name || modelInfoList[0]?.name || ''));
+    setClusterDraftAssignedNodeIds([...(source.assigned_node_ids || [])]);
+    setClusterModalMode('add');
+    setClusterModalOpen(true);
+  };
+
+  const onToggleDraftAssignedNode = (hostId: string) => {
+    if (!hostId) {
+      return;
+    }
+    setClusterDraftAssignedNodeIds((prev) => (
+      prev.includes(hostId)
+        ? prev.filter((item) => item !== hostId)
+        : [...prev, hostId]
+    ));
+  };
+
+  const confirmDeleteClusterProfile = async () => {
+    if (!pendingDeleteCluster) {
+      return;
+    }
+    await onDeleteClusterProfile(pendingDeleteCluster.id);
+    setPendingDeleteCluster(null);
   };
 
   const onClearAllChatHistory = async () => {
@@ -888,12 +1077,17 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
 
   const closeNodeEditor = () => {
     setNodeEditorOpen(false);
+    setNodeEditorMode('add');
+    setNodeEditingLocalId('');
     setNodeDraftProbeLoading(false);
     setNodeDraftProbeResult(null);
     setNodeDraftProbeError('');
     setNodeDraft({
+      display_name: '',
       ssh_target: '',
       parallax_path: '',
+      hostname_hint: '',
+      management_mode: 'ssh_managed',
     });
   };
 
@@ -908,6 +1102,13 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
       joined: boolean;
       management_mode: 'ssh_managed' | 'manual';
       network_scope: 'local' | 'remote';
+      hardware?: {
+        gpu_name?: string;
+        gpu_num?: number;
+        gpu_memory_gb?: number;
+        ram_total_gb?: number;
+        updated_at?: number;
+      };
       linked_clusters: readonly { id: string; name: string }[];
       linked_cluster_ids: readonly string[];
       linked_cluster_names: readonly string[];
@@ -927,6 +1128,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
           hostname_hint: item.hostname_hint || undefined,
           management_mode: item.management_mode,
           network_scope: item.network_scope,
+          hardware: item.hardware,
         })),
       );
       setNodesInventory((result.hosts || []).map(mapInventoryHost));
@@ -949,19 +1151,65 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     const nextItem: (typeof nodesInventory)[number] = {
       local_id: nextInventoryRowId(),
       id: '',
-      display_name: sshTarget,
+      display_name: nodeDraft.display_name.trim() || sshTarget,
       ssh_target: sshTarget,
       parallax_path: parallaxPath,
       hostname_hint: normalizeHostname(sshTarget),
       joined: false,
       management_mode: 'ssh_managed',
       network_scope: 'remote',
+      hardware: {
+        gpu_name: nodeDraftProbeResult?.gpu_name || '',
+        gpu_num: Number(nodeDraftProbeResult?.gpu_num || 0),
+        gpu_memory_gb: Number(nodeDraftProbeResult?.gpu_memory_gb || 0),
+        ram_total_gb: Number(nodeDraftProbeResult?.ram_total_gb || 0),
+        updated_at: Date.now() / 1000,
+      },
       linked_clusters: [],
       linked_cluster_ids: [],
       linked_cluster_names: [],
       linked_cluster_count: 0,
     };
     await persistNodesInventory([...nodesInventory, nextItem], 'Node added to configured inventory');
+    closeNodeEditor();
+  };
+
+  const onSaveNodeDraft = async () => {
+    if (!nodeEditingLocalId) {
+      return;
+    }
+    const nextInventory = nodesInventory.map((item) => {
+      if (item.local_id !== nodeEditingLocalId) {
+        return item;
+      }
+      if (nodeDraft.management_mode === 'manual') {
+        return {
+          ...item,
+          display_name: nodeDraft.display_name.trim() || nodeDraft.hostname_hint.trim() || item.display_name,
+          ssh_target: '',
+          parallax_path: '',
+          hostname_hint: normalizeHostname(nodeDraft.hostname_hint),
+          management_mode: 'manual' as const,
+        };
+      }
+      return {
+        ...item,
+        display_name: nodeDraft.display_name.trim() || nodeDraft.ssh_target.trim() || item.display_name,
+        ssh_target: nodeDraft.ssh_target.trim(),
+        parallax_path: nodeDraft.parallax_path.trim(),
+        hostname_hint: normalizeHostname(nodeDraft.ssh_target),
+        management_mode: 'ssh_managed' as const,
+        hardware: {
+          ...(item.hardware || {}),
+          gpu_name: nodeDraftProbeResult?.gpu_name || item.hardware?.gpu_name || '',
+          gpu_num: Number(nodeDraftProbeResult?.gpu_num || item.hardware?.gpu_num || 0),
+          gpu_memory_gb: Number(nodeDraftProbeResult?.gpu_memory_gb || item.hardware?.gpu_memory_gb || 0),
+          ram_total_gb: Number(nodeDraftProbeResult?.ram_total_gb || item.hardware?.ram_total_gb || 0),
+          updated_at: nodeDraftProbeResult ? Date.now() / 1000 : item.hardware?.updated_at,
+        },
+      };
+    });
+    await persistNodesInventory(nextInventory, 'Configured node updated');
     closeNodeEditor();
   };
 
@@ -983,6 +1231,13 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
           joined: node.status === 'available',
           management_mode: 'manual',
           network_scope: 'remote',
+          hardware: {
+            gpu_name: node.gpuName || '',
+            gpu_num: Number(node.gpuNumber || 0),
+            gpu_memory_gb: Number(node.gpuMemory || 0),
+            ram_total_gb: Number(node.ramTotalGb || 0),
+            updated_at: Date.now() / 1000,
+          },
           linked_clusters: [],
           linked_cluster_ids: [],
           linked_cluster_names: [],
@@ -1011,6 +1266,48 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
       return;
     }
     await onRemoveInventoryNode(targetLocalId);
+  };
+
+  const openConfiguredNodeEditor = (host: {
+    id: string;
+    display_name: string;
+    ssh_target: string;
+    hostname_hint: string;
+    management_mode?: 'ssh_managed' | 'manual';
+    parallax_path?: string;
+  }) => {
+    const target = nodesInventory.find((item) => item.id === host.id)
+      || nodesInventory.find((item) => item.ssh_target === host.ssh_target)
+      || nodesInventory.find((item) => item.hostname_hint === normalizeHostname(host.hostname_hint));
+    if (!target) {
+      setNodesInventoryMessage('Configured node could not be matched in inventory');
+      return;
+    }
+    setNodeEditorMode('edit');
+    setNodeEditingLocalId(target.local_id);
+    setNodeEditorTab('manual');
+    setNodeDraft({
+      display_name: target.display_name || '',
+      ssh_target: target.ssh_target || '',
+      parallax_path: target.parallax_path || '',
+      hostname_hint: target.hostname_hint || '',
+      management_mode: target.management_mode || 'ssh_managed',
+    });
+    setNodeDraftProbeResult(null);
+    setNodeDraftProbeError('');
+    setNodeEditorOpen(true);
+  };
+
+  const confirmDeleteNode = async () => {
+    if (!pendingDeleteNode) {
+      return;
+    }
+    const target = nodesInventory.find((item) => item.id === pendingDeleteNode.id)
+      || nodesInventory.find((item) => item.local_id === pendingDeleteNode.id);
+    if (target) {
+      await onRemoveInventoryNode(target.local_id);
+    }
+    setPendingDeleteNode(null);
   };
 
   const onExportSettings = async () => {
@@ -1110,188 +1407,413 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
       return (
         <Stack sx={{ gap: 1.25 }}>
           <Stack direction='row' sx={{ alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
-            <Typography variant='h2'>Cluster</Typography>
-            {topologyChangeAdvisory.show && topologyChangeAdvisory.canRebalance && (
-              <Button size='small' variant='outlined' color='warning' disabled={rebalancingTopology} onClick={onClickRebalanceTopology}>
-                {rebalancingTopology ? 'Rebalancing...' : 'Rebalance now'}
-              </Button>
-            )}
-          </Stack>
-          <Typography variant='body2' color='text.secondary'>
-            A saved cluster profile combines model choice, assigned nodes, and startup capacity into one scheduler configuration. Parallax runs one active cluster at a time, but you can keep multiple cluster definitions here and switch between them.
-          </Typography>
-          <Stack sx={{ gap: 1 }}>
-            <Typography variant='body1'>Saved clusters</Typography>
-            <Stack direction='row' sx={{ gap: 1, flexWrap: 'wrap' }}>
-              {clusterProfiles.map((cluster) => (
-                <Button
-                  key={cluster.id}
-                  variant={cluster.id === activeClusterId ? 'contained' : 'outlined'}
-                  onClick={() => void onSelectClusterProfile(cluster.id)}
-                >
-                  {cluster.name}
+            <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75 }}>
+              <Typography variant='h2'>Cluster</Typography>
+              <Tooltip
+                title='Saved clusters are reusable scheduler configurations. Each one keeps its own model choice, assigned nodes, and startup planning.'
+                placement='right'
+                slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
+              >
+                <IconButton size='small' sx={{ color: 'text.secondary', p: 0.25 }}>
+                  <IconInfoCircle size={16} />
+                </IconButton>
+              </Tooltip>
+            </Stack>
+            <Stack direction='row' sx={{ gap: 1, alignItems: 'center' }}>
+              {topologyChangeAdvisory.show && topologyChangeAdvisory.canRebalance && (
+                <Button size='small' variant='outlined' color='warning' disabled={rebalancingTopology} onClick={onClickRebalanceTopology}>
+                  {rebalancingTopology ? 'Rebalancing...' : 'Rebalance now'}
                 </Button>
-              ))}
-              <Button variant='outlined' onClick={() => void onCreateClusterProfile()}>New cluster</Button>
-            </Stack>
-            <Stack direction={{ xs: 'column', md: 'row' }} sx={{ gap: 1 }}>
-              <TextField
-                label='Cluster name'
-                size='small'
-                fullWidth
-                value={clusterNameDraft}
-                onChange={(event) => setClusterNameDraft(event.target.value)}
-              />
-              <Button variant='outlined' onClick={() => void onSaveClusterName()} disabled={!selectedCluster || !clusterNameDraft.trim() || clusterNameDraft.trim() === selectedCluster.name}>
-                Save name
-              </Button>
-              <Button variant='text' color='error' onClick={() => void onDeleteClusterProfile()} disabled={clusterProfiles.length <= 1}>
-                Delete cluster
+              )}
+              <Button
+                variant='outlined'
+                onClick={openClusterEditor}
+                startIcon={<IconPlus size={16} />}
+              >
+                Add cluster
               </Button>
             </Stack>
           </Stack>
-          <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75 }}>
-            <Typography variant='body1'>Model</Typography>
-            <Tooltip
-              title='Choose the model this saved cluster should host, then size startup capacity around it.'
-              placement='right'
-              slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
-            >
-              <IconButton size='small' sx={{ color: 'text.secondary', p: 0.25 }}>
-                <IconInfoCircle size={16} />
-              </IconButton>
-            </Tooltip>
-          </Stack>
-          <ModelSelect autoCommit />
-          {!!modelInfo && modelInfo.vram > 0 && (
-            <Alert severity='warning' icon={false}>
-              <Box component='span' sx={{ whiteSpace: 'nowrap' }}>
-                You&apos;ll need a <strong>{`minimum of ${modelInfo.vram} GB of total VRAM`}</strong> to host this model.
-              </Box>
-            </Alert>
-          )}
           <Typography variant='body2' color='text.secondary'>
-            Define the model for this saved cluster, assign which nodes it may use, and then set the initial number of joined nodes the scheduler should plan around. Node overlap across saved clusters is allowed, but it is your decision to keep or remove that overlap.
+            Saved clusters are reusable scheduler configurations. Open one when you want to change its model, assigned nodes, or startup planning.
           </Typography>
-          <Stack sx={{ gap: 1 }}>
-            <Typography variant='body1'>Assigned nodes</Typography>
-            <Typography variant='body2' color='text.secondary'>
-              Only assigned nodes are intended to serve this cluster. Unassigned nodes stay out of the shard pool for this saved cluster.
-            </Typography>
-            {nodesInventory.length === 0 && (
-              <Alert severity='info'>
-                No managed hosts are defined yet. Add nodes in <strong>Settings &gt; Nodes</strong> before assigning them to this cluster.
-              </Alert>
-            )}
-            {nodesInventory.length > 0 && (
-              <Stack sx={{ gap: 1, maxHeight: '18rem', overflowY: 'auto', pr: 0.5 }}>
-                {nodesInventory.map((host) => {
-                  const linkedOtherClusters = host.linked_clusters.filter((cluster) => cluster.id !== selectedCluster?.id);
-                  const assignedHere = selectedClusterAssignedNodeIds.has(host.id);
-                  return (
-                    <Stack
-                      key={host.id || host.local_id}
-                      direction='row'
-                      sx={{
-                        alignItems: 'flex-start',
-                        justifyContent: 'space-between',
-                        gap: 1,
-                        px: 1.25,
-                        py: 1,
-                        borderRadius: 2,
-                        border: '1px solid',
-                        borderColor: assignedHere ? 'primary.main' : 'divider',
-                        bgcolor: assignedHere ? 'action.selected' : 'background.paper',
-                      }}
-                    >
-                      <Stack sx={{ minWidth: 0, flex: 1, gap: 0.5 }}>
-                        <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75, flexWrap: 'wrap' }}>
-                          <Checkbox
-                            size='small'
-                            checked={assignedHere}
-                            onChange={() => void onToggleAssignedNode(host.id)}
-                            sx={{ p: 0, mr: 0.5 }}
-                          />
-                          <Typography variant='body2' sx={{ fontWeight: 600 }}>
-                            {host.display_name || host.ssh_target || host.hostname_hint || 'Unnamed host'}
-                          </Typography>
-                          <Chip size='small' variant='outlined' label={host.management_mode === 'manual' ? 'Self-joining' : 'SSH managed'} />
-                          {host.joined
-                            ? <Chip size='small' color='success' label='Online' />
-                            : <Chip size='small' variant='outlined' label='Offline' />}
-                          {linkedOtherClusters.length > 0 && (
-                            <Chip
-                              size='small'
-                              color='warning'
-                              variant='outlined'
-                              label={linkedOtherClusters.length === 1 ? 'Used elsewhere' : `Used by ${linkedOtherClusters.length} clusters`}
+          <Stack sx={{ gap: 0.75 }}>
+            {clusterProfiles.map((cluster) => (
+              <Stack
+                key={cluster.id}
+                direction='row'
+                sx={{
+                  alignItems: 'flex-start',
+                  justifyContent: 'space-between',
+                  gap: 1.5,
+                  px: 1.25,
+                  py: 1,
+                  borderRadius: 2,
+                  border: '1px solid',
+                  borderColor: 'divider',
+                  bgcolor: 'background.paper',
+                }}
+              >
+                <Stack sx={{ minWidth: 0, gap: 0.25, flex: 1 }}>
+                  <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75, flexWrap: 'wrap' }}>
+                    <Typography variant='body2' sx={{ fontWeight: 600 }}>
+                      {cluster.name}
+                    </Typography>
+                    {cluster.model_name && (
+                      <Chip size='small' variant='outlined' label={cluster.model_name} />
+                    )}
+                  </Stack>
+                  <Stack direction='row' sx={{ gap: 0.5, flexWrap: 'wrap' }}>
+                    <Typography variant='caption' color='text.secondary'>
+                      {(cluster.assigned_node_ids || []).length} assigned node{(cluster.assigned_node_ids || []).length === 1 ? '' : 's'}
+                    </Typography>
+                    <Typography variant='caption' color='text.secondary'>
+                      Startup target {Math.max(1, Number(cluster.init_nodes_num || (cluster.assigned_node_ids || []).length || 1))}
+                    </Typography>
+                    {!cluster.model_name && (
+                      <Typography variant='caption' color='text.secondary'>
+                        No model selected
+                      </Typography>
+                    )}
+                  </Stack>
+                </Stack>
+                <Stack direction='row' sx={{ gap: 0.25, alignItems: 'center', flex: 'none' }}>
+                  <Tooltip title='Configure cluster'>
+                    <IconButton size='small' onClick={() => void openClusterConfig(cluster.id)}>
+                      <IconAdjustments size={16} />
+                    </IconButton>
+                  </Tooltip>
+                  <Tooltip title={clusterProfiles.length <= 1 ? 'At least one cluster is required' : 'Delete cluster'}>
+                    <span>
+                      <IconButton
+                        size='small'
+                        color='error'
+                        disabled={clusterProfiles.length <= 1}
+                        onClick={() => setPendingDeleteCluster({ id: cluster.id, label: cluster.name })}
+                      >
+                        <IconTrash size={16} />
+                      </IconButton>
+                    </span>
+                  </Tooltip>
+                </Stack>
+              </Stack>
+            ))}
+          </Stack>
+          <Dialog open={clusterModalOpen} onClose={closeClusterModal} fullWidth maxWidth='md'>
+            <DialogTitle sx={{ pr: 6 }}>
+              {clusterModalMode === 'add' ? 'Add Cluster' : 'Configure Cluster'}
+              <IconButton
+                onClick={closeClusterModal}
+                aria-label='Close cluster dialog'
+                sx={{ position: 'absolute', right: 16, top: 16 }}
+              >
+                <IconX size={18} />
+              </IconButton>
+            </DialogTitle>
+            <DialogContent dividers>
+              <Stack sx={{ gap: 1.25, pt: 0.5 }}>
+                {clusterModalMode === 'add' ? (
+                  <Typography variant='body2' color='text.secondary'>
+                    New clusters start from the current cluster’s model and assigned nodes, but you can adjust them before creating the cluster.
+                  </Typography>
+                ) : null}
+                <Stack direction={{ xs: 'column', md: 'row' }} sx={{ gap: 1 }}>
+                  <TextField
+                    label='Cluster name'
+                    size='small'
+                    fullWidth
+                    value={clusterModalMode === 'add' ? clusterDraftName : clusterNameDraft}
+                    onChange={(event) => {
+                      if (clusterModalMode === 'add') {
+                        setClusterDraftName(event.target.value);
+                      } else {
+                        setClusterNameDraft(event.target.value);
+                      }
+                    }}
+                    placeholder={clusterModalMode === 'add' ? `Cluster ${clusterProfiles.length + 1}` : undefined}
+                  />
+                  {clusterModalMode === 'configure' && (
+                    <>
+                      <Button variant='outlined' onClick={() => void onSaveClusterName()} disabled={!selectedCluster || !clusterNameDraft.trim() || clusterNameDraft.trim() === selectedCluster.name}>
+                        Save name
+                      </Button>
+                      <Button variant='text' color='error' onClick={() => setPendingDeleteCluster({ id: selectedCluster?.id || '', label: selectedCluster?.name || 'this cluster' })} disabled={clusterProfiles.length <= 1 || !selectedCluster?.id}>
+                        Delete cluster
+                      </Button>
+                    </>
+                  )}
+                </Stack>
+                <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75 }}>
+                  <Typography variant='body1'>Model</Typography>
+                  <Tooltip
+                    title={clusterModalMode === 'add' ? 'Choose the model this new cluster should host.' : 'Choose the model this saved cluster should host, then size startup capacity around it.'}
+                    placement='right'
+                    slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
+                  >
+                    <IconButton size='small' sx={{ color: 'text.secondary', p: 0.25 }}>
+                      <IconInfoCircle size={16} />
+                    </IconButton>
+                  </Tooltip>
+                </Stack>
+                {clusterModalMode === 'add' ? (
+                  <TextField
+                    select
+                    label='Model'
+                    size='small'
+                    fullWidth
+                    value={clusterDraftModelName}
+                    onChange={(event) => setClusterDraftModelName(String(event.target.value))}
+                    sx={{
+                      '& .MuiOutlinedInput-root': {
+                        minHeight: '4rem',
+                        borderRadius: 3,
+                        px: 0.5,
+                      },
+                      '& .MuiSelect-select': {
+                        display: 'flex',
+                        alignItems: 'center',
+                        minHeight: '4rem !important',
+                        py: '0.375rem !important',
+                        pl: '0.25rem !important',
+                      },
+                    }}
+                    SelectProps={{
+                      renderValue: (value) => {
+                        const selected = modelInfoList.find((item) => item.name === value);
+                        if (!selected) {
+                          return value as string;
+                        }
+                        return (
+                          <Stack direction='row' sx={{ alignItems: 'center', gap: 1, minWidth: 0 }}>
+                            <Box
+                              component='img'
+                              src={selected.logoUrl}
+                              alt=''
+                              sx={{
+                                width: '2.25rem',
+                                height: '2.25rem',
+                                borderRadius: '0.5rem',
+                                border: '1px solid',
+                                borderColor: 'divider',
+                                objectFit: 'cover',
+                                flex: 'none',
+                              }}
                             />
+                            <Stack sx={{ minWidth: 0, flex: 1, gap: 0.125 }}>
+                              <Typography variant='subtitle2' sx={{ fontSize: '0.875rem', lineHeight: '1.125rem', fontWeight: 300 }}>
+                                {selected.displayName}
+                              </Typography>
+                              <Typography variant='body2' color='text.secondary' sx={{ fontSize: '0.75rem', lineHeight: '1rem', fontWeight: 300 }}>
+                                {selected.name}
+                              </Typography>
+                            </Stack>
+                            {selected.vram > 0 && (
+                              <Chip size='small' variant='outlined' label={`${selected.vram} GB`} />
+                            )}
+                          </Stack>
+                        );
+                      },
+                    }}
+                  >
+                    {modelInfoList.map((item) => (
+                      <MenuItem key={item.name} value={item.name}>
+                        <Stack direction='row' sx={{ alignItems: 'center', gap: 1, minWidth: 0, width: '100%' }}>
+                          <Box
+                            component='img'
+                            src={item.logoUrl}
+                            alt=''
+                            sx={{
+                              width: '2.25rem',
+                              height: '2.25rem',
+                              borderRadius: '0.5rem',
+                              border: '1px solid',
+                              borderColor: 'divider',
+                              objectFit: 'cover',
+                              flex: 'none',
+                            }}
+                          />
+                          <Stack sx={{ minWidth: 0, flex: 1, gap: 0.125 }}>
+                            <Typography variant='subtitle2' sx={{ fontSize: '0.875rem', lineHeight: '1.125rem', fontWeight: 300 }}>
+                              {item.displayName}
+                            </Typography>
+                            <Typography variant='body2' color='text.secondary' sx={{ fontSize: '0.75rem', lineHeight: '1rem', fontWeight: 300 }}>
+                              {item.name}
+                            </Typography>
+                          </Stack>
+                          {item.vram > 0 && (
+                            <Chip size='small' variant='outlined' label={`${item.vram} GB`} />
                           )}
                         </Stack>
-                        {host.parallax_path && (
-                          <Typography variant='caption' color='text.secondary'>
-                            PARALLAX_PATH: {host.parallax_path}
-                          </Typography>
-                        )}
-                        {host.management_mode === 'manual' && (
-                          <Typography variant='caption' color='text.secondary'>
-                            Self-joining node: Parallax does not SSH into or restart this node.
-                          </Typography>
-                        )}
-                        <Stack direction='row' sx={{ gap: 0.5, flexWrap: 'wrap' }}>
-                          {host.linked_cluster_count === 0 && <Chip size='small' variant='outlined' label='Unassigned' />}
-                          {host.linked_clusters.map((cluster) => (
-                            <Chip
-                              key={`${host.id}-${cluster.id}`}
-                              size='small'
-                              color={cluster.id === selectedCluster?.id ? 'primary' : 'default'}
-                              variant={cluster.id === selectedCluster?.id ? 'filled' : 'outlined'}
-                              label={cluster.name}
-                            />
-                          ))}
-                        </Stack>
-                      </Stack>
+                      </MenuItem>
+                    ))}
+                  </TextField>
+                ) : (
+                  <ModelSelect autoCommit />
+                )}
+                {renderModelVramRequirement(clusterModalMode === 'add' ? draftModelInfo?.vram : modelInfo?.vram)}
+                <Typography variant='body2' color='text.secondary'>
+                  Define the model for this saved cluster, assign which nodes it may use, and then set the initial number of joined nodes the scheduler should plan around.
+                </Typography>
+                <Stack sx={{ gap: 1 }}>
+                  <Typography variant='body1'>Assigned nodes</Typography>
+                  <Typography variant='body2' color='text.secondary'>
+                    Only assigned nodes are intended to serve this cluster. Unassigned nodes stay out of the shard pool for this saved cluster.
+                  </Typography>
+                  {nodesInventory.length === 0 && (
+                    <Alert severity='info'>
+                      No managed hosts are defined yet. Add nodes in <strong>Settings &gt; Nodes</strong> before assigning them to this cluster.
+                    </Alert>
+                  )}
+                  {nodesInventory.length > 0 && (
+                    <Stack sx={{ gap: 1, maxHeight: '18rem', overflowY: 'auto', pr: 0.5 }}>
+                      {nodesInventory.map((host) => {
+                        const linkedOtherClusters = host.linked_clusters.filter((cluster) => cluster.id !== selectedCluster?.id);
+                        const assignedHere = clusterModalMode === 'add'
+                          ? clusterDraftAssignedNodeIds.includes(host.id)
+                          : selectedClusterAssignedNodeIds.has(host.id);
+                        return (
+                          <Stack
+                            key={host.id || host.local_id}
+                            direction='row'
+                            sx={{
+                              alignItems: 'flex-start',
+                              justifyContent: 'space-between',
+                              gap: 1,
+                              px: 1.25,
+                              py: 1,
+                              borderRadius: 2,
+                              border: '1px solid',
+                              borderColor: assignedHere ? 'primary.main' : 'divider',
+                              bgcolor: assignedHere ? 'action.selected' : 'background.paper',
+                            }}
+                          >
+                            <Stack sx={{ minWidth: 0, flex: 1, gap: 0.5 }}>
+                              <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75, flexWrap: 'wrap' }}>
+                                <Checkbox
+                                  size='small'
+                                  checked={assignedHere}
+                                  onChange={() => {
+                                    if (clusterModalMode === 'add') {
+                                      onToggleDraftAssignedNode(host.id);
+                                    } else {
+                                      void onToggleAssignedNode(host.id);
+                                    }
+                                  }}
+                                  sx={{ p: 0, mr: 0.5 }}
+                                />
+                                <Typography variant='body2' sx={{ fontWeight: 600 }}>
+                                  {host.display_name || host.ssh_target || host.hostname_hint || 'Unnamed host'}
+                                </Typography>
+                                <Chip size='small' variant='outlined' label={host.management_mode === 'manual' ? 'Self-joining' : 'SSH managed'} />
+                                {getHostGpuMemoryGb(host, availableNodeByHostname.get(normalizeHostname(host.hostname_hint || host.ssh_target))) > 0 && (
+                                  <Chip
+                                    size='small'
+                                    variant='outlined'
+                                    label={`${getHostGpuMemoryGb(host, availableNodeByHostname.get(normalizeHostname(host.hostname_hint || host.ssh_target)))} GB VRAM`}
+                                  />
+                                )}
+                                {Number(host.hardware?.ram_total_gb || 0) > 0 && (
+                                  <Chip size='small' variant='outlined' label={`${Number(host.hardware?.ram_total_gb || 0)} GB RAM`} />
+                                )}
+                                {host.joined
+                                  ? <Chip size='small' color='success' label='Online' />
+                                  : <Chip size='small' variant='outlined' label='Offline' />}
+                                {linkedOtherClusters.length > 0 && (
+                                  <Chip
+                                    size='small'
+                                    color='warning'
+                                    variant='outlined'
+                                    label={linkedOtherClusters.length === 1 ? 'Used elsewhere' : `Used by ${linkedOtherClusters.length} clusters`}
+                                  />
+                                )}
+                              </Stack>
+                              {host.parallax_path && (
+                                <Typography variant='caption' color='text.secondary'>
+                                  PARALLAX_PATH: {host.parallax_path}
+                                </Typography>
+                              )}
+                              {host.management_mode === 'manual' && (
+                                <Typography variant='caption' color='text.secondary'>
+                                  Self-joining node: Parallax does not SSH into or restart this node.
+                                </Typography>
+                              )}
+                              <Stack direction='row' sx={{ gap: 0.5, flexWrap: 'wrap' }}>
+                                {host.linked_cluster_count === 0 && <Chip size='small' variant='outlined' label='Unassigned' />}
+                                {host.linked_clusters.map((cluster) => (
+                                  <Chip
+                                    key={`${host.id}-${cluster.id}`}
+                                    size='small'
+                                    color={cluster.id === selectedCluster?.id ? 'primary' : 'default'}
+                                    variant={cluster.id === selectedCluster?.id ? 'filled' : 'outlined'}
+                                    label={cluster.name}
+                                  />
+                                ))}
+                              </Stack>
+                            </Stack>
+                          </Stack>
+                        );
+                      })}
                     </Stack>
-                  );
-                })}
+                  )}
+                </Stack>
+                <Stack sx={{ gap: 0.75 }}>
+                  <Typography variant='body1'>Capacity summary</Typography>
+                  <Stack direction={{ xs: 'column', md: 'row' }} sx={{ gap: 1, flexWrap: 'wrap' }}>
+                    <Chip color='default' variant='outlined' label={`${clusterModalMode === 'add' ? draftAssignedHosts.length : assignedHosts.length} assigned`} />
+                    <Chip color={(clusterModalMode === 'add' ? draftAvailableAssignedHosts.length : availableAssignedHosts.length) > 0 ? 'success' : 'default'} variant='outlined' label={`${clusterModalMode === 'add' ? draftAvailableAssignedHosts.length : availableAssignedHosts.length} online now`} />
+                    <Chip color='default' variant='outlined' label={`startup target ${Math.max(1, clusterModalMode === 'add' ? draftAssignedHosts.length : assignedHosts.length)}`} />
+                    <Chip color='info' variant='outlined' label={`${clusterModalMode === 'add' ? draftAvailableAssignedMemory : assignedTotalMemory} GB total memory`} />
+                    {clusterModalMode === 'add'
+                      ? draftModelInfo && draftModelInfo.vram > 0 && <Chip color='warning' variant='outlined' label={`${draftModelInfo.vram} GB required`} />
+                      : modelInfo && modelInfo.vram > 0 && <Chip color='warning' variant='outlined' label={`${modelInfo.vram} GB required`} />}
+                  </Stack>
+                  {(clusterModalMode === 'add' ? clusterDraftAssignedNodeIds.length : selectedClusterAssignedNodeIds.size) > 0 && (
+                    <Typography variant='caption' color='text.secondary'>
+                      Using live telemetry when available and stored node hardware otherwise. Hardware is known for {clusterModalMode === 'add' ? draftKnownAssignedHardwareCount : knownAssignedHardwareCount}/{clusterModalMode === 'add' ? draftAssignedHosts.length : assignedHosts.length} assigned node{(clusterModalMode === 'add' ? draftAssignedHosts.length : assignedHosts.length) === 1 ? '' : 's'}.
+                    </Typography>
+                  )}
+                  {clusterModalCapacityAlert}
+                </Stack>
+                <Alert severity='info'>
+                  Startup planning now follows the assigned-node list automatically. If more assigned nodes arrive later, Parallax can extend capacity, but adding nodes may trigger layer movement and temporary performance churn while the scheduler rebalances.
+                </Alert>
+                {topologyChangeAdvisory.show && <Alert severity='warning'>{topologyChangeAdvisory.message}</Alert>}
+                <Stack direction='row' sx={{ justifyContent: 'flex-end', gap: 1 }}>
+                  <Button variant='text' onClick={closeClusterModal}>
+                    {clusterModalMode === 'add' ? 'Cancel' : 'Close'}
+                  </Button>
+                  {clusterModalMode === 'add' ? (
+                    <Button
+                      variant='contained'
+                      onClick={() => void onSubmitCreateClusterProfile()}
+                      disabled={!clusterDraftModelName.trim() || !canProceedWithAddCluster}
+                    >
+                      Add cluster
+                    </Button>
+                  ) : (
+                    <Button variant='contained' onClick={onContinueToJoin} disabled={initializingCluster || !canProceedWithConfiguredCluster}>
+                      {initializingCluster ? 'Applying cluster settings...' : 'Apply cluster settings'}
+                    </Button>
+                  )}
+                </Stack>
               </Stack>
-            )}
-          </Stack>
-          <Stack sx={{ gap: 0.75 }}>
-            <Typography variant='body1'>Capacity summary</Typography>
-            <Stack direction={{ xs: 'column', md: 'row' }} sx={{ gap: 1, flexWrap: 'wrap' }}>
-              <Chip color='default' variant='outlined' label={`${assignedHosts.length} assigned`} />
-              <Chip color={availableAssignedHosts.length > 0 ? 'success' : 'default'} variant='outlined' label={`${availableAssignedHosts.length} online now`} />
-              <Chip color='default' variant='outlined' label={`startup target ${Math.max(1, assignedHosts.length)}`} />
-              <Chip color='info' variant='outlined' label={`${availableAssignedVram} GB live VRAM`} />
-              {modelInfo && modelInfo.vram > 0 && <Chip color='warning' variant='outlined' label={`${modelInfo.vram} GB required`} />}
-            </Stack>
-            {selectedClusterAssignedNodeIds.size > 0 && (
-              <Typography variant='caption' color='text.secondary'>
-                Using currently reporting live node hardware for VRAM totals. Hardware is known for {knownAssignedHardwareCount}/{assignedHosts.length} assigned node{assignedHosts.length === 1 ? '' : 's'}.
+            </DialogContent>
+          </Dialog>
+          <AlertDialog
+            open={!!pendingDeleteCluster}
+            onClose={() => setPendingDeleteCluster(null)}
+            color='warning'
+            title='Delete cluster'
+            content={
+              <Typography variant='body2'>
+                Delete {pendingDeleteCluster ? `"${truncateChatHistoryLabel(pendingDeleteCluster.label)}"` : 'this cluster'}? This cannot be undone.
               </Typography>
-            )}
-            {!modelInfo || modelInfo.vram <= 0 ? (
-              <Alert severity='info'>Model VRAM requirement is unknown, so Parallax cannot confirm cluster capacity yet.</Alert>
-            ) : selectedClusterAssignedNodeIds.size === 0 ? (
-              <Alert severity='warning'>No nodes are assigned to this cluster yet.</Alert>
-            ) : availableAssignedVram >= modelInfo.vram ? (
-              <Alert severity='success'>Assigned live nodes currently report enough VRAM for this model.</Alert>
-            ) : (
-              <Alert severity='warning'>
-                Assigned live nodes currently report {availableAssignedVram} GB, about {remainingVramGap} GB short of the model requirement.
-              </Alert>
-            )}
-          </Stack>
-          <Alert severity='info'>
-            Startup planning now follows the assigned-node list automatically. If more assigned nodes arrive later, Parallax can extend capacity, but adding nodes may trigger layer movement and temporary performance churn while the scheduler rebalances.
-          </Alert>
-          {topologyChangeAdvisory.show && <Alert severity='warning'>{topologyChangeAdvisory.message}</Alert>}
-          <Stack direction='row' sx={{ justifyContent: 'flex-end' }}>
-            <Button variant='contained' onClick={onContinueToJoin} disabled={initializingCluster}>
-              {initializingCluster ? 'Starting cluster...' : 'Continue to node join'}
-            </Button>
-          </Stack>
+            }
+            cancelLabel='Cancel'
+            confirmLabel='Delete'
+            autoFocusAction='cancel'
+            onConfirm={confirmDeleteClusterProfile}
+          />
         </Stack>
       );
     }
@@ -1348,7 +1870,12 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                   <Typography variant='caption' color='text.secondary' sx={{ wordBreak: 'break-all' }}>{model.source_value}</Typography>
                   {model.validation_message && <Typography variant='caption' color='text.secondary'>{model.validation_message}</Typography>}
                 </Stack>
-                <IconButton size='small' color='error' disabled={customModelDeletingId === model.id} onClick={() => onDeleteCustomModel(model.id)}>
+                <IconButton
+                  size='small'
+                  color='error'
+                  disabled={customModelDeletingId === model.id}
+                  onClick={() => setPendingDeleteCustomModel({ id: model.id, label: model.display_name || model.source_value })}
+                >
                   <IconTrash size={16} />
                 </IconButton>
               </Stack>
@@ -1602,6 +2129,21 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
               </Stack>
             </DialogContent>
           </Dialog>
+          <AlertDialog
+            open={!!pendingDeleteCustomModel}
+            onClose={() => setPendingDeleteCustomModel(null)}
+            color='warning'
+            title='Delete custom model'
+            content={
+              <Typography variant='body2'>
+                Delete {pendingDeleteCustomModel ? `"${truncateChatHistoryLabel(pendingDeleteCustomModel.label)}"` : 'this custom model'}? This cannot be undone.
+              </Typography>
+            }
+            cancelLabel='Cancel'
+            confirmLabel='Delete'
+            autoFocusAction='cancel'
+            onConfirm={confirmDeleteCustomModel}
+          />
         </Stack>
       );
     }
@@ -1622,12 +2164,13 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                 </IconButton>
               </Tooltip>
             </Stack>
-            <Button
-              variant='outlined'
-              onClick={() => {
-                setNodeEditorTab(discoveredNodeCandidates.length > 0 ? 'discovered' : 'manual');
-                setNodeEditorOpen(true);
-              }}
+              <Button
+                variant='outlined'
+                onClick={() => {
+                  setNodeEditorMode('add');
+                  setNodeEditorTab(discoveredNodeCandidates.length > 0 ? 'discovered' : 'manual');
+                  setNodeEditorOpen(true);
+                }}
               startIcon={<IconPlus size={16} />}
             >
               Add node
@@ -1636,7 +2179,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
           {nodesInventoryMessage && <Alert severity='info'>{nodesInventoryMessage}</Alert>}
           <Dialog open={nodeEditorOpen} onClose={closeNodeEditor} fullWidth maxWidth='md'>
             <DialogTitle sx={{ pr: 6 }}>
-              Add Node
+              {nodeEditorMode === 'edit' ? 'Configure Node' : 'Add Node'}
               <IconButton
                 onClick={closeNodeEditor}
                 aria-label='Close add node dialog'
@@ -1647,49 +2190,51 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
             </DialogTitle>
             <DialogContent dividers>
               <Stack sx={{ gap: 1.5, pt: 0.5, minHeight: '32rem' }}>
-                <Tabs
-                  value={nodeEditorTab}
-                  onChange={(_, value) => setNodeEditorTab(value)}
-                  variant='fullWidth'
-                >
-                  <Tab
-                    value='discovered'
-                    label={
-                      <Stack direction='row' sx={{ alignItems: 'center', gap: 0.5 }}>
-                        <span>{`Discovered nodes${discoveredNodeCandidates.length > 0 ? ` (${discoveredNodeCandidates.length})` : ''}`}</span>
-                        <Tooltip
-                          title='Add currently joined nodes directly into configured inventory.'
-                          placement='top'
-                          slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
-                        >
-                          <IconButton size='small' sx={{ color: 'inherit', p: 0.25 }}>
-                            <IconInfoCircle size={14} />
-                          </IconButton>
-                        </Tooltip>
-                      </Stack>
-                    }
-                    disabled={discoveredNodeCandidates.length === 0}
-                  />
-                  <Tab
-                    value='manual'
-                    label={
-                      <Stack direction='row' sx={{ alignItems: 'center', gap: 0.5 }}>
-                        <span>Managed via SSH</span>
-                        <Tooltip
-                          title='Add a node Parallax can reach and control directly over SSH.'
-                          placement='top'
-                          slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
-                        >
-                          <IconButton size='small' sx={{ color: 'inherit', p: 0.25 }}>
-                            <IconInfoCircle size={14} />
-                          </IconButton>
-                        </Tooltip>
-                      </Stack>
-                    }
-                  />
-                </Tabs>
+                {nodeEditorMode === 'add' && (
+                  <Tabs
+                    value={nodeEditorTab}
+                    onChange={(_, value) => setNodeEditorTab(value)}
+                    variant='fullWidth'
+                  >
+                    <Tab
+                      value='discovered'
+                      label={
+                        <Stack direction='row' sx={{ alignItems: 'center', gap: 0.5 }}>
+                          <span>{`Discovered nodes${discoveredNodeCandidates.length > 0 ? ` (${discoveredNodeCandidates.length})` : ''}`}</span>
+                          <Tooltip
+                            title='Add currently joined nodes directly into configured inventory.'
+                            placement='top'
+                            slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
+                          >
+                            <IconButton size='small' sx={{ color: 'inherit', p: 0.25 }}>
+                              <IconInfoCircle size={14} />
+                            </IconButton>
+                          </Tooltip>
+                        </Stack>
+                      }
+                      disabled={discoveredNodeCandidates.length === 0}
+                    />
+                    <Tab
+                      value='manual'
+                      label={
+                        <Stack direction='row' sx={{ alignItems: 'center', gap: 0.5 }}>
+                          <span>Managed via SSH</span>
+                          <Tooltip
+                            title='Add a node Parallax can reach and control directly over SSH.'
+                            placement='top'
+                            slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
+                          >
+                            <IconButton size='small' sx={{ color: 'inherit', p: 0.25 }}>
+                              <IconInfoCircle size={14} />
+                            </IconButton>
+                          </Tooltip>
+                        </Stack>
+                      }
+                    />
+                  </Tabs>
+                )}
                 <Box sx={{ minHeight: '26rem', display: 'flex', flexDirection: 'column', pt: 2 }}>
-                  {nodeEditorTab === 'discovered' ? (
+                  {nodeEditorMode === 'add' && nodeEditorTab === 'discovered' ? (
                     discoveredNodeCandidates.length > 0 ? (
                       <Stack sx={{ gap: 0.75, minHeight: 0, flex: 1 }}>
                         <Stack sx={{ gap: 0.75, maxHeight: '18rem', overflowY: 'auto', minHeight: 0, flex: 1 }}>
@@ -1740,6 +2285,24 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                   ) : (
                     <Stack sx={{ gap: 1.5, minHeight: 0, flex: 1 }}>
                     <Stack sx={{ gap: 1, minHeight: 0, flex: 1 }}>
+                      <TextField
+                        label='Node name'
+                        size='small'
+                        fullWidth
+                        value={nodeDraft.display_name}
+                        onChange={(event) => setNodeDraft((prev) => ({ ...prev, display_name: event.target.value }))}
+                        placeholder={nodeDraft.management_mode === 'manual' ? 'Worker node' : 'user@host'}
+                      />
+                      {nodeDraft.management_mode === 'manual' ? (
+                        <TextField
+                          label='Hostname hint'
+                          size='small'
+                          fullWidth
+                          value={nodeDraft.hostname_hint}
+                          onChange={(event) => setNodeDraft((prev) => ({ ...prev, hostname_hint: event.target.value }))}
+                          placeholder='node-12'
+                        />
+                      ) : (
                       <Stack direction={{ xs: 'column', md: 'row' }} sx={{ gap: 1 }}>
                         <TextField
                           label='SSH target'
@@ -1773,7 +2336,9 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                           placeholder='/path/to/parallax'
                         />
                       </Stack>
+                      )}
                       {(nodeDraftProbeLoading || nodeDraftProbeResult || nodeDraftProbeError) && (
+                        nodeDraft.management_mode === 'ssh_managed' ? (
                         <Stack sx={{ gap: 0.75 }}>
                           {nodeDraftProbeLoading && (
                             <Alert severity='info' icon={<CircularProgress size={16} color='inherit' />}>
@@ -1799,6 +2364,11 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                                 {(nodeDraftProbeResult.remote_user || nodeDraftProbeResult.remote_host) && (
                                   <Typography variant='caption' color='text.secondary'>
                                     Remote session: {(nodeDraftProbeResult.remote_user || 'unknown')}@{(nodeDraftProbeResult.remote_host || 'unknown')}
+                                  </Typography>
+                                )}
+                                {(Number(nodeDraftProbeResult.gpu_memory_gb || 0) > 0 || Number(nodeDraftProbeResult.ram_total_gb || 0) > 0) && (
+                                  <Typography variant='caption' color='text.secondary'>
+                                    Detected hardware: {Number(nodeDraftProbeResult.gpu_memory_gb || 0) > 0 ? `${Number(nodeDraftProbeResult.gpu_memory_gb || 0)} GB VRAM` : 'GPU unknown'}{Number(nodeDraftProbeResult.ram_total_gb || 0) > 0 ? ` · ${Number(nodeDraftProbeResult.ram_total_gb || 0)} GB RAM` : ''}
                                   </Typography>
                                 )}
                                 <Stack direction='row' sx={{ gap: 0.5, flexWrap: 'wrap' }}>
@@ -1856,13 +2426,16 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                             </Alert>
                           )}
                         </Stack>
+                        ) : null
                       )}
+                      {nodeEditorMode === 'add' && nodeDraft.management_mode === 'ssh_managed' && (
                       <Stack sx={{ gap: 0.75, mt: 2.5 }}>
                         <Typography variant='body2' color='text.secondary'>
                           For nodes Parallax does not SSH into, run this command on the remote machine and then add the node from the <strong>Discovered</strong> tab after it appears.
                         </Typography>
                         <JoinCommand />
                       </Stack>
+                      )}
                     </Stack>
                       <Stack direction='row' sx={{ justifyContent: 'flex-end', gap: 1, mt: 'auto' }}>
                         <Button variant='text' onClick={closeNodeEditor}>
@@ -1870,16 +2443,22 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                         </Button>
                         <Button
                           variant='contained'
-                          onClick={() => void onAddNodeDraft()}
+                          onClick={() => void (nodeEditorMode === 'edit' ? onSaveNodeDraft() : onAddNodeDraft())}
                           disabled={
                             nodesInventorySaving
-                            || nodeDraftProbeLoading
-                            || !nodeDraft.ssh_target.trim()
-                            || !nodeDraft.parallax_path.trim()
-                            || !nodeDraftProbeResult?.ok
+                            || (
+                              nodeDraft.management_mode === 'ssh_managed'
+                                ? (
+                                  nodeDraftProbeLoading
+                                  || !nodeDraft.ssh_target.trim()
+                                  || !nodeDraft.parallax_path.trim()
+                                  || !nodeDraftProbeResult?.ok
+                                )
+                                : !nodeDraft.hostname_hint.trim()
+                            )
                           }
                         >
-                          {nodesInventorySaving ? 'Adding...' : 'Add node'}
+                          {nodesInventorySaving ? (nodeEditorMode === 'edit' ? 'Saving...' : 'Adding...') : (nodeEditorMode === 'edit' ? 'Save node' : 'Add node')}
                         </Button>
                       </Stack>
                     </Stack>
@@ -1893,7 +2472,28 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
             embedded
             showLiveOnlyHosts={false}
             refreshToken={nodesOverviewRefreshToken}
-            onRemoveConfiguredHost={onRemoveConfiguredOverviewHost}
+            onConfigureConfiguredHost={openConfiguredNodeEditor}
+            onRemoveConfiguredHost={(host) => {
+              setPendingDeleteNode({
+                id: host.id,
+                label: host.display_name || host.ssh_target || host.hostname_hint || 'this node',
+              });
+            }}
+          />
+          <AlertDialog
+            open={!!pendingDeleteNode}
+            onClose={() => setPendingDeleteNode(null)}
+            color='warning'
+            title='Delete node'
+            content={
+              <Typography variant='body2'>
+                Delete {pendingDeleteNode ? `"${truncateChatHistoryLabel(pendingDeleteNode.label)}"` : 'this node'}? This cannot be undone.
+              </Typography>
+            }
+            cancelLabel='Cancel'
+            confirmLabel='Delete'
+            autoFocusAction='cancel'
+            onConfirm={confirmDeleteNode}
           />
         </Stack>
       );
