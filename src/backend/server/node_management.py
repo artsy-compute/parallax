@@ -2,6 +2,7 @@ import shlex
 import subprocess
 import time
 import json
+import threading
 from typing import Any
 
 from backend.server.node_lifecycle import build_node_lifecycle
@@ -19,6 +20,8 @@ class NodeManagementService:
     def __init__(self, scheduler_manage=None):
         self.scheduler_manage = scheduler_manage
         self._process_status_cache: dict[str, dict[str, Any]] = {}
+        self._probe_threads_lock = threading.Lock()
+        self._probe_threads_inflight: set[str] = set()
 
     def set_scheduler_manage(self, scheduler_manage) -> None:
         self.scheduler_manage = scheduler_manage
@@ -98,6 +101,31 @@ class NodeManagementService:
         }
         self._process_status_cache[(ssh_target or '').strip()] = payload
         return payload
+
+    def _start_background_process_probe(self, ssh_target: str, parallax_path: str) -> None:
+        target = (ssh_target or '').strip()
+        path = (parallax_path or '').strip()
+        if not target or not path:
+            return
+        with self._probe_threads_lock:
+            if target in self._probe_threads_inflight:
+                return
+            self._probe_threads_inflight.add(target)
+
+        def _run() -> None:
+            try:
+                self._probe_host_process(target, path)
+            except Exception:
+                logger.warning('Background node process probe failed for %s', target, exc_info=True)
+            finally:
+                with self._probe_threads_lock:
+                    self._probe_threads_inflight.discard(target)
+
+        threading.Thread(
+            target=_run,
+            name=f'NodeProcessProbe:{target}',
+            daemon=True,
+        ).start()
 
     def _probe_host_process(self, ssh_target: str, parallax_path: str) -> dict[str, Any]:
         cached = self._cached_process_status(ssh_target)
@@ -202,10 +230,22 @@ exit 0
             if action_override is not None:
                 process_status = action_override
             elif can_remote_manage and not live_match:
-                process_status = self._probe_host_process(
-                    ssh_target,
-                    str(item.get('parallax_path') or ''),
-                )
+                cached_process_status = self._cached_process_status(ssh_target)
+                if cached_process_status is not None:
+                    process_status = cached_process_status
+                else:
+                    self._start_background_process_probe(
+                        ssh_target,
+                        str(item.get('parallax_path') or ''),
+                    )
+                    process_status = {
+                        'running': False,
+                        'confirmed_running': False,
+                        'pid': '',
+                        'source': 'pending_probe',
+                        'message': 'Checking remote node process status…',
+                        'checked_at': time.time(),
+                    }
             lifecycle = build_node_lifecycle(
                 management_mode='ssh_managed' if can_remote_manage else 'manual',
                 process_status=process_status,

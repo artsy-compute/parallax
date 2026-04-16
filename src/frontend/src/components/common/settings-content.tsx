@@ -31,7 +31,6 @@ import {
   IconInfoCircle,
   IconLoader,
   IconPlus,
-  IconQuestionMark,
   IconSettings2,
   IconStack3,
   IconTransfer,
@@ -49,7 +48,6 @@ import {
   getChatHistoryList,
   getCustomModelList,
   getCustomModelSources,
-  getFrontendBuildStatus,
   getNodesInventory,
   importSettingsBundle,
   probeNodeHost,
@@ -69,7 +67,7 @@ import { NodeManagementContent } from './node-management-content';
 import { JoinCommand, ModelSelect } from '../inputs';
 import { AlertDialog } from '../mui';
 
-type SettingsSectionKey = 'general' | 'cluster' | 'custom-models' | 'nodes' | 'chat' | 'advanced' | 'transfer' | 'about';
+type SettingsSectionKey = 'general' | 'cluster' | 'custom-models' | 'nodes' | 'chat' | 'transfer';
 
 const SETTINGS_SECTIONS: ReadonlyArray<{ key: SettingsSectionKey; label: string; icon: FC<{ size?: number }> }> = [
   { key: 'general', label: 'Overview', icon: IconSettings2 },
@@ -77,9 +75,7 @@ const SETTINGS_SECTIONS: ReadonlyArray<{ key: SettingsSectionKey; label: string;
   { key: 'cluster', label: 'Clusters', icon: IconStack3 },
   { key: 'custom-models', label: 'Custom Models', icon: IconAdjustments },
   { key: 'chat', label: 'Chats', icon: IconMessageCircle },
-  { key: 'advanced', label: 'Advanced', icon: IconSettings2 },
   { key: 'transfer', label: 'Import & Export', icon: IconTransfer },
-  { key: 'about', label: 'About', icon: IconQuestionMark },
 ];
 
 const CHAT_HISTORY_PAGE_SIZE = 20;
@@ -237,8 +233,6 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     notes?: readonly string[];
   }>(null);
   const [nodeDraftProbeError, setNodeDraftProbeError] = useState('');
-  const [buildStatus, setBuildStatus] = useState<any | null>(null);
-  const [buildStatusLoading, setBuildStatusLoading] = useState(false);
   const [clusterNameDraft, setClusterNameDraft] = useState('');
   const [clusterModalOpen, setClusterModalOpen] = useState(false);
   const [clusterModalMode, setClusterModalMode] = useState<'add' | 'configure'>('configure');
@@ -617,20 +611,6 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     }
     loadInventory();
   }, [hostType, activeSection, loadInventory]);
-
-  useEffect(() => {
-    const loadBuildStatus = async () => {
-      try {
-        setBuildStatusLoading(true);
-        setBuildStatus(await getFrontendBuildStatus());
-      } catch (error) {
-        console.error('getFrontendBuildStatus error', error);
-      } finally {
-        setBuildStatusLoading(false);
-      }
-    };
-    loadBuildStatus();
-  }, []);
 
   useEffect(() => {
     if (hostType === 'node' || customModelSourceType !== 'huggingface') {
@@ -2647,31 +2627,6 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
       );
     }
 
-    if (activeSection === 'advanced') {
-      return (
-        <Stack sx={{ gap: 1 }}>
-          <Typography variant='h2'>Advanced</Typography>
-          <Typography variant='body2' color='text.secondary'>
-            Utilities for refreshing cluster metadata and navigating to operational tooling. Advanced runtime values are included in settings export/import even when they are not edited directly here yet.
-          </Typography>
-          <Stack sx={{ gap: 1 }}>
-            <Typography variant='body1'>Cluster networking mode</Typography>
-            <Typography variant='body2' color='text.secondary'>
-              This remains a cluster-wide startup setting for now. Local is for same-network discovery; remote uses the relay-assisted path.
-            </Typography>
-            <Stack direction='row' sx={{ gap: 1, flexWrap: 'wrap' }}>
-              <Button variant={networkType === 'local' ? 'contained' : 'outlined'} onClick={() => setNetworkType('local')} sx={{ minWidth: '5rem' }}>Local</Button>
-              <Button variant={networkType === 'remote' ? 'contained' : 'outlined'} onClick={() => setNetworkType('remote')} sx={{ minWidth: '5rem' }}>Remote</Button>
-            </Stack>
-          </Stack>
-          <Stack direction='row' sx={{ gap: 1, flexWrap: 'wrap' }}>
-            <Button variant='outlined' onClick={() => refreshModelList()}>Refresh model catalog</Button>
-            <Button onClick={() => openSection('nodes')} variant='outlined'>Open nodes</Button>
-          </Stack>
-        </Stack>
-      );
-    }
-
     if (activeSection === 'transfer') {
       return (
         <Stack sx={{ gap: 1.25 }}>
@@ -2703,29 +2658,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
       );
     }
 
-    return (
-      <Stack sx={{ gap: 1 }}>
-        <Typography variant='h2'>About</Typography>
-        <Typography variant='body2' color='text.secondary'>
-          Frontend/runtime diagnostics and documentation links.
-        </Typography>
-        <Alert severity={buildStatus?.stale ? 'warning' : 'info'}>
-          {buildStatusLoading
-            ? 'Loading frontend build status…'
-            : buildStatus?.stale
-              ? `Frontend build is stale: ${buildStatus.reason || 'dist is older than source files'}`
-              : 'Frontend build is up to date.'}
-        </Alert>
-        <Stack direction='row' sx={{ gap: 1, flexWrap: 'wrap' }}>
-          <Button component='a' href='https://github.com/openai/parallax/blob/main/docs/settings_page_spec.md' target='_blank' rel='noreferrer' variant='text'>
-            Settings spec
-          </Button>
-          <Button component='a' href='https://github.com/openai/parallax/blob/main/docs/user_guide/quick_start.md' target='_blank' rel='noreferrer' variant='text'>
-            Quick start
-          </Button>
-        </Stack>
-      </Stack>
-    );
+    return null;
   };
 
   return (
