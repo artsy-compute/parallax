@@ -406,6 +406,26 @@ class Scheduler:
         )
         existing_node = self.node_manager.get(node.node_id)
         existing_state = self.node_manager.state_of(node.node_id)
+        should_deallocate_existing_manual = (
+            node.manual_layer_assignment
+            and existing_state == NodeState.ACTIVE
+            and existing_node is not None
+            and (
+                existing_node.start_layer != node.start_layer
+                or existing_node.end_layer != node.end_layer
+            )
+        )
+        if should_deallocate_existing_manual:
+            logger.info(
+                "Node %s rejoined with updated retained layers [%s, %s); deallocating previous ACTIVE range [%s, %s) first",
+                node.node_id,
+                node.start_layer,
+                node.end_layer,
+                existing_node.start_layer,
+                existing_node.end_layer,
+            )
+            self.layer_allocator.deallocate(existing_node)
+            existing_state = self.node_manager.state_of(node.node_id)
         if existing_node is None:
             self.node_manager.upsert(node)
             if bootstrapped:
