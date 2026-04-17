@@ -28,7 +28,9 @@ def test_inject_builtin_tools(tool_runtime: ServerToolRuntime):
     assert "get_cluster_status" in tool_names
     assert "list_nodes" in tool_names
     assert "list_models" in tool_names
+    assert "get_model_details" in tool_names
     assert "get_join_command" in tool_names
+    assert "get_nodes_overview" in tool_names
 
 
 def test_describe_available_tools(tool_runtime: ServerToolRuntime):
@@ -42,27 +44,33 @@ def test_describe_available_tools(tool_runtime: ServerToolRuntime):
 
 def test_execute_parallax_tools(tool_runtime: ServerToolRuntime):
     tool_runtime.set_context(
-        get_cluster_status=lambda: {"ok": True, "type": "cluster_status"},
-        list_nodes=lambda: [{"id": "node-1"}],
-        list_models=lambda: [{"name": "model-1"}],
+        get_cluster_status=lambda: {"type": "cluster_status", "data": {"status": "available", "model_name": "model-1", "node_list": [{"node_id": "node-1"}], "need_more_nodes": False, "max_running_request": 8}},
+        list_nodes=lambda: [{"id": "node-1", "hostname": "host-a", "status": "available"}],
+        list_models=lambda: [{"name": "model-1", "custom": False}, {"name": "custom/model", "custom": True}],
         get_join_command=lambda: {"command": "parallax join --scheduler-addr /ip4/127.0.0.1/tcp/1/p2p/peer"},
+        get_nodes_overview=lambda: {"summary": {"total_hosts": 1}, "hosts": [{"id": "host-1"}]},
     )
 
     results = asyncio.run(
         tool_runtime.execute_tool_calls(
             [
                 {"id": "c1", "function": {"name": "get_cluster_status", "arguments": "{}"}},
-                {"id": "c2", "function": {"name": "list_nodes", "arguments": "{}"}},
-                {"id": "c3", "function": {"name": "list_models", "arguments": "{}"}},
+                {"id": "c2", "function": {"name": "list_nodes", "arguments": "{\"status\":\"available\"}"}},
+                {"id": "c3", "function": {"name": "list_models", "arguments": "{\"custom_only\":true}"}},
                 {"id": "c4", "function": {"name": "get_join_command", "arguments": "{}"}},
+                {"id": "c5", "function": {"name": "get_model_details", "arguments": "{\"model_name\":\"model-1\"}"}},
+                {"id": "c6", "function": {"name": "get_nodes_overview", "arguments": "{}"}},
             ]
         )
     )
     payloads = [json.loads(item["content"]) for item in results]
-    assert payloads[0]["type"] == "cluster_status"
+    assert payloads[0]["cluster"]["type"] == "cluster_status"
+    assert payloads[0]["summary"]["node_count"] == 1
     assert payloads[1]["nodes"][0]["id"] == "node-1"
-    assert payloads[2]["models"][0]["name"] == "model-1"
+    assert payloads[2]["models"][0]["name"] == "custom/model"
     assert "parallax join" in payloads[3]["join_command"]["command"]
+    assert payloads[4]["model"]["name"] == "model-1"
+    assert payloads[5]["summary"]["total_hosts"] == 1
 
 
 def test_execute_tool_calls_read_file(tool_runtime: ServerToolRuntime, tmp_path: Path):

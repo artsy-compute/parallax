@@ -48,6 +48,22 @@ settings_store = SettingsStore()
 request_handler = RequestHandler()
 tool_runtime = ServerToolRuntime(settings_store=settings_store)
 request_handler.tool_runtime = tool_runtime
+
+
+def _merged_model_list() -> list[dict]:
+    static_models = list(get_model_list())
+    custom_models = custom_model_store.list_model_entries()
+    merged_models: list[dict] = []
+    seen_names: set[str] = set()
+    for item in [*static_models, *custom_models]:
+        name = str(item.get("name") or "").strip()
+        if not name or name in seen_names:
+            continue
+        seen_names.add(name)
+        merged_models.append(item)
+    return merged_models
+
+
 tool_runtime.set_context(
     get_cluster_status=lambda: (
         scheduler_manage.get_cluster_status()
@@ -59,10 +75,15 @@ tool_runtime.set_context(
         if scheduler_manage is not None
         else []
     ),
-    list_models=lambda: list(get_model_list()),
+    list_models=lambda: _merged_model_list(),
     get_join_command=lambda: get_node_join_command(
         scheduler_manage.get_join_scheduler_addr() if scheduler_manage is not None else None,
         scheduler_manage.get_is_local_network() if scheduler_manage is not None else True,
+    ),
+    get_nodes_overview=lambda: (
+        node_management.get_overview()
+        if node_management is not None
+        else {"summary": {}, "hosts": []}
     ),
 )
 
@@ -222,16 +243,7 @@ async def weight_refit_timstamp():
 
 @app.get("/model/list")
 async def model_list():
-    static_models = list(get_model_list())
-    custom_models = custom_model_store.list_model_entries()
-    merged_models: list[dict] = []
-    seen_names: set[str] = set()
-    for item in [*static_models, *custom_models]:
-        name = str(item.get("name") or "").strip()
-        if not name or name in seen_names:
-            continue
-        seen_names.add(name)
-        merged_models.append(item)
+    merged_models = _merged_model_list()
     return JSONResponse(
         content={
             "type": "model_list",

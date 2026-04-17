@@ -92,6 +92,7 @@ class ServerToolRuntime:
                 list_nodes=lambda: self._require_context_callable("list_nodes")(),
                 list_models=lambda: self._require_context_callable("list_models")(),
                 get_join_command=lambda: self._require_context_callable("get_join_command")(),
+                get_nodes_overview=lambda: self._require_context_callable("get_nodes_overview")(),
             )
         )
 
