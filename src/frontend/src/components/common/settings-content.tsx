@@ -43,6 +43,7 @@ import {
   deleteCustomModel,
   deleteAllChatHistory,
   exportSettingsBundle,
+  getAppSettings,
   getChatHistoryDetail,
   getChatHistoryList,
   getCustomModelList,
@@ -53,6 +54,7 @@ import {
   searchCustomModels,
   updateNodesInventory,
   updateAppSettings,
+  type AppAvailableTool,
   type SettingsExportBundle,
   type AppClusterProfile,
   type ChatHistorySummary,
@@ -66,12 +68,13 @@ import { NodeManagementContent } from './node-management-content';
 import { JoinCommand, ModelSelect } from '../inputs';
 import { AlertDialog } from '../mui';
 
-type SettingsSectionKey = 'cluster' | 'custom-models' | 'nodes' | 'chat' | 'transfer';
+type SettingsSectionKey = 'cluster' | 'custom-models' | 'nodes' | 'tools' | 'chat' | 'transfer';
 
 const SETTINGS_SECTIONS: ReadonlyArray<{ key: SettingsSectionKey; label: string; icon: FC<{ size?: number }> }> = [
   { key: 'nodes', label: 'Nodes', icon: IconCirclesRelation },
   { key: 'cluster', label: 'Clusters', icon: IconStack3 },
   { key: 'custom-models', label: 'Custom Models', icon: IconAdjustments },
+  { key: 'tools', label: 'Tools', icon: IconAdjustments },
   { key: 'chat', label: 'Chats', icon: IconMessageCircle },
   { key: 'transfer', label: 'Import & Export', icon: IconTransfer },
 ];
@@ -249,6 +252,8 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
   const [transferError, setTransferError] = useState('');
   const [importingSettings, setImportingSettings] = useState(false);
   const [exportingSettings, setExportingSettings] = useState(false);
+  const [availableTools, setAvailableTools] = useState<readonly AppAvailableTool[]>([]);
+  const [availableToolsError, setAvailableToolsError] = useState('');
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
   const inventoryRowIdRef = useRef(0);
 
@@ -306,6 +311,17 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     }
   };
 
+  const loadAvailableTools = useRefCallback(async () => {
+    try {
+      const payload = await getAppSettings();
+      setAvailableTools(payload.available_tools || []);
+      setAvailableToolsError('');
+    } catch (error) {
+      setAvailableTools([]);
+      setAvailableToolsError(error instanceof Error ? error.message : 'Failed to load available tools');
+    }
+  });
+
   const loadCustomModelSources = useRefCallback(async () => {
     const data = await getCustomModelSources();
     setCustomModelSourceRoots(data.allowed_local_roots || []);
@@ -329,8 +345,11 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
       loadCustomModelSources().catch((error) => {
         console.error('getCustomModelSources error', error);
       });
+      loadAvailableTools().catch((error) => {
+        console.error('getAppSettings error', error);
+      });
     }
-  }, [hostType, loadCustomModelSources]);
+  }, [hostType, loadAvailableTools, loadCustomModelSources]);
 
   useEffect(() => {
     if (hostType === 'node' || activeSection !== 'custom-models' || !customModelEditorOpen) {
@@ -2638,6 +2657,60 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
             autoFocusAction='cancel'
             onConfirm={confirmDeleteChatConversation}
           />
+        </Stack>
+      );
+    }
+
+    if (activeSection === 'tools') {
+      return (
+        <Stack sx={{ gap: 1.25 }}>
+          <Typography variant='h2'>Tools</Typography>
+          <Typography variant='body2' color='text.secondary'>
+            These backend tools can be executed when the model emits a compatible tool call.
+          </Typography>
+          {availableToolsError && <Alert severity='warning'>{availableToolsError}</Alert>}
+          {!availableToolsError && availableTools.length === 0 && (
+            <Typography variant='body2' color='text.secondary'>
+              No server tools are currently registered.
+            </Typography>
+          )}
+          <Stack sx={{ gap: 0.75 }}>
+            {availableTools.map((tool) => (
+              <Stack
+                key={tool.name}
+                sx={{
+                  gap: 0.4,
+                  px: 1.25,
+                  py: 1,
+                  borderRadius: 2,
+                  border: '1px solid',
+                  borderColor: 'divider',
+                  bgcolor: 'background.paper',
+                }}
+              >
+                <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75, flexWrap: 'wrap' }}>
+                  <Typography variant='body2' sx={{ fontWeight: 600 }}>
+                    {tool.name}
+                  </Typography>
+                  <Chip
+                    size='small'
+                    color={tool.enabled_by_default ? 'success' : 'default'}
+                    variant={tool.enabled_by_default ? 'filled' : 'outlined'}
+                    label={tool.enabled_by_default ? 'Enabled by default' : 'Disabled by default'}
+                  />
+                  {tool.kind && <Chip size='small' variant='outlined' label={tool.kind} />}
+                </Stack>
+                <Typography variant='caption' color='text.secondary'>
+                  {tool.description}
+                </Typography>
+                {tool.allowed_roots && tool.allowed_roots.length > 0 && (
+                  <Typography variant='caption' color='text.secondary'>
+                    Allowed roots: {tool.allowed_roots.join(', ')}
+                  </Typography>
+                )}
+              </Stack>
+            ))}
+          </Stack>
         </Stack>
       );
     }

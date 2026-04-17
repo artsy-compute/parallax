@@ -16,6 +16,7 @@ from backend.server.custom_models import CustomModelStore
 from backend.server.node_management import NodeManagementService
 from backend.server.request_handler import RequestHandler
 from backend.server.scheduler_manage import SchedulerManage
+from backend.server.tool_runtime import ServerToolRuntime
 from backend.server.settings_store import SettingsStore
 from backend.server.server_args import parse_args
 from backend.server.static_config import (
@@ -45,6 +46,7 @@ node_management = None
 custom_model_store = CustomModelStore()
 settings_store = SettingsStore()
 request_handler = RequestHandler()
+tool_runtime = ServerToolRuntime()
 
 FRONTEND_DIR = get_project_root() / "src" / "frontend"
 FRONTEND_SRC_DIR = FRONTEND_DIR / "src"
@@ -397,6 +399,7 @@ async def app_settings():
                 "cluster_settings": cluster_settings,
                 "clusters": clusters_state.get("clusters") or [],
                 "active_cluster_id": clusters_state.get("active_cluster_id") or "",
+                "available_tools": tool_runtime.describe_available_tools(),
             },
         },
         status_code=200,
@@ -429,6 +432,7 @@ async def app_settings_update(raw_request: Request):
                 "cluster_settings": cluster_settings,
                 "clusters": clusters_state.get("clusters") or [],
                 "active_cluster_id": clusters_state.get("active_cluster_id") or "",
+                "available_tools": tool_runtime.describe_available_tools(),
             },
         },
         status_code=200,

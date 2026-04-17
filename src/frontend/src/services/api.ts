@@ -160,10 +160,19 @@ export interface AppClusterProfile extends AppClusterSettings {
   readonly name: string;
 }
 
+export interface AppAvailableTool {
+  readonly name: string;
+  readonly description: string;
+  readonly enabled_by_default: boolean;
+  readonly kind?: string;
+  readonly allowed_roots?: readonly string[];
+}
+
 export interface AppSettingsPayload {
   readonly cluster_settings: AppClusterSettings;
   readonly clusters: readonly AppClusterProfile[];
   readonly active_cluster_id: string;
+  readonly available_tools?: readonly AppAvailableTool[];
 }
 
 export const getAppSettings = async (): Promise<AppSettingsPayload> => {

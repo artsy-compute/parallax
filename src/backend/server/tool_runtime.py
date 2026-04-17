@@ -158,6 +158,23 @@ class ServerToolRuntime:
             max_iterations=max_iterations,
         )
 
+    def describe_available_tools(self) -> list[Dict[str, Any]]:
+        return [
+            {
+                "name": "fetch_url",
+                "description": self.FETCH_URL_TOOL["function"]["description"],
+                "enabled_by_default": bool(self.default_enabled and self.default_allow_web_fetch),
+                "kind": "web",
+            },
+            {
+                "name": "read_file",
+                "description": self.READ_FILE_TOOL["function"]["description"],
+                "enabled_by_default": bool(self.default_enabled and self.default_allow_file_read),
+                "kind": "local_file",
+                "allowed_roots": [str(root) for root in self.allowed_file_roots],
+            },
+        ]
+
     def inject_builtin_tools(
         self, request_data: Dict[str, Any], policy: ServerToolPolicy
     ) -> Dict[str, Any]:
