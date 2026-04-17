@@ -1005,7 +1005,7 @@ class GradientServer:
                                 f"{self._heartbeat_error_count} consecutive heartbeat errors"
                             )
 
-                    time.sleep(10)
+                    time.sleep(self.heartbeat_interval_sec)
             except Exception as e:
                 logger.exception(f"Module announcer thread error: {e}")
 

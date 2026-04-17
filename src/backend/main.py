@@ -58,6 +58,12 @@ _FRONTEND_BUILD_STATUS = {
     "latest_source_mtime": 0.0,
 }
 FRONTEND_DEV_SERVER_URL = os.environ.get("PARALLAX_FRONTEND_DEV_SERVER_URL", "").strip()
+PERSISTED_BIND_OVERRIDE = os.environ.get("PARALLAX_USE_PERSISTED_BIND_SETTINGS", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 def _parse_custom_model_roots(values: list[str] | None) -> dict[str, str]:
@@ -812,9 +818,9 @@ if __name__ == "__main__":
     )
     stored_cluster_settings = settings_store.get_cluster_settings()
     stored_advanced = dict(stored_cluster_settings.get("advanced") or {})
-    if args.host == "localhost" and stored_advanced.get("scheduler_host"):
+    if PERSISTED_BIND_OVERRIDE and args.host == "localhost" and stored_advanced.get("scheduler_host"):
         args.host = str(stored_advanced.get("scheduler_host"))
-    if args.port == 3001 and stored_advanced.get("http_port") is not None:
+    if PERSISTED_BIND_OVERRIDE and args.port == 3001 and stored_advanced.get("http_port") is not None:
         args.port = int(stored_advanced.get("http_port"))
     if args.tcp_port == 0 and stored_advanced.get("tcp_port") is not None:
         args.tcp_port = int(stored_advanced.get("tcp_port"))

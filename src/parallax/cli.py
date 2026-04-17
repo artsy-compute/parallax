@@ -112,6 +112,28 @@ def _find_flag_value(args_list: list[str], flag_names: list[str]) -> str | None:
     return None
 
 
+def _resolve_scheduler_addr_from_local_backend() -> str | None:
+    """Try to fetch a concrete scheduler address from a local backend."""
+    for url in (
+        "http://127.0.0.1:3001/node/join/command",
+        "http://localhost:3001/node/join/command",
+    ):
+        try:
+            response = requests.get(url, timeout=2)
+            response.raise_for_status()
+            payload = response.json()
+            command = str(((payload.get("data") or {}).get("command") or "")).strip()
+            if not command:
+                continue
+            resolved = _find_flag_value(command.split(), ["--scheduler-addr", "-s"])
+            if resolved:
+                logger.info("Resolved scheduler address from local backend: %s", resolved)
+                return resolved
+        except Exception as e:
+            logger.debug("Failed to resolve scheduler address from %s: %s", url, e)
+    return None
+
+
 def _is_local_port_available(host: str, port: int) -> bool:
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -505,6 +527,11 @@ def join_command(args, passthrough_args: list[str] | None = None):
     if not launch_script.exists():
         logger.info(f"Error: Launch script not found at {launch_script}")
         sys.exit(1)
+
+    if str(args.scheduler_addr or "").strip() == "auto":
+        resolved_scheduler_addr = _resolve_scheduler_addr_from_local_backend()
+        if resolved_scheduler_addr:
+            args.scheduler_addr = resolved_scheduler_addr
 
     # Set environment variable for the subprocess
     env = os.environ.copy()
