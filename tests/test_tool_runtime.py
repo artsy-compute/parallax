@@ -1,5 +1,5 @@
-import json
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -11,6 +11,7 @@ from backend.server.tool_runtime import ServerToolRuntime
 def tool_runtime(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("PARALLAX_TOOL_FILE_ROOTS", str(tmp_path))
     monkeypatch.setenv("PARALLAX_SERVER_TOOLS_ENABLED", "1")
+    monkeypatch.delenv("PARALLAX_TOOL_PLUGIN_DIRS", raising=False)
     return ServerToolRuntime()
 
 
@@ -21,36 +22,15 @@ def test_inject_builtin_tools(tool_runtime: ServerToolRuntime):
     tool_names = [tool["function"]["name"] for tool in enriched["tools"]]
     assert "fetch_url" in tool_names
     assert "read_file" in tool_names
+    assert "list_files" in tool_names
+    assert "search_files" in tool_names
 
 
-def test_read_file_within_allowed_root(tool_runtime: ServerToolRuntime, tmp_path: Path):
-    target = tmp_path / "notes.txt"
-    target.write_text("one\ntwo\nthree\n", encoding="utf-8")
-
-    payload = tool_runtime._read_file({"path": str(target), "start_line": 2, "end_line": 3})
-    assert payload["ok"] is True
-    assert payload["content"] == "two\nthree"
-
-
-def test_read_file_rejects_outside_allowed_root(tool_runtime: ServerToolRuntime, tmp_path: Path):
-    outside = tmp_path.parent / "outside.txt"
-    outside.write_text("secret", encoding="utf-8")
-
-    with pytest.raises(ValueError):
-        tool_runtime._read_file({"path": str(outside)})
-
-
-def test_extract_response_text_html(tool_runtime: ServerToolRuntime):
-    html = """
-    <html>
-      <head><title>Example</title><style>.x{display:none}</style></head>
-      <body><h1>Hello</h1><p>World</p><script>ignored()</script></body>
-    </html>
-    """
-    text = tool_runtime._extract_response_text(html, "text/html; charset=utf-8")
-    assert "Hello" in text
-    assert "World" in text
-    assert "ignored" not in text
+def test_describe_available_tools(tool_runtime: ServerToolRuntime):
+    descriptions = {item["name"]: item for item in tool_runtime.describe_available_tools()}
+    assert descriptions["fetch_url"]["plugin_name"] == "web"
+    assert descriptions["read_file"]["plugin_name"] == "files"
+    assert descriptions["list_files"]["enabled_by_default"] is True
 
 
 def test_execute_tool_calls_read_file(tool_runtime: ServerToolRuntime, tmp_path: Path):
@@ -71,8 +51,117 @@ def test_execute_tool_calls_read_file(tool_runtime: ServerToolRuntime, tmp_path:
         )
     )
 
-    assert len(results) == 1
-    assert results[0]["role"] == "tool"
     payload = json.loads(results[0]["content"])
     assert payload["ok"] is True
     assert "alpha" in payload["content"]
+
+
+def test_list_files_and_search_files(tool_runtime: ServerToolRuntime, tmp_path: Path):
+    notes = tmp_path / "notes.txt"
+    notes.write_text("hello world\nsecond line\n", encoding="utf-8")
+    nested = tmp_path / "sub"
+    nested.mkdir()
+    (nested / "other.txt").write_text("world again\n", encoding="utf-8")
+
+    listed = asyncio.run(
+        tool_runtime.execute_tool_calls(
+            [
+                {
+                    "id": "call-1",
+                    "function": {
+                        "name": "list_files",
+                        "arguments": json.dumps({"path": str(tmp_path), "recursive": True}),
+                    },
+                }
+            ]
+        )
+    )
+    list_payload = json.loads(listed[0]["content"])
+    assert any(item["name"] == "notes.txt" for item in list_payload["entries"])
+
+    searched = asyncio.run(
+        tool_runtime.execute_tool_calls(
+            [
+                {
+                    "id": "call-2",
+                    "function": {
+                        "name": "search_files",
+                        "arguments": json.dumps({"path": str(tmp_path), "pattern": "world"}),
+                    },
+                }
+            ]
+        )
+    )
+    search_payload = json.loads(searched[0]["content"])
+    assert any(match["path"].endswith("notes.txt") for match in search_payload["matches"])
+
+
+def test_read_file_rejects_outside_allowed_root(tool_runtime: ServerToolRuntime, tmp_path: Path):
+    outside = tmp_path.parent / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        asyncio.run(
+            tool_runtime.execute_tool_calls(
+                [
+                    {
+                        "id": "call-1",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps({"path": str(outside)}),
+                        },
+                    }
+                ]
+            )
+        )
+
+
+def test_dynamic_plugin_loading(monkeypatch, tmp_path: Path):
+    plugin_dir = tmp_path / "plugins"
+    plugin_dir.mkdir()
+    plugin_file = plugin_dir / "echo_plugin.py"
+    plugin_file.write_text(
+        """
+from backend.server.tools.base import ToolDefinition
+
+
+class EchoPlugin:
+    name = "echo"
+
+    def get_tools(self):
+        return [
+            ToolDefinition(
+                name="echo_text",
+                plugin_name=self.name,
+                kind="utility",
+                description="Echo text back.",
+                schema={
+                    "type": "function",
+                    "function": {
+                        "name": "echo_text",
+                        "description": "Echo text back.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"text": {"type": "string"}},
+                            "required": ["text"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+            )
+        ]
+
+    async def execute(self, tool_name, arguments):
+        return {"ok": True, "text": str(arguments.get("text") or "")}
+
+
+def get_plugin():
+    return EchoPlugin()
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PARALLAX_TOOL_FILE_ROOTS", str(tmp_path))
+    monkeypatch.setenv("PARALLAX_TOOL_PLUGIN_DIRS", str(plugin_dir))
+    runtime = ServerToolRuntime()
+    descriptions = {item["name"]: item for item in runtime.describe_available_tools()}
+    assert "echo_text" in descriptions

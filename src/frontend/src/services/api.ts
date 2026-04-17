@@ -165,6 +165,7 @@ export interface AppAvailableTool {
   readonly description: string;
   readonly enabled_by_default: boolean;
   readonly kind?: string;
+  readonly plugin_name?: string;
   readonly allowed_roots?: readonly string[];
 }
 

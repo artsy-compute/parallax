@@ -96,6 +96,23 @@ const truncateChatHistoryLabel = (value: string, maxChars = CHAT_HISTORY_LABEL_M
   return value.slice(0, Math.max(0, maxChars - 1)).trimEnd() + '…';
 };
 
+const parseServerToolSettings = (advanced: Record<string, unknown> | undefined) => {
+  const raw = advanced && typeof advanced.server_tools === 'object' && advanced.server_tools
+    ? (advanced.server_tools as Record<string, unknown>)
+    : {};
+  const rawTools = raw.tools && typeof raw.tools === 'object' ? (raw.tools as Record<string, unknown>) : {};
+  const tools: Record<string, { enabled: boolean }> = {};
+  for (const [name, value] of Object.entries(rawTools)) {
+    const config = value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+    tools[name] = { enabled: Boolean(config.enabled) };
+  }
+  return {
+    enabled: raw.enabled === undefined ? true : Boolean(raw.enabled),
+    max_iterations: Math.max(1, Number(raw.max_iterations || 3) || 3),
+    tools,
+  };
+};
+
 const renderModelVramRequirement = (vram?: number) => (
   Number(vram || 0) > 0 ? (
     <Alert severity='warning' icon={false}>
@@ -254,6 +271,12 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
   const [exportingSettings, setExportingSettings] = useState(false);
   const [availableTools, setAvailableTools] = useState<readonly AppAvailableTool[]>([]);
   const [availableToolsError, setAvailableToolsError] = useState('');
+  const [toolSettings, setToolSettings] = useState<{ enabled: boolean; max_iterations: number; tools: Record<string, { enabled: boolean }> }>({
+    enabled: true,
+    max_iterations: 3,
+    tools: {},
+  });
+  const [savingToolSettings, setSavingToolSettings] = useState(false);
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
   const inventoryRowIdRef = useRef(0);
 
@@ -315,10 +338,29 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     try {
       const payload = await getAppSettings();
       setAvailableTools(payload.available_tools || []);
+      setToolSettings(parseServerToolSettings(payload.cluster_settings.advanced));
       setAvailableToolsError('');
     } catch (error) {
       setAvailableTools([]);
       setAvailableToolsError(error instanceof Error ? error.message : 'Failed to load available tools');
+    }
+  });
+
+  const onSaveToolSettings = useRefCallback(async () => {
+    try {
+      setSavingToolSettings(true);
+      const payload = await getAppSettings();
+      const clusterSettings = payload.cluster_settings || { model_name: '', init_nodes_num: 1, is_local_network: true, network_type: 'local' as const };
+      const advanced = { ...(clusterSettings.advanced || {}) };
+      advanced.server_tools = toolSettings;
+      await updateAppSettings({
+        cluster_settings: {
+          advanced,
+        },
+      });
+      await Promise.all([reloadSettings(), loadAvailableTools()]);
+    } finally {
+      setSavingToolSettings(false);
     }
   });
 
@@ -2674,6 +2716,18 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
               No server tools are currently registered.
             </Typography>
           )}
+          <Stack direction={{ xs: 'column', md: 'row' }} sx={{ gap: 1, alignItems: { md: 'center' }, justifyContent: 'space-between' }}>
+            <Stack direction='row' sx={{ alignItems: 'center', gap: 1 }}>
+              <Checkbox
+                checked={toolSettings.enabled}
+                onChange={(event) => setToolSettings((prev) => ({ ...prev, enabled: event.target.checked }))}
+              />
+              <Typography variant='body2'>Enable server-side tools</Typography>
+            </Stack>
+            <Button variant='contained' onClick={() => void onSaveToolSettings()} disabled={savingToolSettings}>
+              {savingToolSettings ? 'Saving...' : 'Save tool settings'}
+            </Button>
+          </Stack>
           <Stack sx={{ gap: 0.75 }}>
             {availableTools.map((tool) => (
               <Stack
@@ -2689,6 +2743,16 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                 }}
               >
                 <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75, flexWrap: 'wrap' }}>
+                  <Checkbox
+                    checked={toolSettings.tools[tool.name]?.enabled ?? tool.enabled_by_default}
+                    onChange={(event) => setToolSettings((prev) => ({
+                      ...prev,
+                      tools: {
+                        ...prev.tools,
+                        [tool.name]: { enabled: event.target.checked },
+                      },
+                    }))}
+                  />
                   <Typography variant='body2' sx={{ fontWeight: 600 }}>
                     {tool.name}
                   </Typography>
@@ -2699,6 +2763,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                     label={tool.enabled_by_default ? 'Enabled by default' : 'Disabled by default'}
                   />
                   {tool.kind && <Chip size='small' variant='outlined' label={tool.kind} />}
+                  {tool.plugin_name && <Chip size='small' variant='outlined' label={tool.plugin_name} />}
                 </Stack>
                 <Typography variant='caption' color='text.secondary'>
                   {tool.description}

@@ -46,7 +46,8 @@ node_management = None
 custom_model_store = CustomModelStore()
 settings_store = SettingsStore()
 request_handler = RequestHandler()
-tool_runtime = ServerToolRuntime()
+tool_runtime = ServerToolRuntime(settings_store=settings_store)
+request_handler.tool_runtime = tool_runtime
 
 FRONTEND_DIR = get_project_root() / "src" / "frontend"
 FRONTEND_SRC_DIR = FRONTEND_DIR / "src"
