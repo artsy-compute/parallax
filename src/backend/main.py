@@ -48,6 +48,23 @@ settings_store = SettingsStore()
 request_handler = RequestHandler()
 tool_runtime = ServerToolRuntime(settings_store=settings_store)
 request_handler.tool_runtime = tool_runtime
+tool_runtime.set_context(
+    get_cluster_status=lambda: (
+        scheduler_manage.get_cluster_status()
+        if scheduler_manage is not None
+        else {"ok": False, "error": "Scheduler is not initialized"}
+    ),
+    list_nodes=lambda: (
+        scheduler_manage.get_node_list()
+        if scheduler_manage is not None
+        else []
+    ),
+    list_models=lambda: list(get_model_list()),
+    get_join_command=lambda: get_node_join_command(
+        scheduler_manage.get_join_scheduler_addr() if scheduler_manage is not None else None,
+        scheduler_manage.get_is_local_network() if scheduler_manage is not None else True,
+    ),
+)
 
 FRONTEND_DIR = get_project_root() / "src" / "frontend"
 FRONTEND_SRC_DIR = FRONTEND_DIR / "src"

@@ -10,6 +10,7 @@ from typing import Any, Dict
 from backend.server.settings_store import SettingsStore
 from backend.server.tools.registry import ToolRegistry
 from backend.server.tools.plugins.files import FileToolsPlugin
+from backend.server.tools.plugins.parallax import ParallaxToolsPlugin
 from backend.server.tools.plugins.web import WebToolsPlugin
 from parallax_utils.file_util import get_project_root
 from parallax_utils.logging_config import get_logger
@@ -30,6 +31,7 @@ class ServerToolPolicy:
 class ServerToolRuntime:
     def __init__(self, settings_store: SettingsStore | None = None):
         self.settings_store = settings_store
+        self.context: dict[str, Any] = {}
         self.default_enabled = self._env_flag("PARALLAX_SERVER_TOOLS_ENABLED", True)
         self.default_allow_web_fetch = self._env_flag("PARALLAX_SERVER_TOOL_ALLOW_WEB_FETCH", True)
         self.default_allow_file_read = self._env_flag("PARALLAX_SERVER_TOOL_ALLOW_FILE_READ", True)
@@ -84,6 +86,14 @@ class ServerToolRuntime:
                 default_max_chars=self.default_max_chars,
             )
         )
+        self.registry.register(
+            ParallaxToolsPlugin(
+                get_cluster_status=lambda: self._require_context_callable("get_cluster_status")(),
+                list_nodes=lambda: self._require_context_callable("list_nodes")(),
+                list_models=lambda: self._require_context_callable("list_models")(),
+                get_join_command=lambda: self._require_context_callable("get_join_command")(),
+            )
+        )
 
     def _load_local_plugins(self) -> None:
         raw_dirs = os.environ.get("PARALLAX_TOOL_PLUGIN_DIRS", "").strip()
@@ -128,7 +138,7 @@ class ServerToolRuntime:
     def _default_tool_enabled_map(self) -> dict[str, bool]:
         enabled_map: dict[str, bool] = {}
         for tool in self.registry.list_tools():
-            if tool.name == "fetch_url":
+            if tool.name in {"fetch_url", "fetch_json"}:
                 enabled_map[tool.name] = self.default_allow_web_fetch
             elif tool.name in {"read_file", "list_files", "search_files"}:
                 enabled_map[tool.name] = self.default_allow_file_read
@@ -167,7 +177,10 @@ class ServerToolRuntime:
         max_iterations = max(1, min(8, max_iterations))
 
         if "allow_web_fetch" in config:
-            tool_enabled["fetch_url"] = bool(config.get("allow_web_fetch"))
+            web_flag = bool(config.get("allow_web_fetch"))
+            for tool_name in ("fetch_url", "fetch_json"):
+                if tool_name in tool_enabled:
+                    tool_enabled[tool_name] = web_flag
         if "allow_file_read" in config:
             file_flag = bool(config.get("allow_file_read"))
             for tool_name in ("read_file", "list_files", "search_files"):
@@ -251,3 +264,12 @@ class ServerToolRuntime:
             if isinstance(parsed, dict):
                 return parsed
         raise ValueError("Tool call arguments must be a JSON object")
+
+    def set_context(self, **context: Any) -> None:
+        self.context.update(context)
+
+    def _require_context_callable(self, name: str):
+        value = self.context.get(name)
+        if callable(value):
+            return value
+        raise RuntimeError(f"Server tool context is not configured for {name}")

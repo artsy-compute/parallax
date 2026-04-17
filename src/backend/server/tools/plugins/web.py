@@ -75,12 +75,38 @@ class WebToolsPlugin:
                         },
                     },
                 },
-            )
+            ),
+            ToolDefinition(
+                name="fetch_json",
+                plugin_name=self.name,
+                kind="web",
+                description="Fetch a JSON resource over HTTP/HTTPS and return the parsed response body.",
+                schema={
+                    "type": "function",
+                    "function": {
+                        "name": "fetch_json",
+                        "description": "Fetch a JSON resource over HTTP/HTTPS and return the parsed response body.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "url": {"type": "string", "description": "Absolute HTTP or HTTPS URL to fetch."},
+                            },
+                            "required": ["url"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+            ),
         ]
 
     async def execute(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        if tool_name != "fetch_url":
-            raise ValueError(f"Unsupported tool for web plugin: {tool_name}")
+        if tool_name == "fetch_url":
+            return await self._fetch_url(arguments)
+        if tool_name == "fetch_json":
+            return await self._fetch_json(arguments)
+        raise ValueError(f"Unsupported tool for web plugin: {tool_name}")
+
+    async def _fetch_url(self, arguments: dict[str, Any]) -> dict[str, Any]:
         url = str(arguments.get("url") or "").strip()
         if not url:
             raise ValueError("fetch_url requires a non-empty url")
@@ -102,6 +128,27 @@ class WebToolsPlugin:
             "url": url,
             "content_type": content_type,
             "content": self._truncate_text(extracted, max_chars),
+        }
+
+    async def _fetch_json(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        url = str(arguments.get("url") or "").strip()
+        if not url:
+            raise ValueError("fetch_json requires a non-empty url")
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("fetch_json only supports http and https URLs")
+
+        timeout = aiohttp.ClientTimeout(total=self.fetch_timeout_sec)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, allow_redirects=True) as response:
+                response.raise_for_status()
+                content_type = str(response.headers.get("Content-Type") or "").lower()
+                payload = await response.json(content_type=None)
+        return {
+            "ok": True,
+            "url": url,
+            "content_type": content_type,
+            "json": payload,
         }
 
     def _bounded_max_chars(self, value: Any) -> int:
@@ -130,4 +177,3 @@ class WebToolsPlugin:
             if text:
                 return text
         return raw_text.strip()
-
