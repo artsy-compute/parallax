@@ -15,6 +15,7 @@ import {
   IconButton,
   MenuItem,
   Pagination,
+  Switch,
   Stack,
   Tab,
   Tabs,
@@ -2807,24 +2808,40 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                   Color mode
                 </Typography>
                 <Typography variant='caption' color='text.secondary'>
-                  Saved locally in this browser.
+                  Enable dark mode. Saved locally in this browser.
                 </Typography>
               </Stack>
-              <Stack direction='row' sx={{ gap: 1, flexWrap: 'wrap' }}>
-              <Button
-                startIcon={<IconSunHigh size={16} />}
-                variant={mode === 'light' ? 'contained' : 'outlined'}
-                onClick={() => setMode('light')}
-              >
-                Light
-              </Button>
-              <Button
-                startIcon={<IconMoonStars size={16} />}
-                variant={mode === 'dark' ? 'contained' : 'outlined'}
-                onClick={() => setMode('dark')}
-              >
-                Dark
-              </Button>
+              <Stack direction='row' sx={{ alignItems: 'center', gap: 1 }}>
+                <Stack direction='row' sx={{ alignItems: 'center', gap: 0.5, color: 'text.secondary' }}>
+                  {mode === 'dark' ? <IconMoonStars size={16} /> : <IconSunHigh size={16} />}
+                  <Typography variant='body2'>
+                    {mode === 'dark' ? 'Dark mode' : 'Light mode'}
+                  </Typography>
+                </Stack>
+                <Switch
+                  checked={mode === 'dark'}
+                  onChange={(event) => setMode(event.target.checked ? 'dark' : 'light')}
+                  inputProps={{ 'aria-label': 'Toggle dark mode' }}
+                  sx={{
+                    '& .MuiSwitch-switchBase': {
+                      color: 'grey.500',
+                    },
+                    '& .MuiSwitch-switchBase.Mui-checked': {
+                      color: 'text.primary',
+                    },
+                    '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': {
+                      bgcolor: 'text.primary',
+                      opacity: 0.35,
+                    },
+                    '& .MuiSwitch-track': {
+                      bgcolor: 'text.disabled',
+                      opacity: 0.35,
+                    },
+                    '& .MuiSwitch-thumb': {
+                      boxShadow: 'none',
+                    },
+                  }}
+                />
               </Stack>
             </Stack>
           </Stack>
