@@ -1,8 +1,10 @@
 import type { FC, PropsWithChildren, ReactNode } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
-import { Box, Link, Stack, styled, Typography } from '@mui/material';
+import { Box, IconButton, Link, Stack, Tooltip, styled, Typography } from '@mui/material';
+import { IconMoonStars, IconSunHigh } from '@tabler/icons-react';
 import { LogoGradient } from '../brand';
 import { useCluster } from '../../services';
+import { useThemeMode } from '../../themes';
 
 export interface MainLayoutProps {
   contentStart?: ReactNode;
@@ -92,10 +94,17 @@ export const MainLayout: FC<PropsWithChildren<MainLayoutProps>> = ({
   contentStart,
   contentEnd = <DebugInfo />,
 }) => {
+  const { mode, toggleMode } = useThemeMode();
+
   return (
     <MainLayoutRoot>
-      <MainLayoutHeader direction='row'>
+      <MainLayoutHeader direction='row' sx={{ justifyContent: 'space-between' }}>
         <LogoGradient />
+        <Tooltip title={mode === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}>
+          <IconButton onClick={toggleMode} color='inherit'>
+            {mode === 'dark' ? <IconSunHigh size={18} /> : <IconMoonStars size={18} />}
+          </IconButton>
+        </Tooltip>
       </MainLayoutHeader>
       <MainLayoutContainer>
         <MainLayoutContent className='MainLayoutContent'>{children}</MainLayoutContent>

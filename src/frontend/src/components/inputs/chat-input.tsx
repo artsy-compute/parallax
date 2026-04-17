@@ -193,13 +193,16 @@ export const ChatInput: FC = () => {
           input: {
             sx: {
               border: '1px solid',
-              borderColor: 'grey.300',
+              borderColor: 'divider',
+              backgroundColor: 'background.paper',
+              color: 'text.primary',
               borderRadius: 2,
               fontSize: '0.95rem',
               boxShadow: '2px 2px 4px rgba(0,0,0,0.05)',
               flexDirection: 'column',
               '& textarea': {
                 fontSize: '0.875rem',
+                color: 'text.primary',
                 scrollbarWidth: 'none', // Firefox
                 msOverflowStyle: 'none', // IE, Edge
                 '&::-webkit-scrollbar': {

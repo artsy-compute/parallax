@@ -53,7 +53,7 @@ export const ConversationHistory: FC = () => {
   return (
     <Stack sx={{ minHeight: 0, height: '100%', flex: 1, gap: 1.5, overflow: 'hidden' }}>
       <Stack direction='row' sx={{ alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
-        <Typography variant='body1' sx={{ color: '#A7A7A7FF', fontWeight: 600 }}>
+        <Typography variant='body1' color='text.secondary' sx={{ fontWeight: 600 }}>
           Conversations
         </Typography>
         <Button
@@ -155,17 +155,17 @@ export const ConversationHistory: FC = () => {
                     pointerEvents: 'none',
                   },
                   '&:hover': {
-                    bgcolor: 'rgba(255,255,255,0.55)',
+                    bgcolor: 'action.hover',
                   },
                   '&:hover .conversation-delete, &.Mui-selected .conversation-delete': {
                     opacity: 0.65,
                     pointerEvents: 'auto',
                   },
                   '&.Mui-selected': {
-                    bgcolor: 'rgba(255,255,255,0.75)',
+                    bgcolor: 'action.selected',
                   },
                   '&.Mui-selected:hover': {
-                    bgcolor: 'rgba(255,255,255,0.85)',
+                    bgcolor: 'action.selected',
                   },
                 }}
               >
@@ -201,7 +201,7 @@ export const ConversationHistory: FC = () => {
                       flex: 'none',
                       color: 'text.disabled',
                       transition: 'opacity 120ms ease',
-                      '&:hover': { color: 'error.main', bgcolor: 'rgba(255,255,255,0.55)' },
+                      '&:hover': { color: 'error.main', bgcolor: 'action.hover' },
                     }}
                   >
                     <IconTrash size={14} />

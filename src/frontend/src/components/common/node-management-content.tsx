@@ -41,16 +41,16 @@ const HardwareIcon = ({ gpuName }: { gpuName?: string | null }) => {
 const getLogLineStyle = (line: string) => {
   const upper = line.toUpperCase();
   if (upper.includes('[ERROR') || upper.includes(' ERROR ') || upper.startsWith('ERROR')) {
-    return { color: 'error.dark', bgcolor: 'rgba(211, 47, 47, 0.08)' };
+    return { color: 'error.dark', bgcolor: 'error.lighter' };
   }
   if (upper.includes('[WARNING') || upper.includes(' WARNING ') || upper.startsWith('WARNING') || upper.includes('[WARN')) {
-    return { color: 'warning.dark', bgcolor: 'rgba(237, 108, 2, 0.08)' };
+    return { color: 'warning.dark', bgcolor: 'warning.lighter' };
   }
   if (upper.includes('[INFO') || upper.includes(' INFO ') || upper.startsWith('INFO')) {
-    return { color: 'info.dark', bgcolor: 'rgba(2, 136, 209, 0.06)' };
+    return { color: 'info.dark', bgcolor: 'info.lighter' };
   }
   if (upper.includes('[DEBUG') || upper.includes(' DEBUG ') || upper.startsWith('DEBUG')) {
-    return { color: 'text.secondary', bgcolor: 'rgba(158, 158, 158, 0.05)' };
+    return { color: 'text.secondary', bgcolor: 'action.hover' };
   }
   return { color: 'text.primary', bgcolor: 'transparent' };
 };
@@ -160,7 +160,7 @@ const HostRow = ({ host, onPing, onLogs, onStart, onStop, onRestart, onConfigure
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  bgcolor: 'rgba(255,255,255,0.6)',
+                  bgcolor: 'background.paper',
                   color: 'text.secondary',
                   border: '1px solid',
                   borderColor: 'divider',

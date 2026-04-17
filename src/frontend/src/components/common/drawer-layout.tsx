@@ -21,9 +21,12 @@ import {
   IconInfoCircle,
   IconLayoutSidebarLeftCollapse,
   IconLayoutSidebarLeftExpand,
+  IconMoonStars,
   IconSettings,
+  IconSunHigh,
 } from '@tabler/icons-react';
 import { ConversationHistory, JoinCommand, NodeList } from '../inputs';
+import { useThemeMode } from '../../themes';
 
 const DrawerLayoutRoot = styled(Stack)(({ theme }) => {
   const { spacing } = theme;
@@ -95,6 +98,7 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
   const [{ type: hostType }] = useHost();
   const theme = useTheme();
   const narrowWindow = useMediaQuery(theme.breakpoints.down('lg'));
+  const { mode, toggleMode } = useThemeMode();
 
   const [
     {
@@ -283,7 +287,7 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
                   sx={{
                     fontSize: '1.5rem',
                     borderRadius: '8px',
-                    color: '#808080FF',
+                    color: 'text.secondary',
                     '&:hover': { bgcolor: 'action.hover' },
                   }}
                   onClick={() => {
@@ -378,7 +382,7 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
                 borderRadius: 2,
                 px: 1,
                 py: 0.75,
-                '&:hover': { bgcolor: 'rgba(255,255,255,0.5)' },
+                '&:hover': { bgcolor: 'action.hover' },
               }}
             >
               Settings
@@ -504,7 +508,7 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
                                   px: 0.55,
                                   py: 0.125,
                                   borderRadius: 999,
-                                  bgcolor: 'rgba(25, 118, 210, 0.1)',
+                                  bgcolor: 'info.lighter',
                                   color: 'info.dark',
                                   fontSize: '0.68rem',
                                   fontWeight: 600,
@@ -551,6 +555,18 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
           ) : (
             <Box sx={{ flex: 1 }} />
           )}
+          <Tooltip title={mode === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}>
+            <IconButton
+              onClick={toggleMode}
+              sx={{
+                color: 'text.secondary',
+                borderRadius: 1.5,
+                '&:hover': { bgcolor: 'action.hover', color: 'text.primary' },
+              }}
+            >
+              {mode === 'dark' ? <IconSunHigh size={18} /> : <IconMoonStars size={18} />}
+            </IconButton>
+          </Tooltip>
         </DrawerLayoutHeader>
 
         <DrawerLayoutContent contentWidth={contentWidth}>

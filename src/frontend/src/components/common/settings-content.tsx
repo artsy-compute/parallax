@@ -30,8 +30,11 @@ import {
   IconMessageCircle,
   IconInfoCircle,
   IconLoader,
+  IconMoonStars,
   IconPlus,
+  IconSettingsCog,
   IconStack3,
+  IconSunHigh,
   IconTransfer,
   IconTrash,
   IconX,
@@ -67,8 +70,9 @@ import { useRefCallback } from '../../hooks';
 import { NodeManagementContent } from './node-management-content';
 import { JoinCommand, ModelSelect } from '../inputs';
 import { AlertDialog } from '../mui';
+import { useThemeMode } from '../../themes';
 
-type SettingsSectionKey = 'cluster' | 'custom-models' | 'nodes' | 'tools' | 'chat' | 'transfer';
+type SettingsSectionKey = 'cluster' | 'custom-models' | 'nodes' | 'tools' | 'chat' | 'transfer' | 'misc';
 
 const SETTINGS_SECTIONS: ReadonlyArray<{ key: SettingsSectionKey; label: string; icon: FC<{ size?: number }> }> = [
   { key: 'nodes', label: 'Nodes', icon: IconCirclesRelation },
@@ -77,6 +81,7 @@ const SETTINGS_SECTIONS: ReadonlyArray<{ key: SettingsSectionKey; label: string;
   { key: 'tools', label: 'Tools', icon: IconAdjustments },
   { key: 'chat', label: 'Chats', icon: IconMessageCircle },
   { key: 'transfer', label: 'Import & Export', icon: IconTransfer },
+  { key: 'misc', label: 'Miscellaneous', icon: IconSettingsCog },
 ];
 
 const CHAT_HISTORY_PAGE_SIZE = 20;
@@ -135,6 +140,7 @@ const getModelCapacityDisabledReason = (requiredGb?: number, availableGb?: numbe
 export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 'cluster' }) => {
   const navigate = useNavigate();
   const [{ type: hostType }] = useHost();
+  const { mode, setMode } = useThemeMode();
   const [
     {
       config: { modelInfo, modelInfoList, networkType, initNodesNumber, modelName: selectedModelName, activeClusterId, clusterProfiles },
@@ -2467,7 +2473,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                                       px: 1,
                                       py: 0.75,
                                       borderRadius: 1.5,
-                                      bgcolor: 'rgba(0,0,0,0.06)',
+                                      bgcolor: 'action.hover',
                                       fontFamily: 'monospace',
                                       fontSize: '0.78rem',
                                       lineHeight: 1.4,
@@ -2775,6 +2781,52 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                 )}
               </Stack>
             ))}
+          </Stack>
+        </Stack>
+      );
+    }
+
+    if (activeSection === 'misc') {
+      return (
+        <Stack sx={{ gap: 1.5 }}>
+          <Typography variant='h2'>Miscellaneous</Typography>
+          <Stack
+            sx={{
+              gap: 1,
+              px: 1.5,
+              py: 1.25,
+              borderRadius: 2,
+              border: '1px solid',
+              borderColor: 'divider',
+              bgcolor: 'background.paper',
+            }}
+          >
+            <Stack direction={{ xs: 'column', sm: 'row' }} sx={{ alignItems: { sm: 'center' }, justifyContent: 'space-between', gap: 1 }}>
+              <Stack sx={{ gap: 0.25 }}>
+                <Typography variant='body2' sx={{ fontWeight: 600 }}>
+                  Color mode
+                </Typography>
+                <Typography variant='caption' color='text.secondary'>
+                  Saved locally in this browser.
+                </Typography>
+              </Stack>
+              <Stack direction='row' sx={{ gap: 1, flexWrap: 'wrap' }}>
+              <Button
+                startIcon={<IconSunHigh size={16} />}
+                variant={mode === 'light' ? 'contained' : 'outlined'}
+                onClick={() => setMode('light')}
+              >
+                Light
+              </Button>
+              <Button
+                startIcon={<IconMoonStars size={16} />}
+                variant={mode === 'dark' ? 'contained' : 'outlined'}
+                onClick={() => setMode('dark')}
+              >
+                Dark
+              </Button>
+              </Stack>
+            </Stack>
           </Stack>
         </Stack>
       );
