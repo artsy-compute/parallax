@@ -9,6 +9,7 @@ import urllib.request
 import uuid
 import zipfile
 from pathlib import Path
+import re
 from typing import Any
 
 from backend.server.static_config import estimate_vram_gb_required, get_model_info_with_try_catch
@@ -31,6 +32,26 @@ SUPPORTED_MODEL_TYPES = {
     'minimax',
     'glm4_moe',
 }
+
+
+def _discover_supported_architectures() -> set[str]:
+    architectures: set[str] = set()
+    models_dir = Path(__file__).resolve().parents[2] / 'parallax' / 'models'
+    for path in sorted(models_dir.glob('*.py')):
+        if path.name == '__init__.py':
+            continue
+        try:
+            text = path.read_text(encoding='utf-8')
+        except Exception:
+            logger.warning('Failed to read model definition file %s', path, exc_info=True)
+            continue
+        match = re.search(r'return\s+"([^"]+)"', text)
+        if match:
+            architectures.add(str(match.group(1)).strip())
+    return architectures
+
+
+SUPPORTED_ARCHITECTURES = _discover_supported_architectures()
 
 
 class CustomModelStore:
@@ -406,6 +427,12 @@ class CustomModelStore:
         )
         config = self._load_config_only(source_type, normalized_value)
         model_type = str(config.get('model_type') or '').strip()
+        architectures = [
+            str(item).strip() for item in (config.get('architectures') or []) if str(item).strip()
+        ]
+        unsupported_architectures = [
+            architecture for architecture in architectures if architecture not in SUPPORTED_ARCHITECTURES
+        ]
         model_name = (
             str(self._resolve_scheduler_root_path(normalized_value))
             if source_type == 'scheduler_root'
@@ -415,12 +442,34 @@ class CustomModelStore:
         )
         model_info = get_model_info_with_try_catch(model_name)
         vram_gb = int(estimate_vram_gb_required(model_info)) if model_info is not None else 0
-        if model_type in SUPPORTED_MODEL_TYPES:
+        if model_type in SUPPORTED_MODEL_TYPES and architectures and not unsupported_architectures:
             validation_status = 'verified'
-            validation_message = f'Detected supported architecture: {model_type}'
-        elif config:
+            validation_message = (
+                f'Detected supported model_type={model_type} and architecture={architectures[0]}'
+            )
+        elif model_type in SUPPORTED_MODEL_TYPES and not architectures:
             validation_status = 'config_only'
-            validation_message = f'Config detected for model_type={model_type or "unknown"}; runtime compatibility is not guaranteed'
+            validation_message = (
+                f'Detected supported model_type={model_type}, but config.json does not declare architectures; '
+                'runtime compatibility is not guaranteed'
+            )
+        elif model_type in SUPPORTED_MODEL_TYPES and unsupported_architectures:
+            validation_status = 'invalid'
+            validation_message = (
+                f'Unsupported architecture={", ".join(unsupported_architectures)} for current Parallax runtime'
+            )
+        elif config:
+            if architectures:
+                validation_status = 'invalid'
+                validation_message = (
+                    f'Unsupported model_type={model_type or "unknown"} architecture={", ".join(architectures)}'
+                )
+            else:
+                validation_status = 'config_only'
+                validation_message = (
+                    f'Config detected for model_type={model_type or "unknown"}; '
+                    'runtime compatibility is not guaranteed'
+                )
         else:
             validation_status = 'invalid'
             validation_message = 'Unable to read model config'
@@ -433,7 +482,17 @@ class CustomModelStore:
             'vram_gb': vram_gb,
             'metadata_json': json.dumps(
                 {
-                    'config': {'model_type': model_type},
+                    'config': {
+                        'model_type': model_type,
+                        'architectures': architectures,
+                    },
+                    'runtime_support': {
+                        'supported_model_type': model_type in SUPPORTED_MODEL_TYPES,
+                        'supported_architectures': [
+                            architecture for architecture in architectures if architecture in SUPPORTED_ARCHITECTURES
+                        ],
+                        'unsupported_architectures': unsupported_architectures,
+                    },
                     **(
                         {
                             'scheduler_root': {

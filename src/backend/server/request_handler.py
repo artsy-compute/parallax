@@ -3,7 +3,7 @@ import json
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import aiohttp
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -11,6 +11,7 @@ from starlette.concurrency import iterate_in_threadpool
 
 from backend.server.chat_memory import ChatMemoryService
 from backend.server.constants import NODE_STATUS_AVAILABLE
+from backend.server.tool_runtime import ServerToolRuntime
 from parallax_utils.logging_config import get_logger
 from parallax_utils.request_metrics import get_request_metrics
 
@@ -53,6 +54,7 @@ class RequestHandler:
         self.scheduler_manage = None
         self.stubs = {}
         self.chat_memory = ChatMemoryService()
+        self.tool_runtime = ServerToolRuntime()
         self.active_requests: dict[str, ActiveRequestRecord] = {}
         self.summary_tasks: dict[str, asyncio.Task] = {}
 
@@ -243,9 +245,109 @@ class RequestHandler:
         result = message.get('content')
         return result if isinstance(result, str) else ''
 
-    async def _forward_request(self, request_data: Dict, request_id: str, received_ts: int):
-        request_data, conversation_id = self.chat_memory.prepare_request(request_data)
-        record = self._register_active_request(str(request_id), request_data, received_ts, conversation_id)
+    def _parse_completion_payload(self, content: str) -> Dict[str, Any]:
+        try:
+            payload = json.loads(content)
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _extract_completion_message(payload: Dict[str, Any]) -> Dict[str, Any]:
+        choices = payload.get("choices") or []
+        if not choices:
+            return {}
+        message = choices[0].get("message") or {}
+        return message if isinstance(message, dict) else {}
+
+    def _extract_nonstream_tool_calls(self, content: str) -> list[Dict[str, Any]]:
+        payload = self._parse_completion_payload(content)
+        message = self._extract_completion_message(payload)
+        tool_calls = message.get("tool_calls") or []
+        return [tool_call for tool_call in tool_calls if isinstance(tool_call, dict)]
+
+    @staticmethod
+    def _build_assistant_tool_message(payload: Dict[str, Any]) -> Dict[str, Any]:
+        message = RequestHandler._extract_completion_message(payload)
+        return {
+            "role": "assistant",
+            "content": message.get("content") or "",
+            "tool_calls": message.get("tool_calls") or [],
+        }
+
+    def _build_sse_response_from_payload(
+        self, payload: Dict[str, Any], request_id: str, model: Optional[str] = None
+    ) -> StreamingResponse:
+        response_payload = dict(payload)
+        response_payload["id"] = str(request_id)
+        response_payload["object"] = "chat.completion"
+        if model:
+            response_payload["model"] = model
+        message = self._extract_completion_message(response_payload)
+        choice = ((response_payload.get("choices") or [{}])[0]) if response_payload.get("choices") else {}
+        finish_reason = choice.get("finish_reason", "stop")
+        prompt_budget = response_payload.get("prompt_budget")
+        input_truncation = response_payload.get("input_truncation")
+        usage = response_payload.get("usage")
+        created = response_payload.get("created", time.time())
+        content = message.get("content") or ""
+
+        first_chunk = {
+            "id": str(request_id),
+            "object": "chat.completion.chunk",
+            "model": response_payload.get("model"),
+            "created": created,
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
+            "usage": usage,
+        }
+        if input_truncation is not None:
+            first_chunk["input_truncation"] = input_truncation
+        if prompt_budget is not None:
+            first_chunk["prompt_budget"] = prompt_budget
+
+        content_chunk = {
+            "id": str(request_id),
+            "object": "chat.completion.chunk",
+            "model": response_payload.get("model"),
+            "created": created,
+            "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": None}],
+            "usage": usage,
+        }
+        final_chunk = {
+            "id": str(request_id),
+            "object": "chat.completion.chunk",
+            "model": response_payload.get("model"),
+            "created": created,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+            "usage": usage,
+        }
+
+        async def stream_generator():
+            yield f"data: {json.dumps(first_chunk, separators=(',', ':'))}\n\n".encode("utf-8")
+            if content:
+                yield f"data: {json.dumps(content_chunk, separators=(',', ':'))}\n\n".encode("utf-8")
+            yield f"data: {json.dumps(final_chunk, separators=(',', ':'))}\n\n".encode("utf-8")
+            yield b"data: [DONE]\n\n"
+
+        return StreamingResponse(
+            stream_generator(),
+            media_type="text/event-stream",
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "no-cache",
+            },
+        )
+
+    async def _forward_prepared_request(
+        self,
+        request_data: Dict,
+        request_id: str,
+        received_ts: int,
+        *,
+        conversation_id: Optional[str],
+        save_assistant: bool = True,
+    ):
+        self._register_active_request(str(request_id), request_data, received_ts, conversation_id)
         start_time = time.time()
         logger.debug(
             f"Forwarding request {request_id}; stream={request_data.get('stream', False)} conversation_id={conversation_id}"
@@ -307,11 +409,13 @@ class RequestHandler:
                                             self._append_request_output(str(request_id), delta_text)
                                     yield chunk
                                 assistant_text = ''.join(assistant_chunks)
-                                if assistant_text:
+                                if assistant_text and save_assistant:
                                     self.chat_memory.save_assistant_message(
                                         conversation_id, assistant_text, str(request_id)
                                     )
                                     self._schedule_summary_refresh(conversation_id, request_data.get('model'))
+                                if assistant_text:
+                                    self._append_request_output(str(request_id), assistant_text, emitted_any_bytes=True)
                                 self._complete_active_request(str(request_id))
                                 return
                             except Exception as e:
@@ -381,11 +485,12 @@ class RequestHandler:
                     response = stub.chat_completion(request_data)
                     content = (await anext(iterate_in_threadpool(response))).decode()
                     assistant_text = self._extract_nonstream_content(content)
-                    if assistant_text:
+                    if assistant_text and save_assistant:
                         self.chat_memory.save_assistant_message(
                             conversation_id, assistant_text, str(request_id)
                         )
                         self._schedule_summary_refresh(conversation_id, request_data.get('model'))
+                    if assistant_text:
                         self._append_request_output(str(request_id), assistant_text, emitted_any_bytes=True)
                     self._complete_active_request(str(request_id))
                     logger.debug(f"Non-stream response completed for {request_id}")
@@ -406,6 +511,93 @@ class RequestHandler:
 
         return JSONResponse(
             content={"error": "Internal server error"},
+            status_code=500,
+        )
+
+    async def _forward_request(self, request_data: Dict, request_id: str, received_ts: int):
+        prepared_request, conversation_id = self.chat_memory.prepare_request(request_data)
+        policy = self.tool_runtime.resolve_policy(request_data)
+        prepared_request = self.tool_runtime.inject_builtin_tools(prepared_request, policy)
+
+        if not policy.enabled:
+            return await self._forward_prepared_request(
+                prepared_request,
+                request_id,
+                received_ts,
+                conversation_id=conversation_id,
+            )
+
+        original_stream = bool(prepared_request.get("stream", False))
+        tool_request = dict(prepared_request)
+        tool_request["stream"] = False
+
+        for iteration in range(policy.max_iterations):
+            current_request_id = (
+                str(request_id) if iteration == policy.max_iterations - 1 and not original_stream else f"{request_id}:tool:{iteration}"
+            )
+            response = await self._forward_prepared_request(
+                tool_request,
+                current_request_id,
+                received_ts,
+                conversation_id=conversation_id,
+                save_assistant=False,
+            )
+            if not isinstance(response, Response) or response.status_code != 200:
+                return response
+
+            try:
+                content = response.body.decode()
+            except Exception:
+                return response
+
+            tool_calls = self._extract_nonstream_tool_calls(content)
+            if not tool_calls or not self.tool_runtime.can_execute(tool_calls, policy):
+                payload = self._parse_completion_payload(content)
+                assistant_text = self._extract_nonstream_content(content)
+                if assistant_text:
+                    self.chat_memory.save_assistant_message(
+                        conversation_id, assistant_text, str(request_id)
+                    )
+                    self._schedule_summary_refresh(conversation_id, prepared_request.get("model"))
+                if original_stream:
+                    return self._build_sse_response_from_payload(
+                        payload,
+                        str(request_id),
+                        model=prepared_request.get("model"),
+                    )
+                if payload:
+                    payload["id"] = str(request_id)
+                    return Response(
+                        content=json.dumps(payload, separators=(",", ":")),
+                        media_type="application/json",
+                    )
+                return response
+
+            try:
+                tool_messages = await self.tool_runtime.execute_tool_calls(tool_calls)
+            except Exception as exc:
+                logger.warning("Server tool execution failed for %s: %s", request_id, exc, exc_info=True)
+                tool_messages = [
+                    {
+                        "role": "tool",
+                        "tool_call_id": str(tool_call.get("id") or ""),
+                        "content": json.dumps(
+                            {"ok": False, "error": str(exc)},
+                            ensure_ascii=False,
+                        ),
+                    }
+                    for tool_call in tool_calls
+                ]
+
+            payload = self._parse_completion_payload(content)
+            next_messages = list(tool_request.get("messages") or [])
+            next_messages.append(self._build_assistant_tool_message(payload))
+            next_messages.extend(tool_messages)
+            tool_request = dict(tool_request)
+            tool_request["messages"] = next_messages
+
+        return JSONResponse(
+            content={"error": "Server tool loop exceeded maximum iterations"},
             status_code=500,
         )
 
