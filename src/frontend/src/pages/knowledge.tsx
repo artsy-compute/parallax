@@ -14,13 +14,17 @@ import {
   Tab,
   Tabs,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Tooltip,
   Typography,
 } from '@mui/material';
 import {
   IconDatabaseSearch,
+  IconEye,
   IconFilePlus,
   IconLink,
+  IconSourceCode,
   IconExternalLink,
   IconRefresh,
   IconTrash,
@@ -28,6 +32,7 @@ import {
 } from '@tabler/icons-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { DrawerLayout } from '../components/common';
+import ChatMarkdown from '../components/inputs/chat-markdown';
 import { AlertDialog } from '../components/mui';
 import { useCluster } from '../services';
 import {
@@ -38,12 +43,18 @@ import {
   getKnowledgeDocument,
   getKnowledgeHealth,
   getKnowledgeJobs,
+  getKnowledgePage,
+  getKnowledgePages,
   getKnowledgeSources,
+  generateKnowledgePages,
+  regenerateKnowledgePage,
   searchKnowledge,
   updateAppSettings,
   type KnowledgeDocumentDetail,
   type KnowledgeHealth,
   type KnowledgeJob,
+  type KnowledgePageDetail,
+  type KnowledgePageSummary,
   type KnowledgeSearchResponse,
   type KnowledgeSourceSummary,
 } from '../services/api';
@@ -59,9 +70,20 @@ import {
   type LlmProviderId,
 } from '../services/llm-providers';
 
-type KnowledgeSection = 'overview' | 'ingest' | 'search' | 'sources' | 'jobs' | 'settings';
+type KnowledgeSection = 'wiki' | 'overview' | 'ingest' | 'search' | 'sources' | 'jobs' | 'settings';
+type WikiViewMode = 'rendered' | 'source';
 
 const KNOWLEDGE_SECTIONS: readonly KnowledgeSection[] = [
+  'wiki',
+  'overview',
+  'ingest',
+  'search',
+  'sources',
+  'jobs',
+  'settings',
+];
+
+const MANAGEMENT_SECTIONS: readonly Exclude<KnowledgeSection, 'wiki'>[] = [
   'overview',
   'ingest',
   'search',
@@ -97,18 +119,54 @@ const normalizeSection = (search: string): KnowledgeSection => {
   const value = new URLSearchParams(search).get('section');
   return KNOWLEDGE_SECTIONS.includes(value as KnowledgeSection)
     ? (value as KnowledgeSection)
-    : 'overview';
+    : 'wiki';
+};
+
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const normalizeWikiMarkdown = (content: string, title?: string, summary?: string) => {
+  let normalized = String(content || '').replace(/\r\n/g, '\n');
+  const normalizedTitle = String(title || '').trim();
+  const normalizedSummary = String(summary || '').trim();
+
+  if (normalizedTitle) {
+    const titlePattern = new RegExp(
+      `^\\s*#\\s*${escapeRegExp(normalizedTitle)}\\s*\\n+`,
+      'i',
+    );
+    normalized = normalized.replace(titlePattern, '');
+  }
+
+  if (normalizedSummary) {
+    const summaryPattern = new RegExp(
+      `^\\s*${escapeRegExp(normalizedSummary)}\\s*(\\n\\s*){1,2}`,
+      'i',
+    );
+    normalized = normalized.replace(summaryPattern, '');
+  }
+
+  if (!/(^|\n)##\s+Overview\b/i.test(normalized)) {
+    normalized = normalized
+      .replace(/(^|\n)(Overview)\s*\n/gi, '\n## $2\n')
+      .replace(/(^|\n)(Key Details)\s*\n/gi, '\n## $2\n')
+      .replace(/(^|\n)(Important Notes)\s*\n/gi, '\n## $2\n');
+  }
+  return normalized.trim();
 };
 
 export default function PageKnowledge() {
   const location = useLocation();
   const navigate = useNavigate();
   const activeSection = normalizeSection(location.search);
+  const selectedPageParam = new URLSearchParams(location.search).get('page') || '';
   const [{ config: { clusterProfiles } }] = useCluster();
 
   const [health, setHealth] = useState<KnowledgeHealth | null>(null);
   const [sources, setSources] = useState<readonly KnowledgeSourceSummary[]>([]);
   const [jobs, setJobs] = useState<readonly KnowledgeJob[]>([]);
+  const [pages, setPages] = useState<readonly KnowledgePageSummary[]>([]);
+  const [homePageId, setHomePageId] = useState('');
+  const [selectedPage, setSelectedPage] = useState<KnowledgePageDetail | null>(null);
   const [searchResults, setSearchResults] = useState<KnowledgeSearchResponse | null>(null);
   const [selectedDocument, setSelectedDocument] = useState<KnowledgeDocumentDetail | null>(null);
   const [localPath, setLocalPath] = useState('');
@@ -120,6 +178,10 @@ export default function PageKnowledge() {
   const [ingestingLocal, setIngestingLocal] = useState(false);
   const [ingestingUrl, setIngestingUrl] = useState(false);
   const [documentLoading, setDocumentLoading] = useState(false);
+  const [pageLoading, setPageLoading] = useState(false);
+  const [generatingWiki, setGeneratingWiki] = useState(false);
+  const [regeneratingPage, setRegeneratingPage] = useState(false);
+  const [wikiViewMode, setWikiViewMode] = useState<WikiViewMode>('rendered');
   const [deletingSourceId, setDeletingSourceId] = useState('');
   const [pendingDeleteSource, setPendingDeleteSource] = useState<null | { id: string; label: string }>(null);
   const [llmProviders, setLlmProviders] = useState<Record<LlmProviderId, LlmProviderConfig>>(
@@ -134,15 +196,18 @@ export default function PageKnowledge() {
   const loadPageData = useRefCallback(async () => {
     setRefreshing(true);
     try {
-      const [nextHealth, nextSources, nextJobs, nextSettings] = await Promise.all([
+      const [nextHealth, nextSources, nextJobs, nextSettings, nextPages] = await Promise.all([
         getKnowledgeHealth(),
         getKnowledgeSources(),
         getKnowledgeJobs(),
         getAppSettings(),
+        getKnowledgePages(),
       ]);
       setHealth(nextHealth);
       setSources(nextSources);
       setJobs(nextJobs);
+      setPages(nextPages.items || []);
+      setHomePageId(String(nextPages.home_page_id || ''));
       const providers = parseLlmProviderConfigs(nextSettings.cluster_settings.advanced);
       setLlmProviders(providers);
       setKnowledgeGenerationConfig(parseKnowledgeGenerationConfig(nextSettings.cluster_settings.advanced, providers));
@@ -159,6 +224,54 @@ export default function PageKnowledge() {
   useEffect(() => {
     void loadPageData();
   }, [loadPageData]);
+
+  useEffect(() => {
+    if (activeSection !== 'wiki') {
+      return;
+    }
+    const validSelected = selectedPageParam && pages.some((page) => page.id === selectedPageParam);
+    if (validSelected) {
+      return;
+    }
+    const nextPageId = String(homePageId || pages[0]?.id || '');
+    if (!nextPageId) {
+      setSelectedPage(null);
+      return;
+    }
+    navigate(`/knowledge?page=${encodeURIComponent(nextPageId)}`, { replace: true });
+  }, [activeSection, homePageId, navigate, pages, selectedPageParam]);
+
+  useEffect(() => {
+    const normalizedPageId = String(selectedPageParam || '').trim();
+    if (!normalizedPageId) {
+      setSelectedPage(null);
+      return;
+    }
+    setWikiViewMode('rendered');
+    let cancelled = false;
+    setPageLoading(true);
+    void (async () => {
+      try {
+        const detail = await getKnowledgePage(normalizedPageId);
+        if (!cancelled) {
+          setSelectedPage(detail);
+          setError('');
+        }
+      } catch (nextError) {
+        if (!cancelled) {
+          setSelectedPage(null);
+          setError(nextError instanceof Error ? nextError.message : String(nextError));
+        }
+      } finally {
+        if (!cancelled) {
+          setPageLoading(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedPageParam]);
 
   const onSearch = useRefCallback(async () => {
     const normalizedQuery = searchQuery.trim();
@@ -255,6 +368,45 @@ export default function PageKnowledge() {
     await onDeleteSource(pendingDeleteSource.id);
   });
 
+  const onGenerateWiki = useRefCallback(async () => {
+    setGeneratingWiki(true);
+    try {
+      const result = await generateKnowledgePages();
+      await loadPageData();
+      const nextHomePageId = String(result.home_page_id || result.pages?.home_page_id || '');
+      if (nextHomePageId) {
+        navigate(`/knowledge?page=${encodeURIComponent(nextHomePageId)}`);
+        return;
+      }
+      navigate('/knowledge');
+      setError('');
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    } finally {
+      setGeneratingWiki(false);
+    }
+  });
+
+  const onRegeneratePage = useRefCallback(async () => {
+    const normalizedPageId = String(selectedPageParam || '').trim();
+    if (!normalizedPageId) {
+      return;
+    }
+    setRegeneratingPage(true);
+    try {
+      const result = await regenerateKnowledgePage(normalizedPageId);
+      await loadPageData();
+      if (result.page?.id) {
+        navigate(`/knowledge?page=${encodeURIComponent(result.page.id)}`, { replace: true });
+      }
+      setError('');
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    } finally {
+      setRegeneratingPage(false);
+    }
+  });
+
   const onSectionChange = useRefCallback((_event: SyntheticEvent, value: string) => {
     if (!KNOWLEDGE_SECTIONS.includes(value as KnowledgeSection)) {
       return;
@@ -293,7 +445,6 @@ export default function PageKnowledge() {
   );
   const enabledProviders = useMemo(() => enabledLlmProviders(llmProviders), [llmProviders]);
   const selectedGenerationProvider = llmProviders[knowledgeGenerationConfig.provider];
-
   const renderIngestSection = () => (
     <Paper variant='outlined' sx={{ p: 2, borderRadius: 3, bgcolor: 'background.default' }}>
       <Stack sx={{ gap: 2 }}>
@@ -583,6 +734,212 @@ export default function PageKnowledge() {
     </Paper>
   );
 
+  const renderWikiSection = () => (
+    <Paper
+      variant='outlined'
+      sx={{
+        borderRadius: 3,
+        bgcolor: 'background.default',
+        minHeight: 0,
+        height: '100%',
+        flex: 1,
+        display: 'flex',
+        overflow: 'hidden',
+      }}
+    >
+      <Stack sx={{ gap: 0, minHeight: 0, height: '100%' }}>
+        {sources.length === 0 && (
+          <Alert severity='info' sx={{ mx: 2, mb: 2 }}>
+            Ingest one or more sources before generating wiki pages.
+          </Alert>
+        )}
+        {sources.length > 0 && pages.length === 0 && !generatingWiki && (
+          <Alert severity='info' sx={{ mx: 2, mb: 2 }}>
+            No wiki pages generated yet. Use <strong>Generate wiki</strong> to create a homepage and child pages from the current sources.
+          </Alert>
+        )}
+        {pages.length > 0 && (
+          <Box
+            sx={{
+              p: { xs: 1.5, lg: 2.5 },
+              bgcolor: 'background.paper',
+              minHeight: 0,
+              flex: 1,
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'flex-start',
+              alignItems: 'stretch',
+              borderTop: '1px solid',
+              borderColor: 'divider',
+              overflowY: 'auto',
+            }}
+          >
+              {pageLoading && (
+                <Typography variant='body2' color='text.secondary'>
+                  Loading page…
+                </Typography>
+              )}
+              {!pageLoading && selectedPage && (
+                <Stack
+                  sx={{
+                    gap: 1.25,
+                    flex: 1,
+                    justifyContent: 'flex-start',
+                    alignItems: 'stretch',
+                    alignSelf: 'stretch',
+                  }}
+                >
+                  <Stack
+                    direction='row'
+                    sx={{
+                      position: 'sticky',
+                      top: 0,
+                      zIndex: 10,
+                      width: '100%',
+                      justifyContent: 'flex-end',
+                      alignItems: 'flex-start',
+                      pb: 1,
+                      mb: 0.25,
+                      bgcolor: 'transparent',
+                      maxWidth: '100%',
+                    }}
+                  >
+                    <Stack
+                      direction='row'
+                      sx={{
+                        gap: 1,
+                        alignItems: 'center',
+                        flex: 'none',
+                        flexWrap: 'wrap',
+                        justifyContent: 'flex-end',
+                        ml: 'auto',
+                        px: 1,
+                        py: 0.75,
+                        borderRadius: 2,
+                        border: '1px solid',
+                        borderColor: 'divider',
+                        bgcolor: 'background.default',
+                        boxShadow: '0 2px 10px rgba(0,0,0,0.04)',
+                        width: 'fit-content',
+                        maxWidth: 'calc(100% - 0.5rem)',
+                        alignSelf: 'flex-end',
+                      }}
+                    >
+                      {selectedPage.source_id && (
+                        <Tooltip title='Regenerate this page from its source'>
+                          <IconButton
+                            size='small'
+                            onClick={() => {
+                              void onRegeneratePage();
+                            }}
+                            disabled={regeneratingPage}
+                            sx={{
+                              p: 0.5,
+                              borderRadius: 1.5,
+                              color: 'text.secondary',
+                              '&:hover': {
+                                bgcolor: 'action.hover',
+                              },
+                            }}
+                          >
+                            <IconRefresh size={15} />
+                          </IconButton>
+                        </Tooltip>
+                      )}
+                      <ToggleButtonGroup
+                        size='small'
+                        exclusive
+                        value={wikiViewMode}
+                        onChange={(_event, value: WikiViewMode | null) => {
+                          if (value) {
+                            setWikiViewMode(value);
+                          }
+                        }}
+                        sx={{
+                          flex: 'none',
+                          display: 'inline-flex',
+                          maxWidth: '100%',
+                          '& .MuiToggleButton-root': {
+                            minWidth: '2.25rem',
+                            px: 0.45,
+                            py: 0.25,
+                            fontSize: '0.68rem',
+                            lineHeight: 1.1,
+                            textTransform: 'none',
+                          },
+                        }}
+                      >
+                        <ToggleButton value='rendered' aria-label='Rendered markdown'>
+                          <IconEye size={14} />
+                        </ToggleButton>
+                        <ToggleButton value='source' aria-label='Source view'>
+                          <IconSourceCode size={14} />
+                        </ToggleButton>
+                      </ToggleButtonGroup>
+                    </Stack>
+                  </Stack>
+                  <Stack
+                    direction={{ xs: 'column', md: 'row' }}
+                    sx={{
+                      gap: 1,
+                      justifyContent: 'space-between',
+                      alignItems: { md: 'flex-start' },
+                    }}
+                  >
+                    <Stack sx={{ gap: 0.5, minWidth: 0 }}>
+                      <Typography variant='h2'>{selectedPage.title}</Typography>
+                      {selectedPage.summary && (
+                        <Typography variant='body2' color='text.secondary'>
+                          {selectedPage.summary}
+                        </Typography>
+                      )}
+                      <Typography variant='caption' color='text.secondary'>
+                        {Math.abs((selectedPage.updated_at || 0) - (selectedPage.created_at || 0)) < 1
+                          ? 'Generated'
+                          : 'Regenerated'} {formatDateTime(selectedPage.updated_at || selectedPage.created_at || 0)}
+                      </Typography>
+                    </Stack>
+                  </Stack>
+                  {wikiViewMode === 'rendered' ? (
+                    <Box sx={{ minWidth: 0 }}>
+                      <ChatMarkdown
+                        content={normalizeWikiMarkdown(
+                          selectedPage.content,
+                          selectedPage.title,
+                          selectedPage.summary,
+                        )}
+                      />
+                    </Box>
+                  ) : (
+                    <Box
+                      component='pre'
+                      sx={{
+                        m: 0,
+                        p: 0,
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-word',
+                        fontFamily: 'monospace',
+                        fontSize: '0.92rem',
+                        lineHeight: 1.7,
+                        maxWidth: '100%',
+                      }}
+                    >
+                      {selectedPage.content}
+                    </Box>
+                  )}
+                </Stack>
+              )}
+              {!pageLoading && !selectedPage && (
+                <Typography variant='body2' color='text.secondary'>
+                  Select a page from the sidebar tree.
+                </Typography>
+              )}
+          </Box>
+        )}
+      </Stack>
+    </Paper>
+  );
+
   const renderSettingsSection = () => (
     <Paper variant='outlined' sx={{ p: 2, borderRadius: 3, bgcolor: 'background.default' }}>
       <Stack sx={{ gap: 1.5 }}>
@@ -742,50 +1099,71 @@ export default function PageKnowledge() {
   );
 
   return (
-    <DrawerLayout contentWidth='wide'>
-      <Stack sx={{ minHeight: 0, gap: 2.5 }}>
-        <Stack direction='row' sx={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 2, flexWrap: 'wrap' }}>
-          <Stack sx={{ gap: 0.75 }}>
-            <Typography variant='h1'>Knowledge</Typography>
-            <Typography variant='body1' color='text.secondary' sx={{ maxWidth: '52rem' }}>
-              Explicit ingest and hybrid retrieval over workspace files and URLs. This is the first RAG-focused slice of the llm-wiki direction, without automatic chat routing or editable pages yet.
-            </Typography>
+    <DrawerLayout contentWidth={activeSection === 'wiki' ? 'full' : 'wide'}>
+      <Stack sx={{ minHeight: 0, height: '100%', flex: 1, gap: 2.5 }}>
+        {activeSection !== 'wiki' && (
+          <Stack direction='row' sx={{ justifyContent: 'flex-end', alignItems: 'flex-start', gap: 2, flexWrap: 'wrap' }}>
+            <Button
+              variant='outlined'
+              onClick={() => {
+                void loadPageData();
+              }}
+              disabled={refreshing}
+            >
+              Refresh
+            </Button>
           </Stack>
-          <Button
-            variant='outlined'
-            startIcon={<IconRefresh size={16} />}
-            onClick={() => {
-              void loadPageData();
-            }}
-            disabled={refreshing}
-          >
-            Refresh
-          </Button>
-        </Stack>
+        )}
 
-        <Paper variant='outlined' sx={{ borderRadius: 3, bgcolor: 'background.default', overflow: 'hidden' }}>
-          <Tabs
-            value={activeSection}
-            onChange={onSectionChange}
-            variant='scrollable'
-            allowScrollButtonsMobile
-            sx={{ px: 1.5, pt: 1 }}
-          >
-            <Tab value='overview' label='Overview' />
-            <Tab value='ingest' label='Ingest' />
-            <Tab value='search' label='Search' />
-            <Tab value='sources' label='Sources' />
-            <Tab value='jobs' label='Jobs' />
-            <Tab value='settings' label='Settings' />
-          </Tabs>
-          <Box sx={{ p: 2 }}>
-            {activeSection === 'overview' && (
+        {activeSection === 'wiki' ? (
+          renderWikiSection()
+        ) : (
+          <Paper variant='outlined' sx={{ borderRadius: 3, bgcolor: 'background.default', overflow: 'hidden' }}>
+            <Tabs
+              value={activeSection}
+              onChange={onSectionChange}
+              variant='scrollable'
+              allowScrollButtonsMobile
+              sx={{ px: 1.5, pt: 1 }}
+            >
+              {MANAGEMENT_SECTIONS.map((section) => (
+                <Tab
+                  key={section}
+                  value={section}
+                  label={section.charAt(0).toUpperCase() + section.slice(1)}
+                />
+              ))}
+            </Tabs>
+            <Box sx={{ p: 2 }}>
+              {activeSection === 'overview' && (
               <Stack sx={{ gap: 2 }}>
                 {error && (
                   <Alert severity='warning'>
                     {error}
                   </Alert>
                 )}
+
+                <Paper variant='outlined' sx={{ p: 2, borderRadius: 3, bgcolor: 'background.paper' }}>
+                  <Stack direction={{ xs: 'column', md: 'row' }} sx={{ gap: 1.5, alignItems: { md: 'center' }, justifyContent: 'space-between' }}>
+                    <Stack sx={{ gap: 0.35 }}>
+                      <Typography variant='body1' sx={{ fontWeight: 700 }}>
+                        Wiki generation
+                      </Typography>
+                      <Typography variant='body2' color='text.secondary'>
+                        Use management for whole-wiki generation. Use the reader for single-page regeneration.
+                      </Typography>
+                    </Stack>
+                    <Button
+                      variant='contained'
+                      onClick={() => {
+                        void onGenerateWiki();
+                      }}
+                      disabled={generatingWiki || sources.length === 0}
+                    >
+                      {generatingWiki ? 'Generating...' : (pages.length > 0 ? 'Regenerate all pages' : 'Generate wiki')}
+                    </Button>
+                  </Stack>
+                </Paper>
 
                 {!error && health && (
                   <Alert severity='info'>
@@ -815,14 +1193,15 @@ export default function PageKnowledge() {
                   ))}
                 </Box>
               </Stack>
-            )}
-            {activeSection === 'ingest' && renderIngestSection()}
-            {activeSection === 'search' && renderSearchSection()}
-            {activeSection === 'sources' && renderSourcesSection()}
-            {activeSection === 'jobs' && renderJobsSection()}
-            {activeSection === 'settings' && renderSettingsSection()}
-          </Box>
-        </Paper>
+              )}
+              {activeSection === 'ingest' && renderIngestSection()}
+              {activeSection === 'search' && renderSearchSection()}
+              {activeSection === 'sources' && renderSourcesSection()}
+              {activeSection === 'jobs' && renderJobsSection()}
+              {activeSection === 'settings' && renderSettingsSection()}
+            </Box>
+          </Paper>
+        )}
 
         <Dialog
           open={!!selectedDocument}

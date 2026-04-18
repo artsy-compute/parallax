@@ -121,6 +121,57 @@ class KnowledgeServiceClient:
             params=self._workspace_params(),
         )
 
+    async def list_pages(self) -> dict[str, Any]:
+        return await self._request(
+            "GET",
+            "/pages",
+            params=self._workspace_params(),
+        )
+
+    async def get_page(self, page_id: str) -> dict[str, Any]:
+        return await self._request(
+            "GET",
+            f"/pages/{page_id}",
+            params=self._workspace_params(),
+        )
+
+    async def generate_pages(
+        self,
+        *,
+        advanced: dict[str, Any],
+        cluster_model_name: str,
+        backend_base_url: str,
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/pages/generate",
+            json_body={
+                **self._workspace_params(),
+                "advanced": advanced,
+                "cluster_model_name": cluster_model_name,
+                "backend_base_url": backend_base_url,
+            },
+        )
+
+    async def regenerate_page(
+        self,
+        page_id: str,
+        *,
+        advanced: dict[str, Any],
+        cluster_model_name: str,
+        backend_base_url: str,
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            f"/pages/{page_id}/generate",
+            json_body={
+                **self._workspace_params(),
+                "advanced": advanced,
+                "cluster_model_name": cluster_model_name,
+                "backend_base_url": backend_base_url,
+            },
+        )
+
     async def list_jobs(self, limit: int = 20) -> list[dict[str, Any]]:
         payload = await self._request(
             "GET",

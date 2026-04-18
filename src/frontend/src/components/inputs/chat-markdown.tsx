@@ -1,12 +1,14 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { memo } from 'react';
 import { styled } from '@mui/material/styles';
+import MuiLink from '@mui/material/Link';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
+import { Link as RouterLink } from 'react-router-dom';
 import 'katex/dist/katex.min.css';
 import {
   Divider,
@@ -82,6 +84,32 @@ const components: Components = {
   h5: (props) => <Typography {...props} variant='h5' />,
   h6: (props) => <Typography {...props} variant='h6' />,
   p: (props) => <Typography {...props} variant='body1' />,
+  a: ({ href, children, ...props }) => {
+    const normalizedHref = String(href || '').trim();
+    if (normalizedHref.startsWith('/')) {
+      return (
+        <MuiLink
+          {...props}
+          component={RouterLink}
+          to={normalizedHref}
+          underline='hover'
+        >
+          {children}
+        </MuiLink>
+      );
+    }
+    return (
+      <MuiLink
+        {...props}
+        href={normalizedHref || undefined}
+        target='_blank'
+        rel='noreferrer'
+        underline='hover'
+      >
+        {children}
+      </MuiLink>
+    );
+  },
   caption: (props) => <Typography {...props} variant='caption' />,
   hr: (props) => <Divider {...props} />,
   table: (props) => (

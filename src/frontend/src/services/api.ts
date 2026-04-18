@@ -476,6 +476,44 @@ export interface KnowledgeCreateResponse {
   };
 }
 
+export interface KnowledgePageSummary {
+  readonly id: string;
+  readonly workspace_id: string;
+  readonly parent_page_id: string | null;
+  readonly source_id: string;
+  readonly title: string;
+  readonly slug: string;
+  readonly summary: string;
+  readonly sort_order: number;
+  readonly is_home: boolean;
+  readonly status: string;
+  readonly child_count: number;
+  readonly created_at: number;
+  readonly updated_at: number;
+}
+
+export interface KnowledgePageDetail extends KnowledgePageSummary {
+  readonly content: string;
+}
+
+export interface KnowledgePageListResponse {
+  readonly home_page_id: string | null;
+  readonly items: readonly KnowledgePageSummary[];
+}
+
+export interface KnowledgeGeneratePagesResponse {
+  readonly home_page_id: string | null;
+  readonly pages_created: number;
+  readonly job: KnowledgeJob | null;
+  readonly pages: KnowledgePageListResponse;
+}
+
+export interface KnowledgeRegeneratePageResponse {
+  readonly page: KnowledgePageDetail | null;
+  readonly job: KnowledgeJob | null;
+  readonly pages: KnowledgePageListResponse;
+}
+
 export interface KnowledgeDeleteSourceResponse {
   readonly source_id: string;
   readonly deleted_documents: number;
@@ -576,6 +614,62 @@ export const getKnowledgeDocument = async (documentId: string): Promise<Knowledg
   });
   const message = await parseJsonResponse(response);
   if (message.type !== 'knowledge_document_detail') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const getKnowledgePages = async (): Promise<KnowledgePageListResponse> => {
+  const response = await fetch(`${API_BASE_URL}/knowledge/pages`, { method: 'GET' });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'knowledge_pages') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const getKnowledgePage = async (pageId: string): Promise<KnowledgePageDetail> => {
+  const response = await fetch(`${API_BASE_URL}/knowledge/pages/${encodeURIComponent(pageId)}`, {
+    method: 'GET',
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'knowledge_page_detail') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const generateKnowledgePages = async (): Promise<KnowledgeGeneratePagesResponse> => {
+  const response = await fetch(`${API_BASE_URL}/knowledge/pages/generate`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'knowledge_pages_generate') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const regenerateKnowledgePage = async (pageId: string): Promise<KnowledgeRegeneratePageResponse> => {
+  const response = await fetch(`${API_BASE_URL}/knowledge/pages/${encodeURIComponent(pageId)}/generate`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'knowledge_page_generate') {
     throw new Error(`Invalid message type: ${message.type}.`);
   }
   if (message.error) {

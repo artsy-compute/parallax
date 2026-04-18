@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FC, type PropsWithChildren } from 'react';
+import { useEffect, useMemo, useRef, useState, type FC, type PropsWithChildren } from 'react';
 import { Link as RouterLink, useLocation } from 'react-router-dom';
 import {
   Alert,
@@ -16,9 +16,13 @@ import {
   useTheme,
 } from '@mui/material';
 import { useCluster, useHost } from '../../services';
+import { getKnowledgePages, type KnowledgePageSummary } from '../../services/api';
 import { AlertDialog, useAlertDialog } from '../mui';
 import { IconBrandGradient } from '../brand';
 import {
+  IconAdjustments,
+  IconChevronDown,
+  IconChevronRight,
   IconDatabaseSearch,
   IconInfoCircle,
   IconLayoutSidebarLeftCollapse,
@@ -80,10 +84,10 @@ const DrawerLayoutContainer = styled(Stack)(({ theme }) => {
 
 const DrawerLayoutContent = styled(Stack, {
   shouldForwardProp: (prop) => prop !== 'contentWidth',
-})<{ contentWidth?: 'default' | 'wide' }>(({ theme, contentWidth = 'default' }) => {
+})<{ contentWidth?: 'default' | 'wide' | 'full' }>(({ theme, contentWidth = 'default' }) => {
   const { spacing } = theme;
   return {
-    width: contentWidth === 'wide' ? '72rem' : '48.75rem',
+    width: contentWidth === 'full' ? '100%' : contentWidth === 'wide' ? '72rem' : '48.75rem',
     maxWidth: '100%',
     height: '100%',
     gap: spacing(2),
@@ -93,7 +97,7 @@ const DrawerLayoutContent = styled(Stack, {
   };
 });
 
-export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wide'; hideConversationHistory?: boolean }>> = ({
+export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wide' | 'full'; hideConversationHistory?: boolean }>> = ({
   children,
   contentWidth = 'default',
   hideConversationHistory = false,
@@ -224,8 +228,30 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
   const settingsSelected = pathname.startsWith('/settings');
   const showConversationList = !hideConversationHistory && !knowledgeSelected;
   const knowledgeSection = knowledgeSelected
-    ? new URLSearchParams(search).get('section') || 'overview'
+    ? new URLSearchParams(search).get('section') || 'wiki'
     : '';
+  const knowledgePageId = knowledgeSelected
+    ? new URLSearchParams(search).get('page') || ''
+    : '';
+  const [knowledgePages, setKnowledgePages] = useState<readonly KnowledgePageSummary[]>([]);
+  const [collapsedKnowledgePageIds, setCollapsedKnowledgePageIds] = useState<readonly string[]>([]);
+  const pagesByParentId = useMemo(() => {
+    const next = new Map<string | null, KnowledgePageSummary[]>();
+    for (const page of knowledgePages) {
+      const parentId = page.parent_page_id || null;
+      const items = next.get(parentId) || [];
+      items.push(page);
+      next.set(parentId, items);
+    }
+    for (const items of next.values()) {
+      items.sort((a, b) => a.sort_order - b.sort_order || a.title.localeCompare(b.title));
+    }
+    return next;
+  }, [knowledgePages]);
+  const knowledgeHomePageId = useMemo(
+    () => knowledgePages.find((page) => page.is_home)?.id || '',
+    [knowledgePages],
+  );
 
   const primaryNavButtonSx = (selected: boolean) => ({
     justifyContent: 'flex-start',
@@ -248,6 +274,122 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
     fontSize: '0.85rem',
     '&:hover': { bgcolor: selected ? 'action.selected' : 'action.hover' },
   });
+
+  useEffect(() => {
+    if (!knowledgeSelected || knowledgeSection !== 'wiki') {
+      setKnowledgePages([]);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const payload = await getKnowledgePages();
+        if (!cancelled) {
+          setKnowledgePages(payload.items || []);
+        }
+      } catch {
+        if (!cancelled) {
+          setKnowledgePages([]);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [knowledgeSection, knowledgeSelected, search]);
+
+  const renderKnowledgeTree = (parentId: string | null = null, depth = 0): JSX.Element | null => {
+    const items = pagesByParentId.get(parentId) || [];
+    if (items.length === 0) {
+      return null;
+    }
+    return (
+      <Stack
+        sx={{
+          gap: 0.35,
+          pl: depth > 0 ? 1.25 : 0,
+          ml: depth > 0 ? 0.75 : 0,
+          borderLeft: depth > 0 ? '1px dashed' : 'none',
+          borderColor: depth > 0 ? 'divider' : 'transparent',
+        }}
+      >
+        {items.map((page) => (
+          <Stack key={page.id} sx={{ gap: 0.35 }}>
+            {(() => {
+              const hasChildren = (pagesByParentId.get(page.id) || []).length > 0;
+              const expanded = !collapsedKnowledgePageIds.includes(page.id);
+              return (
+                <>
+                  <Stack direction='row' sx={{ alignItems: 'center', gap: 0.25, minWidth: 0 }}>
+                    {hasChildren ? (
+                      <IconButton
+                        size='small'
+                        onClick={() => setCollapsedKnowledgePageIds((prev) => (
+                          prev.includes(page.id)
+                            ? prev.filter((item) => item !== page.id)
+                            : [...prev, page.id]
+                        ))}
+                        sx={{
+                          p: 0.25,
+                          color: 'text.secondary',
+                          borderRadius: 1,
+                          flex: 'none',
+                          '&:hover': { bgcolor: 'action.hover' },
+                        }}
+                      >
+                        {expanded ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
+                      </IconButton>
+                    ) : (
+                      <Box sx={{ width: 22, height: 22, flex: 'none' }} />
+                    )}
+                    <Tooltip
+                      placement='right'
+                      title={(
+                        <Stack sx={{ gap: 0.35, maxWidth: '20rem' }}>
+                          <Typography variant='body2' sx={{ fontWeight: 700 }}>
+                            {page.title}
+                          </Typography>
+                          {page.summary && (
+                            <Typography variant='caption' sx={{ color: 'inherit' }}>
+                              {page.summary}
+                            </Typography>
+                          )}
+                        </Stack>
+                      )}
+                    >
+                      <Button
+                        component={RouterLink}
+                        to={`/knowledge?page=${encodeURIComponent(page.id)}`}
+                        color='inherit'
+                        variant='text'
+                        sx={{ ...secondaryNavButtonSx(knowledgePageId === page.id), flex: 1, minWidth: 0 }}
+                      >
+                        <Typography
+                          variant='body2'
+                          sx={{
+                            minWidth: 0,
+                            width: '100%',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            fontWeight: page.is_home ? 700 : 600,
+                            textAlign: 'left',
+                          }}
+                        >
+                          {page.title}
+                        </Typography>
+                      </Button>
+                    </Tooltip>
+                  </Stack>
+                  {hasChildren && expanded && renderKnowledgeTree(page.id, depth + 1)}
+                </>
+              );
+            })()}
+          </Stack>
+        ))}
+      </Stack>
+    );
+  };
 
   const getClusterStatusCounts = (clusterId: string) => {
     if (clusterId === activeClusterId) {
@@ -415,74 +557,45 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
             )}
             {!hideConversationHistory && (
               <Stack sx={{ gap: 0.5, mt: showConversationList ? 'auto' : 0 }}>
-                <Button
-                  component={RouterLink}
-                  to='/knowledge'
-                  color='inherit'
-                  variant='text'
-                  startIcon={<IconDatabaseSearch size={18} />}
-                  sx={primaryNavButtonSx(knowledgeSelected)}
-                >
-                  Knowledge
-                </Button>
-                {knowledgeSelected && (
-                  <Stack sx={{ gap: 0.35, pl: 1.75 }}>
+                <Stack sx={{ gap: 0.5 }}>
+                  <Stack direction='row' sx={{ alignItems: 'center', gap: 0.5 }}>
                     <Button
                       component={RouterLink}
-                      to='/knowledge?section=overview'
+                      to='/knowledge'
                       color='inherit'
                       variant='text'
-                      sx={secondaryNavButtonSx(knowledgeSection === 'overview')}
+                      startIcon={<IconDatabaseSearch size={18} />}
+                      sx={{ ...primaryNavButtonSx(knowledgeSelected), flex: 1 }}
                     >
-                      Overview
+                      Knowledge
                     </Button>
-                    <Button
-                      component={RouterLink}
-                      to='/knowledge?section=ingest'
-                      color='inherit'
-                      variant='text'
-                      sx={secondaryNavButtonSx(knowledgeSection === 'ingest')}
+                    <Tooltip
+                      title='Knowledge management'
+                      placement='right'
+                      slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
                     >
-                      Ingest
-                    </Button>
-                    <Button
-                      component={RouterLink}
-                      to='/knowledge?section=search'
-                      color='inherit'
-                      variant='text'
-                      sx={secondaryNavButtonSx(knowledgeSection === 'search')}
-                    >
-                      Search
-                    </Button>
-                    <Button
-                      component={RouterLink}
-                      to='/knowledge?section=sources'
-                      color='inherit'
-                      variant='text'
-                      sx={secondaryNavButtonSx(knowledgeSection === 'sources')}
-                    >
-                      Sources
-                    </Button>
-                    <Button
-                      component={RouterLink}
-                      to='/knowledge?section=jobs'
-                      color='inherit'
-                      variant='text'
-                      sx={secondaryNavButtonSx(knowledgeSection === 'jobs')}
-                    >
-                      Jobs
-                    </Button>
-                    <Button
-                      component={RouterLink}
-                      to='/knowledge?section=settings'
-                      color='inherit'
-                      variant='text'
-                      sx={secondaryNavButtonSx(knowledgeSection === 'settings')}
-                    >
-                      Settings
-                    </Button>
+                      <IconButton
+                        component={RouterLink}
+                        to='/knowledge?section=overview'
+                        sx={{
+                          color: knowledgeSelected && knowledgeSection !== 'wiki' ? 'primary.main' : 'text.secondary',
+                          bgcolor: knowledgeSelected && knowledgeSection !== 'wiki' ? 'action.selected' : 'transparent',
+                          borderRadius: '10px',
+                          '&:hover': {
+                            bgcolor: knowledgeSelected && knowledgeSection !== 'wiki' ? 'action.selected' : 'action.hover',
+                          },
+                        }}
+                      >
+                        <IconAdjustments size={18} />
+                      </IconButton>
+                    </Tooltip>
                   </Stack>
-                )}
+                  {knowledgeSelected && knowledgeSection === 'wiki' && (
+                    <Stack sx={{ gap: 0.35, pl: 1.75, minHeight: 0, overflowY: 'auto', pr: 0.25 }}>
+                      {renderKnowledgeTree(knowledgeHomePageId || null)}
+                    </Stack>
+                  )}
+                </Stack>
               </Stack>
             )}
             {hideConversationHistory && <Box sx={{ flex: 1 }} />}
@@ -536,6 +649,26 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
                 }}
               >
                 <IconDatabaseSearch size={18} />
+              </IconButton>
+            </Tooltip>
+            <Tooltip
+              title='Knowledge management'
+              placement='right'
+              slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
+            >
+              <IconButton
+                component={RouterLink}
+                to='/knowledge?section=overview'
+                sx={{
+                  color: knowledgeSelected && knowledgeSection !== 'wiki' ? 'primary.main' : 'text.secondary',
+                  bgcolor: knowledgeSelected && knowledgeSection !== 'wiki' ? 'action.selected' : 'transparent',
+                  borderRadius: '10px',
+                  '&:hover': {
+                    bgcolor: knowledgeSelected && knowledgeSection !== 'wiki' ? 'action.selected' : 'action.hover',
+                  },
+                }}
+              >
+                <IconAdjustments size={18} />
               </IconButton>
             </Tooltip>
             <Tooltip

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import requests
 
 from knowledge_service.chunking import chunk_text, estimate_token_count
 from knowledge_service.config import KnowledgeServiceConfig
@@ -25,6 +27,7 @@ except Exception:  # pragma: no cover - optional dependency
     hnswlib = None
 
 logger = get_logger(__name__)
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 
 @dataclass(frozen=True)
@@ -155,6 +158,24 @@ class KnowledgeStore:
             );
             CREATE INDEX IF NOT EXISTS idx_jobs_workspace_updated
                 ON jobs(workspace_id, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS pages (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                parent_page_id TEXT,
+                source_id TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL,
+                slug TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
+                content TEXT NOT NULL DEFAULT '',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                is_home INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'ready',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_pages_workspace_parent
+                ON pages(workspace_id, parent_page_id, sort_order ASC, title ASC);
             """
         )
         connection.commit()
@@ -280,6 +301,815 @@ class KnowledgeStore:
             "created_at": float(row["created_at"] or 0),
             "updated_at": float(row["updated_at"] or 0),
             "completed_at": float(row["completed_at"]) if row["completed_at"] is not None else None,
+        }
+
+    def _row_to_page_summary(self, row: sqlite3.Row, *, child_count: int = 0) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "workspace_id": row["workspace_id"],
+            "parent_page_id": row["parent_page_id"] or None,
+            "source_id": row["source_id"] or "",
+            "title": row["title"] or "",
+            "slug": row["slug"] or "",
+            "summary": row["summary"] or "",
+            "sort_order": int(row["sort_order"] or 0),
+            "is_home": bool(row["is_home"]),
+            "status": row["status"] or "ready",
+            "child_count": int(child_count or 0),
+            "created_at": float(row["created_at"] or 0),
+            "updated_at": float(row["updated_at"] or 0),
+        }
+
+    @staticmethod
+    def _slugify(value: str) -> str:
+        compact = _SLUG_RE.sub("-", str(value or "").strip().lower()).strip("-")
+        return compact or "page"
+
+    @staticmethod
+    def _normalize_page_title(value: str, max_chars: int = 88) -> str:
+        compact = " ".join(str(value or "").split()).strip()
+        if not compact:
+            return "Untitled page"
+        if len(compact) <= max_chars:
+            return compact
+        return compact[: max_chars - 1].rstrip() + "…"
+
+    @staticmethod
+    def _looks_like_locator_title(value: str) -> bool:
+        compact = " ".join(str(value or "").split()).strip().lower()
+        if not compact:
+            return True
+        if compact.startswith(("http://", "https://", "www.")):
+            return True
+        if "/" in compact and ("." in compact or compact.count("/") >= 2):
+            return True
+        if compact.endswith((".md", ".txt", ".html", ".htm", ".pdf", ".json", ".py", ".ts", ".tsx", ".js")):
+            return True
+        return False
+
+    @staticmethod
+    def _extract_summary_markdown(content: str) -> str:
+        for line in str(content or "").splitlines():
+            compact = line.strip()
+            if not compact or compact.startswith("#"):
+                continue
+            return compact[:240]
+        return ""
+
+    def _build_generation_settings(
+        self,
+        advanced: dict[str, Any] | None,
+        *,
+        cluster_model_name: str,
+        backend_base_url: str,
+    ) -> dict[str, Any]:
+        raw_advanced = dict(advanced or {})
+        raw_providers = raw_advanced.get("llm_providers")
+        llm_providers = dict(raw_providers) if isinstance(raw_providers, dict) else {}
+        generation = raw_advanced.get("knowledge_generation")
+        generation = dict(generation) if isinstance(generation, dict) else {}
+        provider = str(generation.get("provider") or "local_cluster").strip() or "local_cluster"
+        model_override = str(generation.get("model") or "").strip()
+        local_provider = dict(llm_providers.get("local_cluster") or {})
+        selected_provider = dict(llm_providers.get(provider) or {})
+        if provider == "local_cluster":
+            model = model_override or str(local_provider.get("default_model") or cluster_model_name or "").strip()
+        else:
+            model = model_override or str(selected_provider.get("default_model") or "").strip()
+        return {
+            "provider": provider,
+            "model": model,
+            "backend_base_url": str(backend_base_url or "").rstrip("/"),
+            "base_url": str(selected_provider.get("base_url") or "").strip(),
+            "api_key": str(selected_provider.get("api_key") or "").strip(),
+            "cluster_model_name": str(cluster_model_name or "").strip(),
+            "use_active_cluster": bool(local_provider.get("use_active_cluster", True)),
+            "cluster_id": str(local_provider.get("cluster_id") or "").strip(),
+        }
+
+    def _call_generation_provider(
+        self,
+        *,
+        settings: dict[str, Any],
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int = 1600,
+    ) -> str:
+        provider = str(settings.get("provider") or "local_cluster").strip()
+        model = str(settings.get("model") or "").strip()
+        if provider == "local_cluster":
+            base_url = str(settings.get("backend_base_url") or "").rstrip("/")
+            if not base_url:
+                raise ValueError("Knowledge generation requires a backend base URL for local cluster generation")
+            response = requests.post(
+                f"{base_url}/v1/chat/completions",
+                json={
+                    "model": model or str(settings.get("cluster_model_name") or "").strip(),
+                    "stream": False,
+                    "conversation_id": f"knowledge-wiki-{uuid.uuid4().hex[:8]}",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "max_tokens": max_tokens,
+                },
+                timeout=180,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            choices = payload.get("choices") or []
+            message = choices[0].get("message") if choices else {}
+            content = message.get("content") if isinstance(message, dict) else ""
+            return str(content or "").strip()
+
+        if provider in {"openai", "compatible"}:
+            base_url = str(settings.get("base_url") or "").rstrip("/")
+            api_key = str(settings.get("api_key") or "").strip()
+            if not base_url or not api_key:
+                raise ValueError(f"{provider} generation is missing base URL or API key")
+            response = requests.post(
+                f"{base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "max_tokens": max_tokens,
+                },
+                timeout=180,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            choices = payload.get("choices") or []
+            message = choices[0].get("message") if choices else {}
+            content = message.get("content") if isinstance(message, dict) else ""
+            return str(content or "").strip()
+
+        if provider == "anthropic":
+            base_url = str(settings.get("base_url") or "").rstrip("/")
+            api_key = str(settings.get("api_key") or "").strip()
+            if not base_url or not api_key:
+                raise ValueError("Anthropic generation is missing base URL or API key")
+            response = requests.post(
+                f"{base_url}/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "max_tokens": max_tokens,
+                    "system": system_prompt,
+                    "messages": [
+                        {"role": "user", "content": user_prompt},
+                    ],
+                },
+                timeout=180,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            blocks = payload.get("content") or []
+            parts = [str(block.get("text") or "").strip() for block in blocks if isinstance(block, dict)]
+            return "\n\n".join(part for part in parts if part).strip()
+
+        raise ValueError(f"Unsupported knowledge generation provider: {provider}")
+
+    def _collect_source_material(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        source_id: str,
+        max_chars: int = 14000,
+    ) -> str:
+        rows = connection.execute(
+            """
+            SELECT title, document_uri, content
+            FROM documents
+            WHERE workspace_id=? AND source_id=?
+            ORDER BY updated_at DESC, created_at DESC
+            """,
+            (workspace_id, source_id),
+        ).fetchall()
+        parts: list[str] = []
+        remaining = max_chars
+        for row in rows:
+            content = str(row["content"] or "").strip()
+            if not content or remaining <= 0:
+                continue
+            snippet = content[:remaining].strip()
+            parts.append(
+                "\n".join(
+                    [
+                        f"Document: {row['title'] or row['document_uri'] or 'Untitled'}",
+                        f"URI: {row['document_uri'] or ''}",
+                        "Excerpt:",
+                        snippet,
+                    ]
+                )
+            )
+            remaining -= len(snippet)
+        return "\n\n---\n\n".join(parts).strip()
+
+    @staticmethod
+    def _wiki_system_prompt() -> str:
+        return (
+            "You create concise internal wiki pages in markdown using only provided source material. "
+            "Write clearly, organize with headings, and avoid mentioning missing context."
+        )
+
+    def _infer_page_title(
+        self,
+        *,
+        fallback_title: str,
+        source_material: str,
+        generation_settings: dict[str, Any],
+    ) -> str:
+        normalized_fallback = self._normalize_page_title(fallback_title)
+        if normalized_fallback and not self._looks_like_locator_title(normalized_fallback):
+            return normalized_fallback
+
+        try:
+            title = self._call_generation_provider(
+                settings=generation_settings,
+                system_prompt=(
+                    "You produce concise human-readable wiki page titles from source text. "
+                    "Return only the title text. Do not return markdown, quotes, URLs, file paths, or explanations."
+                ),
+                user_prompt="\n\n".join(
+                    [
+                        "Suggest a concise page title for this material.",
+                        "Use 2 to 8 words when possible.",
+                        "Avoid raw URLs and file paths.",
+                        "Source material:",
+                        source_material[:4000],
+                    ]
+                ),
+                max_tokens=32,
+            )
+            title = self._normalize_page_title(title.strip().strip("#").strip("\"'"))
+            if title and not self._looks_like_locator_title(title):
+                return title
+        except Exception:
+            logger.warning("Failed to infer wiki page title from source text", exc_info=True)
+
+        return normalized_fallback
+
+    def _generate_source_page_payload(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        source_row: sqlite3.Row,
+        generation_settings: dict[str, Any],
+        sort_order: int,
+    ) -> dict[str, Any] | None:
+        fallback_title = str(source_row["title"] or source_row["canonical_uri"] or "Untitled source")
+        source_material = self._collect_source_material(
+            connection,
+            workspace_id=workspace_id,
+            source_id=str(source_row["id"]),
+        )
+        if not source_material:
+            return None
+        source_title = self._infer_page_title(
+            fallback_title=fallback_title,
+            source_material=source_material,
+            generation_settings=generation_settings,
+        )
+
+        user_prompt = "\n\n".join(
+            [
+                "Create a wiki page in markdown for this source.",
+                f"Preferred title: {source_title}",
+                f"Canonical URI: {source_row['canonical_uri'] or ''}",
+                "Write explicit markdown headings.",
+                "Start with `## Overview`, then `## Key Details`, then `## Important Notes`.",
+                "Use bullet lists where useful and keep prose concise.",
+                "Do not use the raw URL or file path as the page title if a better topic/title can be inferred from the text.",
+                "Source material:",
+                source_material,
+            ]
+        )
+        content = self._call_generation_provider(
+            settings=generation_settings,
+            system_prompt=self._wiki_system_prompt(),
+            user_prompt=user_prompt,
+            max_tokens=1400,
+        )
+        summary = self._extract_summary_markdown(content)
+        return {
+            "title": source_title,
+            "slug": self._slugify(source_title),
+            "summary": summary,
+            "content": content,
+            "source_id": str(source_row["id"]),
+            "sort_order": int(sort_order),
+        }
+
+    def _generate_home_page_payload(
+        self,
+        child_pages: list[dict[str, Any]],
+        *,
+        generation_settings: dict[str, Any],
+    ) -> dict[str, str]:
+        child_summaries = [
+            f"- {page['title']}: {page.get('summary') or 'Generated wiki page'}"
+            for page in child_pages
+        ]
+        home_prompt = "\n\n".join(
+            [
+                "Create a markdown homepage for this knowledge wiki.",
+                "Introduce the knowledge base, summarize the main pages, and include a short navigation section.",
+                "Available child pages:",
+                "\n".join(child_summaries),
+            ]
+        )
+        home_content = self._call_generation_provider(
+            settings=generation_settings,
+            system_prompt=self._wiki_system_prompt(),
+            user_prompt=home_prompt,
+            max_tokens=1400,
+        )
+        return {
+            "title": "Knowledge wiki",
+            "slug": "knowledge-wiki",
+            "summary": self._extract_summary_markdown(home_content),
+            "content": home_content,
+        }
+
+    def _link_page_references_in_text(
+        self,
+        content: str,
+        *,
+        self_page_id: str,
+        page_refs: list[dict[str, str]],
+    ) -> str:
+        ordered_page_refs = sorted(
+            [
+                page_ref
+                for page_ref in page_refs
+                if str(page_ref.get("id") or "").strip() and str(page_ref.get("title") or "").strip()
+            ],
+            key=lambda page_ref: len(str(page_ref.get("title") or "")),
+            reverse=True,
+        )
+        sections = str(content or "").split("```")
+        for index, section in enumerate(sections):
+            if index % 2 == 1:
+                continue
+            lines = section.splitlines()
+            for line_index, line in enumerate(lines):
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") or "](" in line:
+                    continue
+                next_line = line
+                for page_ref in ordered_page_refs:
+                    page_id = str(page_ref.get("id") or "").strip()
+                    title = str(page_ref.get("title") or "").strip()
+                    if not page_id or not title or page_id == self_page_id:
+                        continue
+                    pattern = re.compile(
+                        rf"(?<!\[)(?<!\]\()(?<!/knowledge\?page=)(?<![\w/]){re.escape(title)}(?![\w])(?!\]\()"
+                    )
+                    next_line = pattern.sub(f"[{title}](/knowledge?page={page_id})", next_line)
+                lines[line_index] = next_line
+            sections[index] = "\n".join(lines)
+        return "```".join(sections)
+
+    def _apply_page_cross_links(self, pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        page_refs = [
+            {
+                "id": str(page.get("id") or ""),
+                "title": str(page.get("title") or ""),
+            }
+            for page in pages
+            if str(page.get("id") or "").strip() and str(page.get("title") or "").strip()
+        ]
+        next_pages: list[dict[str, Any]] = []
+        for page in pages:
+            next_page = dict(page)
+            next_page["content"] = self._link_page_references_in_text(
+                str(page.get("content") or ""),
+                self_page_id=str(page.get("id") or ""),
+                page_refs=page_refs,
+            )
+            next_pages.append(next_page)
+        return next_pages
+
+    def list_pages(self, workspace_root: str | Path | None = None) -> dict[str, Any]:
+        context = self.workspace_context(workspace_root)
+        with self._lock, self._connect(context) as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM pages
+                WHERE workspace_id=?
+                ORDER BY is_home DESC, sort_order ASC, title ASC
+                """,
+                (context.workspace_id,),
+            ).fetchall()
+            child_counts: dict[str | None, int] = {}
+            for row in rows:
+                parent_page_id = str(row["parent_page_id"] or "") or None
+                child_counts[parent_page_id] = child_counts.get(parent_page_id, 0) + 1
+            items = [
+                self._row_to_page_summary(row, child_count=child_counts.get(str(row["id"]), 0))
+                for row in rows
+            ]
+            home_page = next((item for item in items if item["is_home"]), None)
+            return {
+                "home_page_id": home_page["id"] if home_page else (items[0]["id"] if items else None),
+                "items": items,
+            }
+
+    def get_page(self, workspace_root: str | Path | None, page_id: str) -> dict[str, Any] | None:
+        context = self.workspace_context(workspace_root)
+        with self._lock, self._connect(context) as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM pages
+                WHERE workspace_id=? AND id=?
+                """,
+                (context.workspace_id, str(page_id or "").strip()),
+            ).fetchone()
+            if row is None:
+                return None
+            child_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) AS count FROM pages WHERE workspace_id=? AND parent_page_id=?",
+                    (context.workspace_id, row["id"]),
+                ).fetchone()["count"]
+            )
+            return {
+                **self._row_to_page_summary(row, child_count=child_count),
+                "content": row["content"] or "",
+            }
+
+    def generate_wiki(
+        self,
+        workspace_root: str | Path | None,
+        *,
+        advanced: dict[str, Any] | None,
+        cluster_model_name: str,
+        backend_base_url: str,
+    ) -> dict[str, Any]:
+        context = self.workspace_context(workspace_root)
+        generation_settings = self._build_generation_settings(
+            advanced,
+            cluster_model_name=cluster_model_name,
+            backend_base_url=backend_base_url,
+        )
+
+        with self._lock, self._connect(context) as connection:
+            ready_sources = connection.execute(
+                """
+                SELECT *
+                FROM sources
+                WHERE workspace_id=? AND status='ready'
+                ORDER BY updated_at DESC, created_at DESC
+                """,
+                (context.workspace_id,),
+            ).fetchall()
+            if not ready_sources:
+                raise ValueError("No ready knowledge sources are available to generate wiki pages")
+
+            job_id = self._create_job(
+                connection,
+                workspace_id=context.workspace_id,
+                job_type="generate_wiki",
+                summary="Generating wiki pages from knowledge sources",
+            )
+            self._update_job(
+                connection,
+                job_id,
+                status="running",
+                progress=0.1,
+                summary="Collecting source material for wiki generation",
+            )
+            connection.commit()
+
+            generated_pages: list[dict[str, Any]] = []
+            total_sources = max(1, len(ready_sources))
+
+            for index, source_row in enumerate(ready_sources, start=1):
+                generated_page = self._generate_source_page_payload(
+                    connection,
+                    workspace_id=context.workspace_id,
+                    source_row=source_row,
+                    generation_settings=generation_settings,
+                    sort_order=index,
+                )
+                if generated_page is None:
+                    continue
+                generated_pages.append(generated_page)
+                self._update_job(
+                    connection,
+                    job_id,
+                    progress=0.15 + (0.55 * (index / total_sources)),
+                    summary=f"Generated {index}/{total_sources} source pages",
+                )
+                connection.commit()
+
+            if not generated_pages:
+                self._update_job(
+                    connection,
+                    job_id,
+                    status="failed",
+                    progress=1.0,
+                    summary="Wiki generation failed",
+                    error="No readable source material was available for wiki generation",
+                    completed=True,
+                )
+                connection.commit()
+                raise ValueError("No readable source material was available for wiki generation")
+
+            home_page = self._generate_home_page_payload(
+                generated_pages,
+                generation_settings=generation_settings,
+            )
+
+            connection.execute("DELETE FROM pages WHERE workspace_id=?", (context.workspace_id,))
+            now = self._now()
+            home_page_id = self._new_id("page")
+            home_page["id"] = home_page_id
+            home_page["parent_page_id"] = None
+            home_page["source_id"] = ""
+            home_page["sort_order"] = 0
+            home_page["is_home"] = True
+            home_page["status"] = "ready"
+            for page in generated_pages:
+                page["id"] = self._new_id("page")
+                page["parent_page_id"] = home_page_id
+                page["is_home"] = False
+                page["status"] = "ready"
+
+            linked_pages = self._apply_page_cross_links([home_page, *generated_pages])
+            linked_home_page = linked_pages[0]
+            linked_child_pages = linked_pages[1:]
+            connection.execute(
+                """
+                INSERT INTO pages (
+                    id, workspace_id, parent_page_id, source_id, title, slug, summary,
+                    content, sort_order, is_home, status, created_at, updated_at
+                )
+                VALUES (?, ?, NULL, '', ?, ?, ?, ?, 0, 1, 'ready', ?, ?)
+                """,
+                (
+                    home_page_id,
+                    context.workspace_id,
+                    linked_home_page["title"],
+                    linked_home_page["slug"],
+                    linked_home_page["summary"],
+                    linked_home_page["content"],
+                    now,
+                    now,
+                ),
+            )
+
+            for page in linked_child_pages:
+                connection.execute(
+                    """
+                    INSERT INTO pages (
+                        id, workspace_id, parent_page_id, source_id, title, slug, summary,
+                        content, sort_order, is_home, status, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'ready', ?, ?)
+                    """,
+                    (
+                        page["id"],
+                        context.workspace_id,
+                        home_page_id,
+                        page["source_id"],
+                        page["title"],
+                        page["slug"],
+                        page["summary"],
+                        page["content"],
+                        page["sort_order"],
+                        now,
+                        now,
+                    ),
+                )
+
+            self._update_job(
+                connection,
+                job_id,
+                status="completed",
+                progress=1.0,
+                summary=f"Generated wiki homepage and {len(generated_pages)} child pages",
+                error="",
+                completed=True,
+            )
+            connection.commit()
+
+        return {
+            "home_page_id": home_page_id,
+            "pages_created": len(generated_pages) + 1,
+            "job": self.get_job(context.workspace_root, job_id),
+            "pages": self.list_pages(context.workspace_root),
+        }
+
+    def regenerate_page(
+        self,
+        workspace_root: str | Path | None,
+        page_id: str,
+        *,
+        advanced: dict[str, Any] | None,
+        cluster_model_name: str,
+        backend_base_url: str,
+    ) -> dict[str, Any] | None:
+        context = self.workspace_context(workspace_root)
+        normalized_page_id = str(page_id or "").strip()
+        if not normalized_page_id:
+            return None
+        generation_settings = self._build_generation_settings(
+            advanced,
+            cluster_model_name=cluster_model_name,
+            backend_base_url=backend_base_url,
+        )
+
+        with self._lock, self._connect(context) as connection:
+            page_row = connection.execute(
+                "SELECT * FROM pages WHERE workspace_id=? AND id=?",
+                (context.workspace_id, normalized_page_id),
+            ).fetchone()
+            if page_row is None:
+                return None
+
+            source_id = str(page_row["source_id"] or "").strip()
+            if not source_id:
+                raise ValueError("Only source-backed wiki pages can be regenerated individually")
+
+            source_row = connection.execute(
+                "SELECT * FROM sources WHERE workspace_id=? AND id=? AND status='ready'",
+                (context.workspace_id, source_id),
+            ).fetchone()
+            if source_row is None:
+                raise ValueError("The source for this page is no longer ready for regeneration")
+
+            job_id = self._create_job(
+                connection,
+                workspace_id=context.workspace_id,
+                job_type="regenerate_page",
+                summary=f"Regenerating page {page_row['title'] or normalized_page_id}",
+            )
+            self._update_job(
+                connection,
+                job_id,
+                status="running",
+                progress=0.15,
+                summary=f"Regenerating page {page_row['title'] or normalized_page_id}",
+            )
+            connection.commit()
+
+            generated_page = self._generate_source_page_payload(
+                connection,
+                workspace_id=context.workspace_id,
+                source_row=source_row,
+                generation_settings=generation_settings,
+                sort_order=int(page_row["sort_order"] or 0),
+            )
+            if generated_page is None:
+                self._update_job(
+                    connection,
+                    job_id,
+                    status="failed",
+                    progress=1.0,
+                    summary="Page regeneration failed",
+                    error="No readable source material was available for this page",
+                    completed=True,
+                )
+                connection.commit()
+                raise ValueError("No readable source material was available for this page")
+
+            now = self._now()
+            home_row = connection.execute(
+                "SELECT * FROM pages WHERE workspace_id=? AND is_home=1 LIMIT 1",
+                (context.workspace_id,),
+            ).fetchone()
+            home_page_payload: dict[str, Any] | None = None
+            if home_row is not None:
+                child_rows = connection.execute(
+                    """
+                    SELECT id, source_id, parent_page_id, title, slug, summary, content, sort_order, is_home, status
+                    FROM pages
+                    WHERE workspace_id=? AND parent_page_id=?
+                    ORDER BY sort_order ASC, title ASC
+                    """,
+                    (context.workspace_id, home_row["id"]),
+                ).fetchall()
+                child_pages: list[dict[str, Any]] = []
+                for row in child_rows:
+                    if str(row["id"]) == normalized_page_id:
+                        child_pages.append(
+                            {
+                                "id": normalized_page_id,
+                                "source_id": str(row["source_id"] or ""),
+                                "parent_page_id": str(row["parent_page_id"] or "") or None,
+                                "title": generated_page["title"],
+                                "slug": generated_page["slug"],
+                                "summary": generated_page["summary"],
+                                "content": generated_page["content"],
+                                "sort_order": int(row["sort_order"] or 0),
+                                "is_home": bool(row["is_home"]),
+                                "status": str(row["status"] or "ready"),
+                            }
+                        )
+                        continue
+                    child_pages.append(
+                        {
+                            "id": str(row["id"]),
+                            "source_id": str(row["source_id"] or ""),
+                            "parent_page_id": str(row["parent_page_id"] or "") or None,
+                            "title": str(row["title"] or ""),
+                            "slug": str(row["slug"] or ""),
+                            "summary": str(row["summary"] or ""),
+                            "content": str(row["content"] or ""),
+                            "sort_order": int(row["sort_order"] or 0),
+                            "is_home": bool(row["is_home"]),
+                            "status": str(row["status"] or "ready"),
+                        }
+                    )
+                home_page = self._generate_home_page_payload(
+                    [
+                        {
+                            "title": str(page["title"] or ""),
+                            "summary": str(page["summary"] or ""),
+                        }
+                        for page in child_pages
+                    ],
+                    generation_settings=generation_settings,
+                )
+                home_page_payload = {
+                    "id": str(home_row["id"]),
+                    "source_id": "",
+                    "parent_page_id": None,
+                    "title": str(home_row["title"] or home_page["title"] or "Knowledge wiki"),
+                    "slug": str(home_row["slug"] or home_page["slug"] or "knowledge-wiki"),
+                    "summary": home_page["summary"],
+                    "content": home_page["content"],
+                    "sort_order": int(home_row["sort_order"] or 0),
+                    "is_home": True,
+                    "status": str(home_row["status"] or "ready"),
+                }
+                linked_pages = self._apply_page_cross_links([home_page_payload, *child_pages])
+                linked_home_page = linked_pages[0]
+                linked_child_pages = {str(page["id"]): page for page in linked_pages[1:]}
+                generated_page = dict(linked_child_pages.get(normalized_page_id) or generated_page)
+                connection.execute(
+                    """
+                    UPDATE pages
+                    SET summary=?, content=?, updated_at=?
+                    WHERE workspace_id=? AND id=?
+                    """,
+                    (
+                        linked_home_page["summary"],
+                        linked_home_page["content"],
+                        now,
+                        context.workspace_id,
+                        home_row["id"],
+                    ),
+                )
+
+            connection.execute(
+                """
+                UPDATE pages
+                SET title=?, slug=?, summary=?, content=?, status='ready', updated_at=?
+                WHERE workspace_id=? AND id=?
+                """,
+                (
+                    generated_page["title"],
+                    generated_page["slug"],
+                    generated_page["summary"],
+                    generated_page["content"],
+                    now,
+                    context.workspace_id,
+                    normalized_page_id,
+                ),
+            )
+
+            self._update_job(
+                connection,
+                job_id,
+                status="completed",
+                progress=1.0,
+                summary=f"Regenerated page {generated_page['title']}",
+                error="",
+                completed=True,
+            )
+            connection.commit()
+
+        return {
+            "page": self.get_page(context.workspace_root, normalized_page_id),
+            "job": self.get_job(context.workspace_root, job_id),
+            "pages": self.list_pages(context.workspace_root),
         }
 
     def _create_job(

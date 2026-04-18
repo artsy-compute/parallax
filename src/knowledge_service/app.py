@@ -107,6 +107,47 @@ def create_app(config: KnowledgeServiceConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=f"Document not found: {document_id}")
         return item
 
+    @app.get("/pages")
+    async def pages(workspace_root: str | None = None) -> dict[str, Any]:
+        return await run_in_threadpool(_service_store().list_pages, workspace_root)
+
+    @app.get("/pages/{page_id}")
+    async def page_detail(page_id: str, workspace_root: str | None = None) -> dict[str, Any]:
+        item = await run_in_threadpool(_service_store().get_page, workspace_root, page_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail=f"Page not found: {page_id}")
+        return item
+
+    @app.post("/pages/generate")
+    async def generate_pages(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return await run_in_threadpool(
+                _service_store().generate_wiki,
+                payload.get("workspace_root"),
+                advanced=dict(payload.get("advanced") or {}),
+                cluster_model_name=str(payload.get("cluster_model_name") or ""),
+                backend_base_url=str(payload.get("backend_base_url") or ""),
+            )
+        except Exception as error:
+            raise _as_http_exception(error) from error
+
+    @app.post("/pages/{page_id}/generate")
+    async def regenerate_page(page_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            item = await run_in_threadpool(
+                _service_store().regenerate_page,
+                payload.get("workspace_root"),
+                page_id,
+                advanced=dict(payload.get("advanced") or {}),
+                cluster_model_name=str(payload.get("cluster_model_name") or ""),
+                backend_base_url=str(payload.get("backend_base_url") or ""),
+            )
+            if item is None:
+                raise HTTPException(status_code=404, detail=f"Page not found: {page_id}")
+            return item
+        except Exception as error:
+            raise _as_http_exception(error) from error
+
     @app.get("/jobs")
     async def jobs(
         workspace_root: str | None = None,

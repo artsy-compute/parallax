@@ -1125,6 +1125,69 @@ async def knowledge_document_detail(document_id: str) -> JSONResponse:
     )
 
 
+@app.get("/knowledge/pages")
+async def knowledge_pages() -> JSONResponse:
+    try:
+        payload = await knowledge_client.list_pages()
+    except KnowledgeServiceError as error:
+        return _knowledge_error_response("knowledge_pages", error)
+    return JSONResponse(
+        content={"type": "knowledge_pages", "data": payload},
+        status_code=200,
+    )
+
+
+@app.get("/knowledge/pages/{page_id}")
+async def knowledge_page_detail(page_id: str) -> JSONResponse:
+    try:
+        payload = await knowledge_client.get_page(page_id)
+    except KnowledgeServiceError as error:
+        return _knowledge_error_response("knowledge_page_detail", error)
+    return JSONResponse(
+        content={"type": "knowledge_page_detail", "data": payload},
+        status_code=200,
+    )
+
+
+@app.post("/knowledge/pages/generate")
+async def knowledge_pages_generate(raw_request: Request) -> JSONResponse:
+    await _read_json_request(raw_request)
+    try:
+        cluster_settings = settings_store.get_cluster_settings()
+        advanced = dict(cluster_settings.get("advanced") or {})
+        payload = await knowledge_client.generate_pages(
+            advanced=advanced,
+            cluster_model_name=str(cluster_settings.get("model_name") or ""),
+            backend_base_url=str(raw_request.base_url).rstrip("/"),
+        )
+    except KnowledgeServiceError as error:
+        return _knowledge_error_response("knowledge_pages_generate", error)
+    return JSONResponse(
+        content={"type": "knowledge_pages_generate", "data": payload},
+        status_code=200,
+    )
+
+
+@app.post("/knowledge/pages/{page_id}/generate")
+async def knowledge_page_generate(page_id: str, raw_request: Request) -> JSONResponse:
+    await _read_json_request(raw_request)
+    try:
+        cluster_settings = settings_store.get_cluster_settings()
+        advanced = dict(cluster_settings.get("advanced") or {})
+        payload = await knowledge_client.regenerate_page(
+            page_id,
+            advanced=advanced,
+            cluster_model_name=str(cluster_settings.get("model_name") or ""),
+            backend_base_url=str(raw_request.base_url).rstrip("/"),
+        )
+    except KnowledgeServiceError as error:
+        return _knowledge_error_response("knowledge_page_generate", error)
+    return JSONResponse(
+        content={"type": "knowledge_page_generate", "data": payload},
+        status_code=200,
+    )
+
+
 @app.get("/knowledge/jobs")
 async def knowledge_jobs(limit: int = 20) -> JSONResponse:
     try:
