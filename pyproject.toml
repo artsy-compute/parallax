@@ -27,7 +27,7 @@ dependencies = [
   "psutil>=5.9.5",
   "httpx[socks]>=0.26.0",
   "aiohttp",
-  "uvicorn",
+  "uvicorn[standard]",
   "uvloop",
   "fastapi",
   "pydantic",
@@ -35,6 +35,7 @@ dependencies = [
   "dijkstar==2.6.0",
   "lattica==1.0.21",
   "orjson",
+  "zstandard>=0.23.0",
 ]
 
 [project.scripts]
