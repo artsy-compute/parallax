@@ -1,6 +1,7 @@
 import asyncio
 from copy import deepcopy
 import json
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -18,6 +19,7 @@ from parallax_utils.logging_config import get_logger
 from parallax_utils.request_metrics import get_request_metrics
 
 logger = get_logger(__name__)
+INLINE_TOOL_CALL_PATTERN = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=20 * 60 * 60)
 
@@ -34,6 +36,7 @@ class ActiveRequestRecord:
     emitted_text: str = ""
     emitted_any_bytes: bool = False
     first_output_recorded: bool = False
+    cancel_handle: Any = None
     status: str = "pending"
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -177,6 +180,63 @@ class RequestHandler:
         record.status = 'completed'
         record.updated_at = time.time()
         self.active_requests.pop(str(request_id), None)
+
+    def _set_request_cancel_handle(self, request_id: str, cancel_handle: Any) -> None:
+        record = self.active_requests.get(str(request_id))
+        if record is None:
+            return
+        record.cancel_handle = cancel_handle
+        record.updated_at = time.time()
+
+    def cancel_run(self, run_id: str) -> Optional[dict[str, Any]]:
+        normalized_run_id = str(run_id or '').strip()
+        if not normalized_run_id:
+            return None
+        cancelled_live = False
+        for record in list(self.active_requests.values()):
+            if str(record.run_id or '').strip() != normalized_run_id:
+                continue
+            handle = record.cancel_handle
+            if handle is not None and hasattr(handle, 'cancel'):
+                try:
+                    handle.cancel()
+                    cancelled_live = True
+                except Exception:
+                    logger.warning('Failed to cancel active request for run %s', normalized_run_id, exc_info=True)
+        detail = self.run_store.cancel_run(
+            normalized_run_id,
+            summary=(
+                'Run was cancelled by an operator.'
+                + (' Active execution was interrupted.' if cancelled_live else ' No active execution handle was available to interrupt.')
+            ),
+        )
+        if detail is None:
+            return None
+        self.run_store.append_event(
+            normalized_run_id,
+            kind='run.cancelled',
+            status='completed',
+            title='Run cancelled',
+            detail='Operator cancelled the run.'
+            + (' Active execution handle was interrupted.' if cancelled_live else ' Cancellation affected persisted state only.'),
+        )
+        return self.run_store.get_run(normalized_run_id)
+
+    def resume_run(self, run_id: str) -> Optional[dict[str, Any]]:
+        normalized_run_id = str(run_id or '').strip()
+        if not normalized_run_id:
+            return None
+        detail = self.run_store.resume_run(normalized_run_id)
+        if detail is None:
+            return None
+        self.run_store.append_event(
+            normalized_run_id,
+            kind='run.resumed',
+            status='completed',
+            title='Run marked ready to resume',
+            detail='Operator marked the run ready for manual retry or replay.',
+        )
+        return self.run_store.get_run(normalized_run_id)
 
     def _schedule_summary_refresh(self, conversation_id: Optional[str], model_name: Optional[str]) -> None:
         if not conversation_id or not self.chat_memory.model_summary_enabled:
@@ -370,7 +430,10 @@ class RequestHandler:
             return ''
         message = choices[0].get('message') or {}
         result = message.get('content')
-        return result if isinstance(result, str) else ''
+        if not isinstance(result, str):
+            return ''
+        cleaned_content, _ = self._extract_inline_tool_calls_from_text(result)
+        return cleaned_content
 
     def _parse_completion_payload(self, content: str) -> Dict[str, Any]:
         try:
@@ -378,6 +441,44 @@ class RequestHandler:
         except Exception:
             return {}
         return payload if isinstance(payload, dict) else {}
+
+    def _extract_inline_tool_calls_from_text(self, text: str) -> tuple[str, list[Dict[str, Any]]]:
+        content = str(text or '')
+        if not content:
+            return '', []
+
+        tool_calls: list[Dict[str, Any]] = []
+
+        def _replace(match: re.Match[str]) -> str:
+            raw_payload = str(match.group(1) or '').strip()
+            if not raw_payload:
+                return ''
+            try:
+                payload = json.loads(raw_payload)
+            except Exception:
+                return match.group(0)
+            if not isinstance(payload, dict):
+                return match.group(0)
+
+            name = str(payload.get('name') or '').strip()
+            arguments = payload.get('arguments')
+            if not name or not isinstance(arguments, dict):
+                return match.group(0)
+
+            tool_calls.append(
+                {
+                    'id': self._new_output_item_id('call'),
+                    'type': 'function',
+                    'function': {
+                        'name': name,
+                        'arguments': json.dumps(arguments, ensure_ascii=False),
+                    },
+                }
+            )
+            return ''
+
+        cleaned = INLINE_TOOL_CALL_PATTERN.sub(_replace, content).strip()
+        return cleaned, tool_calls
 
     @staticmethod
     def _deepcopy_jsonable(value: Any) -> Any:
@@ -832,15 +933,23 @@ class RequestHandler:
         payload = self._parse_completion_payload(content)
         message = self._extract_completion_message(payload)
         tool_calls = message.get("tool_calls") or []
-        return [tool_call for tool_call in tool_calls if isinstance(tool_call, dict)]
+        normalized_tool_calls = [tool_call for tool_call in tool_calls if isinstance(tool_call, dict)]
+        inline_tool_calls: list[Dict[str, Any]] = []
+        content_text = message.get("content")
+        if isinstance(content_text, str) and content_text:
+            _, inline_tool_calls = self._extract_inline_tool_calls_from_text(content_text)
+        return [*normalized_tool_calls, *inline_tool_calls]
 
-    @staticmethod
-    def _build_assistant_tool_message(payload: Dict[str, Any]) -> Dict[str, Any]:
-        message = RequestHandler._extract_completion_message(payload)
+    def _build_assistant_tool_message(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        message = self._extract_completion_message(payload)
+        content = message.get("content") or ""
+        inline_tool_calls: list[Dict[str, Any]] = []
+        if isinstance(content, str) and content:
+            content, inline_tool_calls = self._extract_inline_tool_calls_from_text(content)
         return {
             "role": "assistant",
-            "content": message.get("content") or "",
-            "tool_calls": message.get("tool_calls") or [],
+            "content": content,
+            "tool_calls": [*(message.get("tool_calls") or []), *inline_tool_calls],
         }
 
     def _build_sse_response_from_payload(
@@ -960,6 +1069,7 @@ class RequestHandler:
                             current_routing_table = request_data["routing_table"]
                             current_stub = self.get_stub(current_routing_table[0])
                             response = current_stub.chat_completion(request_data)
+                            self._set_request_cancel_handle(str(request_id), response)
                             try:
                                 iterator = iterate_in_threadpool(response)
                                 async for chunk in iterator:
@@ -1039,6 +1149,7 @@ class RequestHandler:
                                 yield f"data: {json.dumps(error_chunk, separators=(',', ':'))}\n\n".encode('utf-8')
                                 return
                             finally:
+                                self._set_request_cancel_handle(str(request_id), None)
                                 if last_chunk is not None:
                                     tps, ttft, input_tokens, output_tokens = get_request_metrics(
                                         last_chunk, start_time, first_token_time, last_token_time
@@ -1067,6 +1178,7 @@ class RequestHandler:
                     return resp
                 else:
                     response = stub.chat_completion(request_data)
+                    self._set_request_cancel_handle(str(request_id), response)
                     content = (await anext(iterate_in_threadpool(response))).decode()
                     assistant_text = self._extract_nonstream_content(content)
                     if assistant_text and save_assistant:

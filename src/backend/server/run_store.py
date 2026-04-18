@@ -66,6 +66,21 @@ class RunStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_run_events_run_position
                     ON run_events(run_id, position ASC, timestamp ASC);
+                CREATE TABLE IF NOT EXISTS run_approvals (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    detail TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    requested_by TEXT NOT NULL DEFAULT 'system',
+                    requested_at REAL NOT NULL,
+                    resolved_at REAL,
+                    decided_by TEXT NOT NULL DEFAULT '',
+                    decision_note TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_run_approvals_run_requested_at
+                    ON run_approvals(run_id, requested_at DESC);
                 """
             )
             conn.commit()
@@ -88,6 +103,7 @@ class RunStore:
         duration_ms = int(row['duration_ms'] or max(0, int((updated_at - started_at) * 1000)))
         return {
             'id': row['id'],
+            'request_id': row['request_id'] or '',
             'title': row['title'] or 'Untitled run',
             'agent_name': row['agent_name'] or 'Workspace Agent',
             'status': row['status'] or 'queued',
@@ -135,6 +151,38 @@ class RunStore:
             }
             for row in rows
         ]
+
+    def _load_approvals(self, conn: sqlite3.Connection, run_id: str) -> list[dict[str, Any]]:
+        rows = conn.execute(
+            """
+            SELECT id, title, detail, status, requested_by, requested_at, resolved_at, decided_by, decision_note
+            FROM run_approvals
+            WHERE run_id=?
+            ORDER BY requested_at DESC
+            """,
+            (str(run_id or '').strip(),),
+        ).fetchall()
+        return [
+            {
+                'id': row['id'],
+                'title': row['title'],
+                'detail': row['detail'] or '',
+                'status': row['status'] or 'pending',
+                'requested_by': row['requested_by'] or 'system',
+                'requested_at': float(row['requested_at'] or 0),
+                'resolved_at': float(row['resolved_at']) if row['resolved_at'] is not None else None,
+                'decided_by': row['decided_by'] or '',
+                'decision_note': row['decision_note'] or '',
+            }
+            for row in rows
+        ]
+
+    def _pending_approval_count(self, conn: sqlite3.Connection, run_id: str) -> int:
+        row = conn.execute(
+            "SELECT COUNT(*) AS count FROM run_approvals WHERE run_id=? AND status='pending'",
+            (str(run_id or '').strip(),),
+        ).fetchone()
+        return int(row['count'] or 0) if row is not None else 0
 
     def create_run(
         self,
@@ -186,7 +234,9 @@ class RunStore:
             )
             conn.commit()
             row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
-            return self._row_to_detail(row, [])
+            detail = self._row_to_detail(row, [])
+            detail['approvals'] = []
+            return detail
 
     def append_event(
         self,
@@ -276,7 +326,9 @@ class RunStore:
             )
             conn.commit()
             updated = conn.execute("SELECT * FROM runs WHERE id=?", (normalized_run_id,)).fetchone()
-            return self._row_to_detail(updated, self._load_events(conn, normalized_run_id))
+            detail = self._row_to_detail(updated, self._load_events(conn, normalized_run_id))
+            detail['approvals'] = self._load_approvals(conn, normalized_run_id)
+            return detail
 
     def increment_tool_count(self, run_id: str, delta: int = 1) -> Optional[dict[str, Any]]:
         normalized_run_id = str(run_id or '').strip()
@@ -289,6 +341,166 @@ class RunStore:
             next_tool_count = max(0, int(row['tool_count'] or 0) + int(delta or 0))
         return self.update_run(normalized_run_id, tool_count=next_tool_count)
 
+    def list_approvals(self, run_id: str) -> list[dict[str, Any]]:
+        normalized_run_id = str(run_id or '').strip()
+        if not normalized_run_id:
+            return []
+        with self._lock, self._connect() as conn:
+            return self._load_approvals(conn, normalized_run_id)
+
+    def create_approval(
+        self,
+        run_id: str,
+        *,
+        title: str,
+        detail: str,
+        requested_by: str = 'local-user',
+    ) -> Optional[dict[str, Any]]:
+        normalized_run_id = str(run_id or '').strip()
+        if not normalized_run_id:
+            return None
+        now = self._now()
+        with self._lock, self._connect() as conn:
+            row = conn.execute("SELECT * FROM runs WHERE id=?", (normalized_run_id,)).fetchone()
+            if row is None:
+                return None
+            approval_id = f"appr_{uuid.uuid4().hex[:12]}"
+            conn.execute(
+                """
+                INSERT INTO run_approvals (
+                    id, run_id, title, detail, status, requested_by, requested_at, resolved_at, decided_by, decision_note
+                )
+                VALUES (?, ?, ?, ?, 'pending', ?, ?, NULL, '', '')
+                """,
+                (
+                    approval_id,
+                    normalized_run_id,
+                    str(title or '').strip() or 'Approval required',
+                    str(detail or '').strip(),
+                    str(requested_by or '').strip() or 'local-user',
+                    now,
+                ),
+            )
+            pending_count = self._pending_approval_count(conn, normalized_run_id)
+            started_at = float(row['started_at'] or now)
+            conn.execute(
+                """
+                UPDATE runs SET
+                    status='waiting_for_approval',
+                    current_step=?,
+                    approval_count=?,
+                    updated_at=?,
+                    duration_ms=?
+                WHERE id=?
+                """,
+                (
+                    str(title or '').strip() or 'Approval required',
+                    pending_count,
+                    now,
+                    max(0, int((now - started_at) * 1000)),
+                    normalized_run_id,
+                ),
+            )
+            conn.commit()
+            updated = conn.execute("SELECT * FROM runs WHERE id=?", (normalized_run_id,)).fetchone()
+            detail_payload = self._row_to_detail(updated, self._load_events(conn, normalized_run_id))
+            detail_payload['approvals'] = self._load_approvals(conn, normalized_run_id)
+            return detail_payload
+
+    def resolve_approval(
+        self,
+        approval_id: str,
+        *,
+        decision: str,
+        decided_by: str = 'local-user',
+        decision_note: str = '',
+    ) -> Optional[dict[str, Any]]:
+        normalized_approval_id = str(approval_id or '').strip()
+        normalized_decision = str(decision or '').strip().lower()
+        if normalized_approval_id == '' or normalized_decision not in {'approved', 'rejected'}:
+            return None
+        now = self._now()
+        with self._lock, self._connect() as conn:
+            approval_row = conn.execute(
+                "SELECT id, run_id, status FROM run_approvals WHERE id=?",
+                (normalized_approval_id,),
+            ).fetchone()
+            if approval_row is None:
+                return None
+            conn.execute(
+                """
+                UPDATE run_approvals SET
+                    status=?,
+                    resolved_at=?,
+                    decided_by=?,
+                    decision_note=?
+                WHERE id=?
+                """,
+                (
+                    normalized_decision,
+                    now,
+                    str(decided_by or '').strip() or 'local-user',
+                    str(decision_note or '').strip(),
+                    normalized_approval_id,
+                ),
+            )
+            run_id = str(approval_row['run_id'] or '').strip()
+            run_row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+            if run_row is None:
+                conn.commit()
+                return None
+            pending_count = self._pending_approval_count(conn, run_id)
+            started_at = float(run_row['started_at'] or now)
+            next_status = run_row['status']
+            next_step = run_row['current_step']
+            if pending_count == 0:
+                if normalized_decision == 'approved':
+                    next_status = 'paused'
+                    next_step = 'Approval granted; ready to resume'
+                else:
+                    next_status = 'cancelled'
+                    next_step = 'Approval rejected'
+            conn.execute(
+                """
+                UPDATE runs SET
+                    status=?,
+                    current_step=?,
+                    approval_count=?,
+                    updated_at=?,
+                    duration_ms=?
+                WHERE id=?
+                """,
+                (
+                    next_status,
+                    next_step,
+                    pending_count,
+                    now,
+                    max(0, int((now - started_at) * 1000)),
+                    run_id,
+                ),
+            )
+            conn.commit()
+            updated = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+            detail_payload = self._row_to_detail(updated, self._load_events(conn, run_id))
+            detail_payload['approvals'] = self._load_approvals(conn, run_id)
+            return detail_payload
+
+    def cancel_run(self, run_id: str, *, summary: str = '') -> Optional[dict[str, Any]]:
+        return self.update_run(
+            run_id,
+            status='cancelled',
+            current_step='Cancelled',
+            summary=summary or 'Run was cancelled by an operator.',
+        )
+
+    def resume_run(self, run_id: str, *, summary: str = '') -> Optional[dict[str, Any]]:
+        return self.update_run(
+            run_id,
+            status='queued',
+            current_step='Queued for manual retry or resume',
+            summary=summary or 'Run was marked ready for resume by an operator.',
+        )
+
     def get_run(self, run_id: str) -> Optional[dict[str, Any]]:
         normalized_run_id = str(run_id or '').strip()
         if not normalized_run_id:
@@ -297,7 +509,9 @@ class RunStore:
             row = conn.execute("SELECT * FROM runs WHERE id=?", (normalized_run_id,)).fetchone()
             if row is None:
                 return None
-            return self._row_to_detail(row, self._load_events(conn, normalized_run_id))
+            detail = self._row_to_detail(row, self._load_events(conn, normalized_run_id))
+            detail['approvals'] = self._load_approvals(conn, normalized_run_id)
+            return detail
 
     def get_latest_run_for_conversation(self, conversation_id: str) -> Optional[dict[str, Any]]:
         normalized_conversation_id = str(conversation_id or '').strip()
@@ -315,7 +529,26 @@ class RunStore:
             ).fetchone()
             if row is None:
                 return None
-            return self._row_to_detail(row, self._load_events(conn, row['id']))
+            detail = self._row_to_detail(row, self._load_events(conn, row['id']))
+            detail['approvals'] = self._load_approvals(conn, row['id'])
+            return detail
+
+    def list_runs_for_conversation(self, conversation_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        normalized_conversation_id = str(conversation_id or '').strip()
+        if not normalized_conversation_id:
+            return []
+        limit = max(1, min(int(limit or 100), 500))
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM runs
+                WHERE conversation_id=?
+                ORDER BY updated_at DESC, started_at DESC
+                LIMIT ?
+                """,
+                (normalized_conversation_id, limit),
+            ).fetchall()
+            return [self._row_to_summary(row) for row in rows]
 
     def list_runs(self, limit: int = 100, offset: int = 0) -> dict[str, Any]:
         limit = max(1, min(int(limit or 100), 500))

@@ -13,7 +13,18 @@ import {
 } from '@mui/material';
 import { IconArrowLeft } from '@tabler/icons-react';
 import { DrawerLayout } from '../components/common';
-import { getAgentRunDetail, getAgentRunList, type AgentRunDetail, type AgentRunSummary } from '../services/api';
+import {
+  approveAgentRunApproval,
+  cancelAgentRun,
+  getAgentRunDetail,
+  getAgentRunList,
+  rejectAgentRunApproval,
+  requestAgentRunApproval,
+  resumeAgentRun,
+  type AgentRunApproval,
+  type AgentRunDetail,
+  type AgentRunSummary,
+} from '../services/api';
 
 const formatDateTime = (value: number) =>
   new Intl.DateTimeFormat(undefined, {
@@ -51,6 +62,9 @@ const getStatusColor = (status: string): 'warning' | 'success' | 'info' | 'error
       return 'default';
   }
 };
+
+const isActiveRunStatus = (status: string) =>
+  ['queued', 'running', 'paused', 'waiting_for_approval'].includes(String(status || '').trim());
 
 const OverviewCard = ({
   label,
@@ -97,7 +111,47 @@ export default function PageRuns() {
   const [selectedRun, setSelectedRun] = useState<AgentRunDetail | null>(null);
   const [listLoading, setListLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const loadRuns = async (keepCurrentSelection = false) => {
+    setListLoading(true);
+    try {
+      const data = await getAgentRunList();
+      setCounts(data.counts);
+      setRuns(data.items);
+      if (!keepCurrentSelection && !runId && data.items.length > 0) {
+        navigate(`/runs/${data.items[0].id}`, { replace: true });
+      }
+      setError(null);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    } finally {
+      setListLoading(false);
+    }
+  };
+
+  const loadRunDetail = async (nextRunId: string) => {
+    setDetailLoading(true);
+    try {
+      const data = await getAgentRunDetail(nextRunId);
+      setSelectedRun(data);
+      setError(null);
+      return data;
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+      return null;
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
+  const refreshAll = async (nextRunId: string | null) => {
+    await loadRuns(true);
+    if (nextRunId) {
+      await loadRunDetail(nextRunId);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -109,6 +163,7 @@ export default function PageRuns() {
         }
         setCounts(data.counts);
         setRuns(data.items);
+        setError(null);
       })
       .catch((nextError) => {
         if (cancelled) {
@@ -135,6 +190,7 @@ export default function PageRuns() {
 
   useEffect(() => {
     if (!runId) {
+      setSelectedRun(null);
       return;
     }
     let cancelled = false;
@@ -161,10 +217,63 @@ export default function PageRuns() {
     };
   }, [runId]);
 
+  useEffect(() => {
+    const selectedIsActive = selectedRun ? isActiveRunStatus(selectedRun.status) : false;
+    const anyRunActive = counts.active > 0;
+    if (!runId || (!selectedIsActive && !anyRunActive) || actionLoading) {
+      return;
+    }
+
+    const intervalId = globalThis.setInterval(() => {
+      void refreshAll(runId);
+    }, 2500);
+
+    return () => {
+      globalThis.clearInterval(intervalId);
+    };
+  }, [actionLoading, counts.active, refreshAll, runId, selectedRun]);
+
   const selectedSummary = useMemo(
     () => runs.find((item) => item.id === runId) ?? runs[0] ?? null,
     [runId, runs],
   );
+
+  const handleRunAction = async (action: () => Promise<AgentRunDetail | null>) => {
+    setActionLoading(true);
+    try {
+      const nextRun = await action();
+      if (nextRun) {
+        setSelectedRun(nextRun);
+        await loadRuns(true);
+      }
+      setError(null);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleRequestApproval = async () => {
+    if (!selectedRun) {
+      return;
+    }
+    await handleRunAction(() =>
+      requestAgentRunApproval(selectedRun.id, {
+        title: 'Review pending side effects',
+        detail: `Run ${selectedRun.id} requested operator confirmation before continuing.`,
+        requested_by: 'runs-console',
+      }),
+    );
+  };
+
+  const handleApprovalDecision = async (approval: AgentRunApproval, decision: 'approve' | 'reject') => {
+    await handleRunAction(() =>
+      decision === 'approve'
+        ? approveAgentRunApproval(approval.id, { decided_by: 'runs-console' })
+        : rejectAgentRunApproval(approval.id, { decided_by: 'runs-console' }),
+    );
+  };
 
   return (
     <DrawerLayout contentWidth='wide'>
@@ -177,7 +286,7 @@ export default function PageRuns() {
             <Stack sx={{ gap: 0.75 }}>
               <Typography variant='h1'>Runs</Typography>
               <Typography variant='body1' color='text.secondary' sx={{ maxWidth: '48rem' }}>
-                Mocked agent-runtime console for reviewing active work, approvals, artifacts, and policy boundaries in-place before the real execution layer is wired up.
+                Operational view over real persisted agent runs: inspect status, approvals, artifacts, and lifecycle events outside the chat transcript.
               </Typography>
             </Stack>
           </Stack>
@@ -192,9 +301,9 @@ export default function PageRuns() {
           >
             <Stack sx={{ gap: 0.75 }}>
               <Typography variant='caption' color='text.secondary'>
-                What this mockup proves
+                What this page tracks
               </Typography>
-              <Typography variant='body2'>Runs become the operational view above chat: status, approvals, artifacts, and audit events live here instead of disappearing into a conversation bubble.</Typography>
+              <Typography variant='body2'>Each chat-triggered run persists execution state, audit events, policy envelope, and approval checkpoints so operators can inspect and intervene without losing context.</Typography>
             </Stack>
           </Paper>
         </Stack>
@@ -212,7 +321,7 @@ export default function PageRuns() {
             gap: 1.5,
           }}
         >
-          <OverviewCard label='Runs tracked' value={counts.total} hint='All mocked agent executions in this workspace' />
+          <OverviewCard label='Runs tracked' value={counts.total} hint='Persisted executions recorded for this workspace' />
           <OverviewCard label='Active now' value={counts.active} hint='Running, paused, or waiting on intervention' />
           <OverviewCard label='Needs approval' value={counts.waiting_for_approval} hint='Human decision required before side effects' />
           <OverviewCard label='Completed' value={counts.completed} hint='Finished runs with persisted artifacts and timeline' />
@@ -317,7 +426,7 @@ export default function PageRuns() {
               <Stack sx={{ py: 8, alignItems: 'center', gap: 1.5 }}>
                 <Typography variant='h3'>No run selected</Typography>
                 <Typography variant='body2' color='text.secondary'>
-                  Pick a run from the left to inspect the mock operational layout.
+                  Pick a run from the left to inspect its execution lifecycle.
                 </Typography>
               </Stack>
             ) : (
@@ -336,30 +445,70 @@ export default function PageRuns() {
                         {selectedRun.summary}
                       </Typography>
                     </Stack>
-                    <Paper
-                      variant='outlined'
-                      sx={{
-                        p: 1.5,
-                        borderRadius: 3,
-                        minWidth: '15rem',
-                        bgcolor: 'background.default',
-                      }}
-                    >
-                      <Stack sx={{ gap: 0.4 }}>
-                        <Typography variant='caption' color='text.secondary'>
-                          Current step
-                        </Typography>
-                        <Typography variant='body1' sx={{ fontWeight: 700 }}>
-                          {selectedRun.current_step}
-                        </Typography>
-                        <Typography variant='body2' color='text.secondary'>
-                          Requested by {selectedRun.requested_by}
-                        </Typography>
-                        <Typography variant='body2' color='text.secondary'>
-                          Running for {formatDuration(selectedRun.duration_ms)}
-                        </Typography>
+                    <Stack sx={{ gap: 1.25, minWidth: '15rem' }}>
+                      <Paper
+                        variant='outlined'
+                        sx={{
+                          p: 1.5,
+                          borderRadius: 3,
+                          bgcolor: 'background.default',
+                        }}
+                      >
+                        <Stack sx={{ gap: 0.4 }}>
+                          <Typography variant='caption' color='text.secondary'>
+                            Current step
+                          </Typography>
+                          <Typography variant='body1' sx={{ fontWeight: 700 }}>
+                            {selectedRun.current_step}
+                          </Typography>
+                          <Typography variant='body2' color='text.secondary'>
+                            Requested by {selectedRun.requested_by}
+                          </Typography>
+                          <Typography variant='body2' color='text.secondary'>
+                            Running for {formatDuration(selectedRun.duration_ms)}
+                          </Typography>
+                        </Stack>
+                      </Paper>
+                      <Stack direction='row' sx={{ gap: 1, flexWrap: 'wrap' }}>
+                        <Button
+                          variant='contained'
+                          color='warning'
+                          disabled={actionLoading || selectedRun.status === 'cancelled' || selectedRun.status === 'completed'}
+                          onClick={() => {
+                            void handleRunAction(() => cancelAgentRun(selectedRun.id));
+                          }}
+                        >
+                          Cancel run
+                        </Button>
+                        <Button
+                          variant='outlined'
+                          disabled={actionLoading || selectedRun.status === 'running'}
+                          onClick={() => {
+                            void handleRunAction(() => resumeAgentRun(selectedRun.id));
+                          }}
+                        >
+                          Resume
+                        </Button>
+                        <Button
+                          variant='outlined'
+                          disabled={actionLoading}
+                          onClick={() => {
+                            void handleRequestApproval();
+                          }}
+                        >
+                          Request approval
+                        </Button>
+                        <Button
+                          variant='text'
+                          disabled={actionLoading || detailLoading}
+                          onClick={() => {
+                            void refreshAll(selectedRun.id);
+                          }}
+                        >
+                          Refresh
+                        </Button>
                       </Stack>
-                    </Paper>
+                    </Stack>
                   </Stack>
 
                   <Box
@@ -432,30 +581,118 @@ export default function PageRuns() {
                   <Stack sx={{ gap: 2 }}>
                     <Paper variant='outlined' sx={{ p: 2, borderRadius: 3, bgcolor: 'background.default' }}>
                       <Stack sx={{ gap: 1.5 }}>
+                        <Typography variant='h3'>Approvals</Typography>
+                        {selectedRun.approvals.length === 0 ? (
+                          <Typography variant='body2' color='text.secondary'>
+                            No approval checkpoints have been recorded for this run.
+                          </Typography>
+                        ) : (
+                          selectedRun.approvals.map((approval) => (
+                            <Stack
+                              key={approval.id}
+                              sx={{
+                                gap: 0.75,
+                                p: 1.25,
+                                borderRadius: 2,
+                                bgcolor: 'background.paper',
+                                border: '1px solid',
+                                borderColor: 'divider',
+                              }}
+                            >
+                              <Stack direction='row' sx={{ gap: 1, justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                                <Typography variant='body1' sx={{ fontWeight: 700 }}>
+                                  {approval.title}
+                                </Typography>
+                                <Chip
+                                  size='small'
+                                  color={
+                                    approval.status === 'pending'
+                                      ? 'warning'
+                                      : approval.status === 'approved'
+                                        ? 'success'
+                                        : approval.status === 'rejected'
+                                          ? 'error'
+                                          : 'default'
+                                  }
+                                  label={approval.status}
+                                />
+                              </Stack>
+                              <Typography variant='body2' color='text.secondary'>
+                                {approval.detail}
+                              </Typography>
+                              <Typography variant='caption' color='text.secondary'>
+                                Requested by {approval.requested_by} on {formatDateTime(approval.requested_at)}
+                              </Typography>
+                              {approval.resolved_at && (
+                                <Typography variant='caption' color='text.secondary'>
+                                  {approval.status} by {approval.decided_by || 'unknown'} on {formatDateTime(approval.resolved_at)}
+                                  {approval.decision_note ? ` · ${approval.decision_note}` : ''}
+                                </Typography>
+                              )}
+                              {approval.status === 'pending' && (
+                                <Stack direction='row' sx={{ gap: 1, flexWrap: 'wrap' }}>
+                                  <Button
+                                    size='small'
+                                    variant='contained'
+                                    color='success'
+                                    disabled={actionLoading}
+                                    onClick={() => {
+                                      void handleApprovalDecision(approval, 'approve');
+                                    }}
+                                  >
+                                    Approve
+                                  </Button>
+                                  <Button
+                                    size='small'
+                                    variant='outlined'
+                                    color='error'
+                                    disabled={actionLoading}
+                                    onClick={() => {
+                                      void handleApprovalDecision(approval, 'reject');
+                                    }}
+                                  >
+                                    Reject
+                                  </Button>
+                                </Stack>
+                              )}
+                            </Stack>
+                          ))
+                        )}
+                      </Stack>
+                    </Paper>
+
+                    <Paper variant='outlined' sx={{ p: 2, borderRadius: 3, bgcolor: 'background.default' }}>
+                      <Stack sx={{ gap: 1.5 }}>
                         <Typography variant='h3'>Artifacts</Typography>
-                        {selectedRun.artifacts.map((artifact) => (
-                          <Stack
-                            key={artifact.label}
-                            sx={{
-                              gap: 0.4,
-                              p: 1.25,
-                              borderRadius: 2,
-                              bgcolor: 'background.paper',
-                              border: '1px solid',
-                              borderColor: 'divider',
-                            }}
-                          >
-                            <Typography variant='caption' color='text.secondary'>
-                              {artifact.kind}
-                            </Typography>
-                            <Typography variant='body1' sx={{ fontWeight: 700 }}>
-                              {artifact.label}
-                            </Typography>
-                            <Typography variant='body2' color='text.secondary'>
-                              {artifact.value}
-                            </Typography>
-                          </Stack>
-                        ))}
+                        {selectedRun.artifacts.length === 0 ? (
+                          <Typography variant='body2' color='text.secondary'>
+                            No artifacts recorded yet.
+                          </Typography>
+                        ) : (
+                          selectedRun.artifacts.map((artifact) => (
+                            <Stack
+                              key={artifact.label}
+                              sx={{
+                                gap: 0.4,
+                                p: 1.25,
+                                borderRadius: 2,
+                                bgcolor: 'background.paper',
+                                border: '1px solid',
+                                borderColor: 'divider',
+                              }}
+                            >
+                              <Typography variant='caption' color='text.secondary'>
+                                {artifact.kind}
+                              </Typography>
+                              <Typography variant='body1' sx={{ fontWeight: 700 }}>
+                                {artifact.label}
+                              </Typography>
+                              <Typography variant='body2' color='text.secondary'>
+                                {artifact.value}
+                              </Typography>
+                            </Stack>
+                          ))
+                        )}
                       </Stack>
                     </Paper>
 

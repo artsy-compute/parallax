@@ -2,7 +2,7 @@
 import type { Dispatch, SetStateAction, FC, PropsWithChildren } from 'react';
 import { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { useRefCallback } from '../hooks';
-import { createStreamClusterStatus, getAppSettings, getModelList, initScheduler, rebalanceCluster, updateAppSettings, type AppClusterProfile } from './api';
+import { createStreamClusterStatus, getAppSettings, getModelList, initScheduler, rebalanceCluster, updateAppSettings, type AppAvailableTool, type AppClusterProfile } from './api';
 import { useHost } from './host';
 
 import logoUrlOpenAI from '../assets/models/OpenAI-black-monoblossom.svg';
@@ -152,6 +152,7 @@ export interface ClusterConfig {
   readonly modelInfoList: readonly ModelInfo[];
   readonly activeClusterId: string;
   readonly clusterProfiles: readonly AppClusterProfile[];
+  readonly availableTools: readonly AppAvailableTool[];
 }
 
 export interface ClusterConfigSetters {
@@ -196,6 +197,7 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
   const [settingsHydrated, setSettingsHydrated] = useState(false);
   const [activeClusterId, setActiveClusterId] = useState('');
   const [clusterProfiles, setClusterProfiles] = useState<readonly AppClusterProfile[]>([]);
+  const [availableTools, setAvailableTools] = useState<readonly AppAvailableTool[]>([]);
 
   const reloadSettings = useRefCallback(async () => {
     if (hostType === 'node') {
@@ -209,6 +211,7 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
     setInitNodesNumber(Math.max(1, Number(clusterSettings.init_nodes_num || 1)));
     setModelName(String(clusterSettings.model_name || '').trim());
     setAdvancedSettings({ ...(clusterSettings.advanced || {}) });
+    setAvailableTools(payload.available_tools || []);
     setSettingsHydrated(true);
   });
 
@@ -302,6 +305,7 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
     setInitNodesNumber(Math.max(1, Number(clusterSettings.init_nodes_num || 1)));
     setModelName(String(clusterSettings.model_name || '').trim());
     setAdvancedSettings({ ...(clusterSettings.advanced || {}) });
+    setAvailableTools(payload.available_tools || []);
     setSettingsHydrated(true);
   });
 
@@ -320,6 +324,7 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
     setInitNodesNumber(Math.max(1, Number(clusterSettings.init_nodes_num || 1)));
     setModelName(String(clusterSettings.model_name || '').trim());
     setAdvancedSettings({ ...(clusterSettings.advanced || {}) });
+    setAvailableTools(payload.available_tools || []);
     setSettingsHydrated(true);
   });
 
@@ -546,13 +551,14 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
           modelInfoList,
           activeClusterId,
           clusterProfiles,
+          availableTools,
         },
         clusterInfo,
         nodeInfoList,
       },
       actions,
     ],
-    [networkType, initNodesNumber, modelName, modelInfoList, activeClusterId, clusterProfiles, clusterInfo, nodeInfoList, actions],
+    [networkType, initNodesNumber, modelName, modelInfoList, activeClusterId, clusterProfiles, availableTools, clusterInfo, nodeInfoList, actions],
   );
 
   return <Provider value={value}>{children}</Provider>;

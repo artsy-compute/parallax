@@ -1,13 +1,14 @@
 import { memo, useEffect, useRef, useState, type FC, type UIEventHandler } from 'react';
 import { useChat, type ChatMessage } from '../../services';
-import { Box, Button, IconButton, Paper, Stack, Tooltip, Typography } from '@mui/material';
-import { IconArrowDown, IconCopy, IconCopyCheck, IconRefresh } from '@tabler/icons-react';
+import { useCluster } from '../../services/cluster';
+import { Box, Button, IconButton, Stack, Tooltip, Typography } from '@mui/material';
+import { IconArrowDown, IconBolt, IconCopy, IconCopyCheck, IconRefresh, IconServer2, IconWorld, IconFolderSearch } from '@tabler/icons-react';
 import { useRefCallback } from '../../hooks';
 import ChatMarkdown from './chat-markdown';
 import { DotPulse } from './dot-pulse';
 
 export const ChatMessages: FC = () => {
-  const [{ status, messages }] = useChat();
+  const [{ status, messages, runsByMessageId }] = useChat();
 
   const refContainer = useRef<HTMLDivElement>(null);
   // const refBottom = useRef<HTMLDivElement>(null);
@@ -115,7 +116,7 @@ export const ChatMessages: FC = () => {
       }}
     >
       {messages.map((message, idx) => (
-        <ChatMessage key={message.id} message={message} isLast={idx === messages.length - 1} />
+        <ChatMessage key={message.id} message={message} run={runsByMessageId[message.id] || null} isLast={idx === messages.length - 1} />
       ))}
 
       {status === 'opened' && <DotPulse size='large' />}
@@ -139,10 +140,29 @@ export const ChatMessages: FC = () => {
   );
 };
 
-const ChatMessage: FC<{ message: ChatMessage; isLast?: boolean }> = memo(({ message, isLast }) => {
+const runStatusSeverity = (status: string): 'success' | 'warning' | 'error' | 'info' | 'default' => {
+  switch (status) {
+    case 'completed':
+      return 'success';
+    case 'waiting_for_approval':
+      return 'warning';
+    case 'failed':
+    case 'cancelled':
+      return 'error';
+    case 'queued':
+    case 'running':
+    case 'paused':
+      return 'info';
+    default:
+      return 'default';
+  }
+};
+
+const ChatMessage: FC<{ message: ChatMessage; run?: { id: string; status: string; current_step: string; title: string } | null; isLast?: boolean }> = memo(({ message, run, isLast }) => {
   const { role, status: messageStatus, thinking, content } = message;
 
-  const [, { generate }] = useChat();
+  const [{ messages }, { generate, runTask, focusInput }] = useChat();
+  const [{ config: { availableTools } }] = useCluster();
 
   const [copied, setCopied] = useState(false);
   useEffect(() => {
@@ -157,6 +177,26 @@ const ChatMessage: FC<{ message: ChatMessage; isLast?: boolean }> = memo(({ mess
 
   const onRegenerate = useRefCallback(() => {
     generate(message);
+  });
+
+  const onRunTask = useRefCallback(() => {
+    runTask(message, 'task');
+  });
+
+  const onFetchLiveData = useRefCallback(() => {
+    runTask(message, 'live_data');
+  });
+
+  const onInspectWorkspace = useRefCallback(() => {
+    runTask(message, 'workspace');
+  });
+
+  const onCheckCluster = useRefCallback(() => {
+    runTask(message, 'cluster');
+  });
+
+  const onAskFollowUp = useRefCallback(() => {
+    focusInput();
   });
 
   const justifyContent = role === 'user' ? 'flex-end' : 'flex-start';
@@ -184,6 +224,46 @@ const ChatMessage: FC<{ message: ChatMessage; isLast?: boolean }> = memo(({ mess
   const assistantDone = messageStatus === 'done';
   const showCopy = role === 'user' || (role === 'assistant' && assistantDone);
   const showRegenerate = role === 'assistant' && assistantDone;
+  const showActionSuggestions = role === 'assistant' && assistantDone && isLast;
+  const messageIndex = messages.findIndex((item) => item.id === message.id);
+  const precedingUserPrompt = messageIndex >= 0
+    ? [...messages.slice(0, messageIndex)].reverse().find((item) => item.role === 'user')?.content || ''
+    : '';
+  const availableToolNames = new Set(
+    availableTools
+      .filter((tool) => tool.enabled_by_default)
+      .map((tool) => String(tool.name || '').trim()),
+  );
+  const hasWebTools = availableToolNames.has('fetch_url') || availableToolNames.has('fetch_json');
+  const hasWorkspaceTools =
+    availableToolNames.has('read_file')
+    || availableToolNames.has('list_files')
+    || availableToolNames.has('search_files');
+  const hasClusterTools =
+    availableToolNames.has('get_cluster_status')
+    || availableToolNames.has('list_nodes')
+    || availableToolNames.has('list_models')
+    || availableToolNames.has('get_join_command')
+    || availableToolNames.has('get_nodes_overview')
+    || availableToolNames.has('get_model_details');
+  const suggestLiveData =
+    hasWebTools
+    && (
+      /\b(latest|today|current|recent|price|weather|news|live|update|updated|market|stock|score)\b/i.test(precedingUserPrompt)
+      || /\bhttps?:\/\/\S+/i.test(precedingUserPrompt)
+      || /\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/\S*)?\b/i.test(precedingUserPrompt)
+      || /\b(fetch|open|read|check|look up|visit)\b/i.test(precedingUserPrompt)
+    );
+  const suggestWorkspace =
+    hasWorkspaceTools
+    && (
+      /\b(file|files|folder|directory|repo|repository|workspace|project|codebase|source|read|search|find)\b/i.test(precedingUserPrompt)
+      || /(?:^|[\s"'`])(?:\.{0,2}\/|\/)[^\s"'`]+/.test(precedingUserPrompt)
+      || /\b\w+\.(?:ts|tsx|js|jsx|py|rs|md|json|toml|yaml|yml|txt|sh)\b/i.test(precedingUserPrompt)
+    );
+  const suggestCluster =
+    hasClusterTools
+    && /\b(cluster|node|nodes|scheduler|model|models|join command|topology|gpu|vram|status)\b/i.test(precedingUserPrompt);
 
   const userHoverRevealSx =
     role === 'user' ?
@@ -274,6 +354,107 @@ const ChatMessage: FC<{ message: ChatMessage; isLast?: boolean }> = memo(({ mess
                 </IconButton>
               </Tooltip>
             )}
+          </Stack>
+        )}
+
+        {showActionSuggestions && (
+          <Stack
+            sx={{
+              gap: 0.75,
+              mt: 0.5,
+              maxWidth: '48rem',
+              alignItems: 'flex-end',
+            }}
+          >
+            <Typography variant='body2' color='text.secondary' sx={{ fontStyle: 'italic', textAlign: 'right' }}>
+              Continue with:
+            </Typography>
+            <Stack direction='row' sx={{ gap: 0.75, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+              <Button
+                size='small'
+                variant='text'
+                startIcon={<IconBolt size={16} />}
+                onClick={onRunTask}
+                sx={{ minWidth: 0, px: 1, color: 'text.secondary' }}
+              >
+                Run as task
+              </Button>
+              {suggestLiveData && (
+                <Button
+                  size='small'
+                  variant='text'
+                  startIcon={<IconWorld size={16} />}
+                  onClick={onFetchLiveData}
+                  sx={{ minWidth: 0, px: 1, color: 'text.secondary' }}
+                >
+                  Use web tools
+                </Button>
+              )}
+              {suggestWorkspace && (
+                <Button
+                  size='small'
+                  variant='text'
+                  startIcon={<IconFolderSearch size={16} />}
+                  onClick={onInspectWorkspace}
+                  sx={{ minWidth: 0, px: 1, color: 'text.secondary' }}
+                >
+                  Inspect files
+                </Button>
+              )}
+              {suggestCluster && (
+                <Button
+                  size='small'
+                  variant='text'
+                  startIcon={<IconServer2 size={16} />}
+                  onClick={onCheckCluster}
+                  sx={{ minWidth: 0, px: 1, color: 'text.secondary' }}
+                >
+                  Check cluster
+                </Button>
+              )}
+              <Button
+                size='small'
+                variant='text'
+                onClick={onAskFollowUp}
+                sx={{ minWidth: 0, px: 1, color: 'text.secondary' }}
+              >
+                Ask follow-up
+              </Button>
+            </Stack>
+            <Typography variant='caption' color='text.disabled' sx={{ textAlign: 'right' }}>
+              Chat stays answer-first. These options only escalate when you choose them.
+            </Typography>
+          </Stack>
+        )}
+
+        {role === 'assistant' && run && (
+          <Stack
+            direction='row'
+            sx={{
+              justifyContent: 'flex-end',
+              alignItems: 'center',
+              gap: 0.75,
+              flexWrap: 'wrap',
+              mt: 0.25,
+            }}
+          >
+            <Chip
+              size='small'
+              color={runStatusSeverity(run.status)}
+              label={run.status.replaceAll('_', ' ')}
+            />
+            <Typography variant='caption' color='text.secondary'>
+              {run.current_step}
+            </Typography>
+            <Button
+              size='small'
+              variant='text'
+              component='a'
+              href={`#/runs/${run.id}`}
+              sx={{ minWidth: 0, px: 1, color: 'text.secondary' }}
+            >
+              Open run
+            </Button>
           </Stack>
         )}
       </Stack>

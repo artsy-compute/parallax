@@ -447,6 +447,20 @@ async def agent_run_detail_by_conversation(conversation_id: str):
     )
 
 
+@app.get("/agent/runs/by_conversation/{conversation_id}/all")
+async def agent_run_list_by_conversation(conversation_id: str):
+    items = request_handler.run_store.list_runs_for_conversation(conversation_id)
+    return JSONResponse(
+        content={
+            "type": "agent_run_list",
+            "data": {
+                "items": items,
+            },
+        },
+        status_code=200,
+    )
+
+
 @app.get("/agent/runs/{run_id}/events")
 async def agent_run_events(run_id: str):
     item = request_handler.run_store.get_run(run_id)
@@ -464,6 +478,167 @@ async def agent_run_events(run_id: str):
             "data": {
                 "items": item.get("events", []),
             },
+        },
+        status_code=200,
+    )
+
+
+@app.get("/agent/runs/{run_id}/approvals")
+async def agent_run_approvals(run_id: str):
+    item = request_handler.run_store.get_run(run_id)
+    if item is None:
+        return JSONResponse(
+            content={
+                "type": "agent_run_approvals",
+                "error": f"Run not found: {run_id}",
+            },
+            status_code=404,
+        )
+    return JSONResponse(
+        content={
+            "type": "agent_run_approvals",
+            "data": {
+                "items": item.get("approvals", []),
+            },
+        },
+        status_code=200,
+    )
+
+
+@app.post("/agent/runs/{run_id}/cancel")
+async def agent_run_cancel(run_id: str):
+    item = request_handler.cancel_run(run_id)
+    if item is None:
+        return JSONResponse(
+            content={
+                "type": "agent_run_detail",
+                "error": f"Run not found: {run_id}",
+            },
+            status_code=404,
+        )
+    return JSONResponse(
+        content={
+            "type": "agent_run_detail",
+            "data": item,
+        },
+        status_code=200,
+    )
+
+
+@app.post("/agent/runs/{run_id}/resume")
+async def agent_run_resume(run_id: str):
+    item = request_handler.resume_run(run_id)
+    if item is None:
+        return JSONResponse(
+            content={
+                "type": "agent_run_detail",
+                "error": f"Run not found: {run_id}",
+            },
+            status_code=404,
+        )
+    return JSONResponse(
+        content={
+            "type": "agent_run_detail",
+            "data": item,
+        },
+        status_code=200,
+    )
+
+
+@app.post("/agent/runs/{run_id}/approvals")
+async def agent_run_request_approval(run_id: str, raw_request: Request):
+    request_data = await _read_json_request(raw_request)
+    item = request_handler.run_store.create_approval(
+        run_id,
+        title=str(request_data.get("title") or "Approval required").strip(),
+        detail=str(request_data.get("detail") or "").strip(),
+        requested_by=str(request_data.get("requested_by") or "local-user").strip(),
+    )
+    if item is None:
+        return JSONResponse(
+            content={
+                "type": "agent_run_detail",
+                "error": f"Run not found: {run_id}",
+            },
+            status_code=404,
+        )
+    request_handler.run_store.append_event(
+        run_id,
+        kind='approval.requested',
+        status='pending',
+        title=str(request_data.get("title") or "Approval required").strip() or 'Approval required',
+        detail=str(request_data.get("detail") or "Operator requested approval for this run.").strip(),
+    )
+    return JSONResponse(
+        content={
+            "type": "agent_run_detail",
+            "data": request_handler.run_store.get_run(run_id),
+        },
+        status_code=200,
+    )
+
+
+@app.post("/agent/approvals/{approval_id}/approve")
+async def agent_approval_approve(approval_id: str, raw_request: Request):
+    request_data = await _read_json_request(raw_request)
+    item = request_handler.run_store.resolve_approval(
+        approval_id,
+        decision='approved',
+        decided_by=str(request_data.get("decided_by") or "local-user").strip(),
+        decision_note=str(request_data.get("decision_note") or "").strip(),
+    )
+    if item is None:
+        return JSONResponse(
+            content={
+                "type": "agent_run_detail",
+                "error": f"Approval not found: {approval_id}",
+            },
+            status_code=404,
+        )
+    request_handler.run_store.append_event(
+        item['id'],
+        kind='approval.approved',
+        status='completed',
+        title='Approval granted',
+        detail='An operator approved this run checkpoint.',
+    )
+    return JSONResponse(
+        content={
+            "type": "agent_run_detail",
+            "data": request_handler.run_store.get_run(item['id']),
+        },
+        status_code=200,
+    )
+
+
+@app.post("/agent/approvals/{approval_id}/reject")
+async def agent_approval_reject(approval_id: str, raw_request: Request):
+    request_data = await _read_json_request(raw_request)
+    item = request_handler.run_store.resolve_approval(
+        approval_id,
+        decision='rejected',
+        decided_by=str(request_data.get("decided_by") or "local-user").strip(),
+        decision_note=str(request_data.get("decision_note") or "").strip(),
+    )
+    if item is None:
+        return JSONResponse(
+            content={
+                "type": "agent_run_detail",
+                "error": f"Approval not found: {approval_id}",
+            },
+            status_code=404,
+        )
+    request_handler.run_store.append_event(
+        item['id'],
+        kind='approval.rejected',
+        status='completed',
+        title='Approval rejected',
+        detail='An operator rejected this run checkpoint.',
+    )
+    return JSONResponse(
+        content={
+            "type": "agent_run_detail",
+            "data": request_handler.run_store.get_run(item['id']),
         },
         status_code=200,
     )

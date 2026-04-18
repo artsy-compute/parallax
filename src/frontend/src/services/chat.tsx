@@ -12,8 +12,10 @@ import {
 } from 'react';
 import {
   API_BASE_URL,
+  type AppAvailableTool,
   deleteChatHistoryConversation,
   getAgentRunDetailByConversation,
+  getAgentRunsByConversation,
   getChatHistoryDetail,
   getChatHistoryList,
   type AgentRunSummary,
@@ -30,13 +32,160 @@ const debugLog = async (...args: any[]) => {
 };
 
 const STORAGE_KEY = 'parallax.chat.conversation_id';
-const FIRST_TOKEN_TIMEOUT_MS = 30000;
-const NO_PROGRESS_TIMEOUT_MS = 45000;
+const FIRST_TOKEN_TIMEOUT_MS = 120000;
+const NO_PROGRESS_TIMEOUT_MS = 90000;
 const ERROR_RECOVERY_ATTEMPTS = 5;
 const ERROR_RECOVERY_POLL_INTERVAL_MS = 1500;
+const ACTIVE_RUN_POLL_INTERVAL_MS = 2500;
 
 const createConversationId = () =>
   globalThis.crypto?.randomUUID?.() || `conv-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+const isActiveRunStatus = (status: string) =>
+  ['queued', 'running', 'paused', 'waiting_for_approval'].includes(String(status || '').trim());
+
+const enabledToolNameSet = (tools: readonly AppAvailableTool[]) =>
+  new Set(
+    tools
+      .filter((tool) => tool.enabled_by_default)
+      .map((tool) => String(tool.name || '').trim()),
+  );
+
+const detectAutoTaskMode = (prompt: string, tools: readonly AppAvailableTool[]): ChatTaskMode | null => {
+  const text = String(prompt || '').trim();
+  if (!text) {
+    return null;
+  }
+
+  const availableToolNames = enabledToolNameSet(tools);
+  const hasWebTools = availableToolNames.has('fetch_url') || availableToolNames.has('fetch_json');
+  const hasWorkspaceTools =
+    availableToolNames.has('read_file')
+    || availableToolNames.has('list_files')
+    || availableToolNames.has('search_files');
+  const hasClusterTools =
+    availableToolNames.has('get_cluster_status')
+    || availableToolNames.has('list_nodes')
+    || availableToolNames.has('list_models')
+    || availableToolNames.has('get_join_command')
+    || availableToolNames.has('get_nodes_overview')
+    || availableToolNames.has('get_model_details');
+
+  if (
+    hasWebTools
+    && (
+      /\bhttps?:\/\/\S+/i.test(text)
+      || /\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/\S*)?\b/i.test(text)
+      || /\b(latest|today|current|recent|price|weather|news|live|update|updated|market|stock|score)\b/i.test(text)
+    )
+  ) {
+    return 'live_data';
+  }
+
+  if (
+    hasWorkspaceTools
+    && (
+      /\b(file|files|folder|directory|repo|repository|workspace|project|codebase|source|read|search|find)\b/i.test(text)
+      || /(?:^|[\s"'`])(?:\.{0,2}\/|\/)[^\s"'`]+/.test(text)
+      || /\b\w+\.(?:ts|tsx|js|jsx|py|rs|md|json|toml|yaml|yml|txt|sh)\b/i.test(text)
+    )
+  ) {
+    return 'workspace';
+  }
+
+  if (
+    hasClusterTools
+    && /\b(cluster|node|nodes|scheduler|model|models|join command|topology|gpu|vram|status)\b/i.test(text)
+  ) {
+    return 'cluster';
+  }
+
+  return null;
+};
+
+const requestOptionsForMode = (mode: ChatTaskMode | null): RequestExecutionOptions => {
+  if (mode === 'live_data') {
+    return {
+      serverTools: {
+        enabled: true,
+        allow_web_fetch: true,
+        allow_file_read: false,
+      },
+      toolChoice: 'required',
+      extraMessages: [
+        {
+          id: `system-live-${Date.now()}`,
+          role: 'system',
+          content:
+            'Use the available web-fetch tools to gather current live information before answering. Do not answer from memory when current information is requested. If fetching fails, briefly explain the failure.',
+        },
+      ],
+    };
+  }
+
+  if (mode === 'workspace') {
+    return {
+      serverTools: {
+        enabled: true,
+        allow_web_fetch: false,
+        allow_file_read: true,
+      },
+      toolChoice: 'auto',
+      extraMessages: [
+        {
+          id: `system-workspace-${Date.now()}`,
+          role: 'system',
+          content:
+            'Use the available file and workspace tools to inspect the local project when that will produce a better answer. Prefer grounded workspace facts over generic guesses.',
+        },
+      ],
+    };
+  }
+
+  if (mode === 'cluster') {
+    return {
+      serverTools: {
+        enabled: true,
+        allow_web_fetch: false,
+        allow_file_read: false,
+      },
+      toolChoice: 'auto',
+      extraMessages: [
+        {
+          id: `system-cluster-${Date.now()}`,
+          role: 'system',
+          content:
+            'Use the available Parallax cluster tools to inspect live cluster, node, model, or join-command state before answering. Prefer observed system state over generic guidance.',
+        },
+      ],
+    };
+  }
+
+  if (mode === 'task') {
+    return {
+      serverTools: {
+        enabled: true,
+        allow_web_fetch: false,
+        allow_file_read: true,
+      },
+      toolChoice: 'auto',
+      extraMessages: [
+        {
+          id: `system-task-${Date.now()}`,
+          role: 'system',
+          content:
+            'You may use the available tools if they help complete the task. Prefer concrete results over generic disclaimers.',
+        },
+      ],
+    };
+  }
+
+  return {
+    serverTools: {
+      enabled: false,
+    },
+  };
+};
 
 export type ChatMessageRole = 'user' | 'assistant';
 
@@ -74,6 +223,7 @@ export interface ChatStates {
   readonly history: readonly ChatHistorySummary[];
   readonly historyLoading: boolean;
   readonly activeRun: AgentRunSummary | null;
+  readonly runsByMessageId: Readonly<Record<string, AgentRunSummary>>;
   readonly inputTruncationNotice: {
     readonly truncated: boolean;
     readonly originalPromptTokens: number;
@@ -102,9 +252,12 @@ export interface ChatStates {
   } | null;
 }
 
+export type ChatTaskMode = 'task' | 'live_data' | 'workspace' | 'cluster';
+
 export interface ChatActions {
   readonly setInput: Dispatch<SetStateAction<string>>;
   readonly generate: (message?: ChatMessage) => void;
+  readonly runTask: (message: ChatMessage, mode?: ChatTaskMode) => void;
   readonly stop: () => void;
   readonly clear: () => void;
   readonly refreshHistory: () => Promise<void>;
@@ -118,6 +271,7 @@ export interface ChatActions {
 export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
   const [
     {
+      config: { availableTools },
       clusterInfo: { status: clusterStatus, modelName },
     },
   ] = useCluster();
@@ -143,6 +297,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
   const [history, setHistory] = useState<readonly ChatHistorySummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [activeRun, setActiveRun] = useState<AgentRunSummary | null>(null);
+  const [runsByMessageId, setRunsByMessageId] = useState<Readonly<Record<string, AgentRunSummary>>>({});
   const [inputTruncationNotice, setInputTruncationNotice] = useState<ChatStates['inputTruncationNotice']>(null);
   const [requestHealthNotice, setRequestHealthNotice] = useState<ChatStates['requestHealthNotice']>(null);
   const [promptBudgetNotice, setPromptBudgetNotice] = useState<ChatStates['promptBudgetNotice']>(null);
@@ -153,6 +308,8 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
   const timedOutDuringGenerationRef = useConst<{ current: boolean }>(() => ({ current: false }));
   const streamEndedWithErrorRef = useConst<{ current: boolean }>(() => ({ current: false }));
   const firstTokenSeenRef = useConst<{ current: boolean }>(() => ({ current: false }));
+  const completedRunRecoveryRef = useConst<{ current: string | null }>(() => ({ current: null }));
+  const suppressNextCloseRef = useConst<{ current: boolean }>(() => ({ current: false }));
 
   const clearFirstTokenTimeout = useRefCallback(() => {
     if (firstTokenTimeoutRef.current) {
@@ -170,6 +327,33 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
 
   const syncActiveRun = useRefCallback((run: AgentRunSummary | null) => {
     setActiveRun(run);
+  });
+
+  const syncConversationRuns = useRefCallback((runs: readonly AgentRunSummary[]) => {
+    const nextMap: Record<string, AgentRunSummary> = {};
+    runs.forEach((run) => {
+      const requestId = String(run.request_id || '').trim();
+      if (requestId) {
+        nextMap[requestId] = run;
+      }
+    });
+    setRunsByMessageId(nextMap);
+  });
+
+  const refreshConversationRuns = useRefCallback(async (targetConversationId?: string) => {
+    const nextConversationId = str(targetConversationId || conversationId || '').trim();
+    if (!nextConversationId) {
+      setRunsByMessageId({});
+      return [];
+    }
+    try {
+      const runs = await getAgentRunsByConversation(nextConversationId);
+      syncConversationRuns(runs);
+      return runs;
+    } catch (error) {
+      setRunsByMessageId({});
+      return [];
+    }
   });
 
   const refreshActiveRun = useRefCallback(async (targetConversationId?: string, minimumUpdatedAt?: number) => {
@@ -241,6 +425,32 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     }
   });
 
+  const hydrateConversationFromDetail = useRefCallback((
+    detail: {
+      conversation_id: string;
+      messages: readonly {
+        id: string;
+        role: ChatMessageRole;
+        content: string;
+        created_at: number;
+      }[];
+    },
+    nextStatus: ChatStatus = 'closed',
+  ) => {
+    setConversationId(detail.conversation_id || conversationId);
+    setMessages(
+      detail.messages.map((message) => ({
+        id: message.id,
+        role: message.role,
+        status: 'done' as const,
+        content: message.content,
+        raw: message.content,
+        createdAt: message.created_at,
+      })),
+    );
+    setStatus(nextStatus);
+  });
+
   const loadConversation = useRefCallback(async (nextConversationId: string) => {
     if (!nextConversationId) {
       return;
@@ -248,27 +458,17 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     setHistoryLoading(true);
     try {
       const detail = await getChatHistoryDetail(nextConversationId);
-      setConversationId(detail.conversation_id || nextConversationId);
       setInputTruncationNotice(null);
       setRequestHealthNotice(null);
       setPromptBudgetNotice(null);
-      setMessages(
-        detail.messages.map((message) => ({
-          id: message.id,
-          role: message.role,
-          status: 'done' as const,
-          content: message.content,
-          raw: message.content,
-          createdAt: message.created_at,
-        })),
-      );
-      setStatus('closed');
+      hydrateConversationFromDetail(detail, 'closed');
       try {
         const run = await getAgentRunDetailByConversation(detail.conversation_id || nextConversationId);
         syncActiveRun(run);
       } catch {
         syncActiveRun(null);
       }
+      await refreshConversationRuns(detail.conversation_id || nextConversationId);
     } catch (error) {
       console.error('getChatHistoryDetail error', error);
     } finally {
@@ -293,22 +493,12 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
           && lastPersistedMessage?.role === 'assistant'
           && Boolean(lastPersistedMessage.content?.trim())
         ) {
-          setConversationId(detail.conversation_id || conversationId);
           setInputTruncationNotice(null);
           setRequestHealthNotice(null);
           setPromptBudgetNotice(null);
-          setMessages(
-            detail.messages.map((message) => ({
-              id: message.id,
-              role: message.role,
-              status: 'done' as const,
-              content: message.content,
-              raw: message.content,
-              createdAt: message.created_at,
-            })),
-          );
-          setStatus('closed');
+          hydrateConversationFromDetail(detail, 'closed');
           await refreshActiveRun(detail.conversation_id || conversationId);
+          await refreshConversationRuns(detail.conversation_id || conversationId);
           refreshHistory();
           return true;
         }
@@ -344,6 +534,24 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     loadConversation(conversationId);
   }, [history, conversationId]);
 
+  useEffect(() => {
+    const shouldPoll =
+      Boolean(conversationId)
+      && (status === 'opened' || status === 'generating' || Boolean(activeRun && isActiveRunStatus(activeRun.status)));
+    if (!shouldPoll) {
+      return;
+    }
+
+    const intervalId = globalThis.setInterval(() => {
+      void refreshActiveRun(conversationId);
+      void refreshConversationRuns(conversationId);
+    }, ACTIVE_RUN_POLL_INTERVAL_MS);
+
+    return () => {
+      globalThis.clearInterval(intervalId);
+    };
+  }, [activeRun, conversationId, refreshActiveRun, refreshConversationRuns, status]);
+
   const sse = useConst(() =>
     createSSE({
       onOpen: () => {
@@ -357,7 +565,10 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
         firstTokenTimeoutRef.current = setTimeout(() => {
           debugLog('SSE FIRST TOKEN TIMEOUT');
           timedOutBeforeFirstTokenRef.current = true;
-          sse.disconnect();
+          setRequestHealthNotice({
+            severity: 'warning',
+            message: 'Prompt processing is taking longer than expected. The request is still running and may produce output shortly.',
+          });
         }, FIRST_TOKEN_TIMEOUT_MS);
         setStatus('opened');
         void refreshActiveRun();
@@ -366,6 +577,10 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
         debugLog('SSE CLOSE');
         clearFirstTokenTimeout();
         clearNoProgressTimeout();
+        if (suppressNextCloseRef.current) {
+          suppressNextCloseRef.current = false;
+          return;
+        }
         const timedOutBeforeFirstToken = timedOutBeforeFirstTokenRef.current;
         const timedOutDuringGeneration = timedOutDuringGenerationRef.current;
         const streamEndedWithError = streamEndedWithErrorRef.current;
@@ -389,10 +604,12 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
           ];
         });
         if (timedOutBeforeFirstToken) {
-          setRequestHealthNotice({
-            severity: 'warning',
-            message: 'No output arrived in time. The request may be stuck during prompt processing. Try a shorter prompt or send the request again.',
-          });
+          setRequestHealthNotice((prev) =>
+            prev ?? {
+              severity: 'warning',
+              message: 'Prompt processing took longer than expected before the stream closed.',
+            },
+          );
         } else if (timedOutDuringGeneration) {
           setRequestHealthNotice({
             severity: 'warning',
@@ -521,6 +738,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
             timedOutBeforeFirstTokenRef.current = false;
             clearFirstTokenTimeout();
             armNoProgressTimeout();
+            setRequestHealthNotice(null);
             setStatus('generating');
             if (!firstTokenSeenRef.current) {
               firstTokenSeenRef.current = true;
@@ -589,6 +807,92 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     }),
   );
 
+  useEffect(() => {
+    const shouldPollHistory = Boolean(conversationId) && (status === 'opened' || status === 'generating');
+    if (!shouldPollHistory) {
+      return;
+    }
+
+    const intervalId = globalThis.setInterval(() => {
+      void (async () => {
+        try {
+          const detail = await getChatHistoryDetail(conversationId);
+          const lastPersistedMessage = detail.messages[detail.messages.length - 1];
+          const lastVisibleMessage = messages[messages.length - 1];
+          if (
+            lastPersistedMessage?.role === 'assistant'
+            && Boolean(lastPersistedMessage.content?.trim())
+            && (
+              !lastVisibleMessage
+              || lastVisibleMessage.role !== 'assistant'
+              || lastVisibleMessage.content !== lastPersistedMessage.content
+            )
+          ) {
+            clearFirstTokenTimeout();
+            clearNoProgressTimeout();
+            suppressNextCloseRef.current = true;
+            sse.disconnect();
+            hydrateConversationFromDetail(detail, 'closed');
+            await refreshActiveRun(detail.conversation_id || conversationId);
+            await refreshConversationRuns(detail.conversation_id || conversationId);
+            refreshHistory();
+          }
+        } catch (error) {
+          console.error('poll persisted conversation during active run error', error);
+        }
+      })();
+    }, ACTIVE_RUN_POLL_INTERVAL_MS);
+
+    return () => {
+      globalThis.clearInterval(intervalId);
+    };
+  }, [
+    clearFirstTokenTimeout,
+    clearNoProgressTimeout,
+    conversationId,
+    hydrateConversationFromDetail,
+    messages,
+    refreshActiveRun,
+    refreshConversationRuns,
+    refreshHistory,
+    sse,
+    status,
+  ]);
+
+  useEffect(() => {
+    if (!activeRun || !conversationId) {
+      return;
+    }
+    if (status !== 'opened' && status !== 'generating') {
+      return;
+    }
+    if (!['completed', 'failed', 'cancelled'].includes(String(activeRun.status || '').trim())) {
+      return;
+    }
+    if (completedRunRecoveryRef.current === activeRun.id) {
+      return;
+    }
+    completedRunRecoveryRef.current = activeRun.id;
+
+    void (async () => {
+      try {
+        const detail = await getChatHistoryDetail(conversationId);
+        if (detail.messages.length > 0) {
+          clearFirstTokenTimeout();
+          clearNoProgressTimeout();
+          suppressNextCloseRef.current = true;
+          sse.disconnect();
+          hydrateConversationFromDetail(detail, activeRun.status === 'completed' ? 'closed' : 'error');
+          await refreshActiveRun(detail.conversation_id || conversationId);
+          await refreshConversationRuns(detail.conversation_id || conversationId);
+          refreshHistory();
+        }
+      } catch (error) {
+        console.error('recover completed run from history error', error);
+      }
+    })();
+  }, [activeRun, clearFirstTokenTimeout, clearNoProgressTimeout, conversationId, hydrateConversationFromDetail, refreshActiveRun, refreshConversationRuns, refreshHistory, sse, status]);
+
   const generate = useRefCallback<ChatActions['generate']>((message) => {
     if (clusterStatus !== 'available' || status === 'opened' || status === 'generating') {
       return;
@@ -631,10 +935,46 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     setMessages(nextMessages);
     refreshHistory();
     const requestStartedAt = Date.now() / 1000;
+    const autoMode = message ? null : detectAutoTaskMode(nextMessages[nextMessages.length - 1]?.content || '', availableTools);
     sse.connect(
       modelName,
       conversationId,
       nextMessages.map(({ id, role, content }) => ({ id, role, content })),
+      requestOptionsForMode(autoMode),
+    );
+    void waitForActiveRun(conversationId, requestStartedAt - 1);
+  });
+
+  const runTask = useRefCallback<ChatActions['runTask']>((message, mode = 'task') => {
+    if (clusterStatus !== 'available' || status === 'opened' || status === 'generating') {
+      return;
+    }
+
+    if (!modelName) {
+      return;
+    }
+
+    const finalMessageIndex = messages.findIndex((m) => m.id === message.id);
+    const finalMessage = messages[finalMessageIndex];
+    if (!finalMessage) {
+      return;
+    }
+
+    const nextMessages = messages.slice(
+      0,
+      finalMessageIndex + (finalMessage.role === 'user' ? 1 : 0),
+    );
+    setInputTruncationNotice(null);
+    setRequestHealthNotice(null);
+    setPromptBudgetNotice(null);
+    setMessages(nextMessages);
+    refreshHistory();
+    const requestStartedAt = Date.now() / 1000;
+    sse.connect(
+      modelName,
+      conversationId,
+      nextMessages.map(({ id, role, content }) => ({ id, role, content })),
+      requestOptionsForMode(mode),
     );
     void waitForActiveRun(conversationId, requestStartedAt - 1);
   });
@@ -662,6 +1002,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
       setRequestHealthNotice(null);
       setPromptBudgetNotice(null);
       syncActiveRun(null);
+      setRunsByMessageId({});
       setMessages([]);
       setStatus('closed');
       setConversationId(createConversationId());
@@ -675,6 +1016,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     setRequestHealthNotice(null);
     setPromptBudgetNotice(null);
     syncActiveRun(null);
+    setRunsByMessageId({});
     setMessages([]);
     setStatus('closed');
     setConversationId(createConversationId());
@@ -694,6 +1036,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     setRequestHealthNotice(null);
     setPromptBudgetNotice(null);
     syncActiveRun(null);
+    setRunsByMessageId({});
     setMessages([]);
     setConversationId(createConversationId());
     refreshHistory();
@@ -702,6 +1045,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
   const actions = useConst<ChatActions>({
     setInput,
     generate,
+    runTask,
     stop,
     clear,
     refreshHistory,
@@ -722,13 +1066,14 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
         history,
         historyLoading,
         activeRun,
+        runsByMessageId,
         inputTruncationNotice,
         requestHealthNotice,
         promptBudgetNotice,
       },
       actions,
     ],
-    [input, status, messages, conversationId, history, historyLoading, activeRun, inputTruncationNotice, requestHealthNotice, promptBudgetNotice, actions],
+    [input, status, messages, conversationId, history, historyLoading, activeRun, runsByMessageId, inputTruncationNotice, requestHealthNotice, promptBudgetNotice, actions],
   );
 
   return <context.Provider value={value}>{children}</context.Provider>;
@@ -757,8 +1102,18 @@ interface SSEOptions {
 
 interface RequestMessage {
   readonly id: string;
-  readonly role: ChatMessageRole;
+  readonly role: ChatMessageRole | 'system';
   readonly content: string;
+}
+
+interface RequestExecutionOptions {
+  readonly serverTools?: {
+    readonly enabled: boolean;
+    readonly allow_web_fetch?: boolean;
+    readonly allow_file_read?: boolean;
+  };
+  readonly toolChoice?: 'auto' | 'required';
+  readonly extraMessages?: readonly RequestMessage[];
 }
 
 const createSSE = (options: SSEOptions) => {
@@ -768,7 +1123,12 @@ const createSSE = (options: SSEOptions) => {
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   let abortController: AbortController | undefined;
 
-  const connect = (model: string, conversationId: string, messages: readonly RequestMessage[]) => {
+  const connect = (
+    model: string,
+    conversationId: string,
+    messages: readonly RequestMessage[],
+    requestOptions?: RequestExecutionOptions,
+  ) => {
     abortController = new AbortController();
     const url = `${API_BASE_URL}/v1/chat/completions`;
 
@@ -780,8 +1140,12 @@ const createSSE = (options: SSEOptions) => {
         stream: true,
         model,
         conversation_id: conversationId,
-        messages,
+        messages: [...(requestOptions?.extraMessages || []), ...messages],
         max_tokens: 2048,
+        server_tools: requestOptions?.serverTools ?? {
+          enabled: false,
+        },
+        tool_choice: requestOptions?.toolChoice,
         sampling_params: {
           top_k: 3,
         },

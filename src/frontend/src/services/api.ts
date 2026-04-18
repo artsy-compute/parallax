@@ -387,8 +387,21 @@ export interface AgentRunEvent {
   readonly detail: string;
 }
 
+export interface AgentRunApproval {
+  readonly id: string;
+  readonly title: string;
+  readonly detail: string;
+  readonly status: string;
+  readonly requested_by: string;
+  readonly requested_at: number;
+  readonly resolved_at: number | null;
+  readonly decided_by: string;
+  readonly decision_note: string;
+}
+
 export interface AgentRunSummary {
   readonly id: string;
+  readonly request_id: string;
   readonly title: string;
   readonly agent_name: string;
   readonly status: string;
@@ -410,6 +423,7 @@ export interface AgentRunDetail extends AgentRunSummary {
   readonly artifacts: readonly AgentRunArtifact[];
   readonly policy: AgentRunPolicy;
   readonly events: readonly AgentRunEvent[];
+  readonly approvals: readonly AgentRunApproval[];
 }
 
 export const getAgentRunList = async (): Promise<{
@@ -446,6 +460,100 @@ export const getAgentRunDetail = async (runId: string): Promise<AgentRunDetail> 
 
 export const getAgentRunDetailByConversation = async (conversationId: string): Promise<AgentRunDetail> => {
   const response = await fetch(`${API_BASE_URL}/agent/runs/by_conversation/${encodeURIComponent(conversationId)}`, { method: 'GET' });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'agent_run_detail') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const getAgentRunsByConversation = async (conversationId: string): Promise<readonly AgentRunSummary[]> => {
+  const response = await fetch(`${API_BASE_URL}/agent/runs/by_conversation/${encodeURIComponent(conversationId)}/all`, { method: 'GET' });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'agent_run_list') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return Array.isArray(message.data?.items) ? message.data.items : [];
+};
+
+export const cancelAgentRun = async (runId: string): Promise<AgentRunDetail> => {
+  const response = await fetch(`${API_BASE_URL}/agent/runs/${encodeURIComponent(runId)}/cancel`, {
+    method: 'POST',
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'agent_run_detail') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const resumeAgentRun = async (runId: string): Promise<AgentRunDetail> => {
+  const response = await fetch(`${API_BASE_URL}/agent/runs/${encodeURIComponent(runId)}/resume`, {
+    method: 'POST',
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'agent_run_detail') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const requestAgentRunApproval = async (
+  runId: string,
+  params: { title: string; detail: string; requested_by?: string },
+): Promise<AgentRunDetail> => {
+  const response = await fetch(`${API_BASE_URL}/agent/runs/${encodeURIComponent(runId)}/approvals`, {
+    method: 'POST',
+    body: JSON.stringify(params),
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'agent_run_detail') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const approveAgentRunApproval = async (
+  approvalId: string,
+  params: { decided_by?: string; decision_note?: string } = {},
+): Promise<AgentRunDetail> => {
+  const response = await fetch(`${API_BASE_URL}/agent/approvals/${encodeURIComponent(approvalId)}/approve`, {
+    method: 'POST',
+    body: JSON.stringify(params),
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'agent_run_detail') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const rejectAgentRunApproval = async (
+  approvalId: string,
+  params: { decided_by?: string; decision_note?: string } = {},
+): Promise<AgentRunDetail> => {
+  const response = await fetch(`${API_BASE_URL}/agent/approvals/${encodeURIComponent(approvalId)}/reject`, {
+    method: 'POST',
+    body: JSON.stringify(params),
+  });
   const message = await parseJsonResponse(response);
   if (message.type !== 'agent_run_detail') {
     throw new Error(`Invalid message type: ${message.type}.`);
