@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type SyntheticEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type SyntheticEvent } from 'react';
 import {
   Alert,
   Box,
@@ -24,6 +24,7 @@ import {
   IconEye,
   IconFilePlus,
   IconLink,
+  IconX,
   IconSourceCode,
   IconExternalLink,
   IconRefresh,
@@ -37,6 +38,7 @@ import { AlertDialog } from '../components/mui';
 import { useCluster } from '../services';
 import {
   createKnowledgeLocalSource,
+  createKnowledgeUploadedSource,
   createKnowledgeUrlSource,
   deleteKnowledgeSource,
   getAppSettings,
@@ -72,6 +74,10 @@ import {
 
 type KnowledgeSection = 'wiki' | 'overview' | 'ingest' | 'search' | 'sources' | 'jobs' | 'settings';
 type WikiViewMode = 'rendered' | 'source';
+type PendingUploadFile = {
+  id: string;
+  file: File;
+};
 
 const KNOWLEDGE_SECTIONS: readonly KnowledgeSection[] = [
   'wiki',
@@ -123,6 +129,21 @@ const normalizeSection = (search: string): KnowledgeSection => {
 };
 
 const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const KNOWLEDGE_UPLOAD_ACCEPT = '.txt,.md,.rst,.json,.toml,.yaml,.yml,.py,.ts,.tsx,.js,.jsx,.html,.xml,.pdf,.docx,.odt,.ods,.odp';
+
+const formatFileSize = (value: number) => {
+  if (!Number.isFinite(value) || value <= 0) {
+    return '0 B';
+  }
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let size = value;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index += 1;
+  }
+  return `${size >= 10 || index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}`;
+};
 
 const normalizeWikiMarkdown = (content: string, title?: string, summary?: string) => {
   let normalized = String(content || '').replace(/\r\n/g, '\n');
@@ -177,6 +198,9 @@ export default function PageKnowledge() {
   const [searching, setSearching] = useState(false);
   const [ingestingLocal, setIngestingLocal] = useState(false);
   const [ingestingUrl, setIngestingUrl] = useState(false);
+  const [uploadingDocuments, setUploadingDocuments] = useState(false);
+  const [pendingUploadFiles, setPendingUploadFiles] = useState<readonly PendingUploadFile[]>([]);
+  const [uploadDragActive, setUploadDragActive] = useState(false);
   const [documentLoading, setDocumentLoading] = useState(false);
   const [pageLoading, setPageLoading] = useState(false);
   const [generatingWiki, setGeneratingWiki] = useState(false);
@@ -192,6 +216,7 @@ export default function PageKnowledge() {
   );
   const [savingGenerationConfig, setSavingGenerationConfig] = useState(false);
   const [error, setError] = useState('');
+  const uploadInputRef = useRef<HTMLInputElement | null>(null);
 
   const loadPageData = useRefCallback(async () => {
     setRefreshing(true);
@@ -368,6 +393,67 @@ export default function PageKnowledge() {
     await onDeleteSource(pendingDeleteSource.id);
   });
 
+  const addPendingUploadFiles = useRefCallback((files: FileList | File[] | null) => {
+    const nextFiles = files ? Array.from(files) : [];
+    if (nextFiles.length <= 0) {
+      return;
+    }
+    setPendingUploadFiles((prev) => {
+      const seen = new Set(prev.map((item) => `${item.file.name}:${item.file.size}:${item.file.lastModified}`));
+      const appended = [...prev];
+      for (const file of nextFiles) {
+        const key = `${file.name}:${file.size}:${file.lastModified}`;
+        if (seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+        appended.push({
+          id: `${key}:${crypto.randomUUID()}`,
+          file,
+        });
+      }
+      return appended;
+    });
+  });
+
+  const onUploadDocuments = useRefCallback(async () => {
+    if (pendingUploadFiles.length <= 0) {
+      return;
+    }
+    const fileList = pendingUploadFiles.map((item) => item.file);
+    setUploadingDocuments(true);
+    try {
+      for (const file of fileList) {
+        await createKnowledgeUploadedSource(file);
+      }
+      setPendingUploadFiles([]);
+      await loadPageData();
+      setError('');
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    } finally {
+      setUploadingDocuments(false);
+      if (uploadInputRef.current) {
+        uploadInputRef.current.value = '';
+      }
+    }
+  });
+
+  const onChooseUploadFiles = useRefCallback((files: FileList | null) => {
+    const fileList = files ? Array.from(files) : [];
+    if (fileList.length <= 0) {
+      return;
+    }
+    addPendingUploadFiles(fileList);
+    if (uploadInputRef.current) {
+      uploadInputRef.current.value = '';
+    }
+  });
+
+  const removePendingUploadFile = useRefCallback((id: string) => {
+    setPendingUploadFiles((prev) => prev.filter((item) => item.id !== id));
+  });
+
   const onGenerateWiki = useRefCallback(async () => {
     setGeneratingWiki(true);
     try {
@@ -436,7 +522,7 @@ export default function PageKnowledge() {
 
   const summaryCards = useMemo(
     () => [
-      { label: 'Sources', value: health?.counts.sources ?? sources.length, hint: 'Tracked inputs across workspace paths and URLs' },
+      { label: 'Sources', value: health?.counts.sources ?? sources.length, hint: 'Tracked inputs across workspace paths, uploads, and URLs' },
       { label: 'Documents', value: health?.counts.documents ?? 0, hint: 'Normalized documents extracted into the KB' },
       { label: 'Chunks', value: health?.counts.chunks ?? 0, hint: 'Searchable retrieval units embedded for RAG' },
       { label: 'Jobs', value: health?.counts.jobs ?? jobs.length, hint: 'Recent ingest and indexing operations' },
@@ -451,7 +537,7 @@ export default function PageKnowledge() {
         <Stack sx={{ gap: 0.5 }}>
           <Typography variant='h3'>Ingest</Typography>
           <Typography variant='body2' color='text.secondary'>
-            Start with explicit local paths or URLs. Uploaded documents stay mocked for V1 until the core retrieval pipeline is stable.
+            Ingest explicit workspace paths, uploaded documents, or URLs. PDF, DOCX, and OpenDocument text formats are supported. OCR is not enabled yet.
           </Typography>
         </Stack>
         <Stack sx={{ gap: 1.25 }}>
@@ -499,21 +585,127 @@ export default function PageKnowledge() {
             p: 1.5,
             borderRadius: 2.5,
             borderStyle: 'dashed',
+            borderWidth: uploadDragActive ? 2 : 1,
+            borderColor: uploadDragActive ? 'primary.main' : 'divider',
             bgcolor: 'background.paper',
+            transition: 'border-color 120ms ease, background-color 120ms ease',
+            ...(uploadDragActive ? { bgcolor: 'action.hover' } : null),
+          }}
+          onDragEnter={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            setUploadDragActive(true);
+          }}
+          onDragOver={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (!uploadDragActive) {
+              setUploadDragActive(true);
+            }
+          }}
+          onDragLeave={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const relatedTarget = event.relatedTarget as Node | null;
+            if (relatedTarget && event.currentTarget.contains(relatedTarget)) {
+              return;
+            }
+            setUploadDragActive(false);
+          }}
+          onDrop={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            setUploadDragActive(false);
+            addPendingUploadFiles(event.dataTransfer.files);
           }}
         >
-          <Stack direction='row' sx={{ justifyContent: 'space-between', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
+          <input
+            ref={uploadInputRef}
+            type='file'
+            multiple
+            hidden
+            accept={KNOWLEDGE_UPLOAD_ACCEPT}
+            onChange={(event) => {
+              onChooseUploadFiles(event.target.files);
+            }}
+          />
+          <Stack sx={{ gap: 1.25 }}>
+            <Stack direction='row' sx={{ justifyContent: 'space-between', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
+              <Stack sx={{ gap: 0.4 }}>
+                <Typography variant='body1' sx={{ fontWeight: 700 }}>
+                  Uploaded docs
+                </Typography>
+                <Typography variant='body2' color='text.secondary'>
+                  Drag files here or choose them manually. Review the list before upload. PDF, DOCX, and OpenDocument files are supported. OCR is not enabled yet.
+                </Typography>
+              </Stack>
+              <Stack direction='row' sx={{ gap: 1, flexWrap: 'wrap' }}>
+                <Button
+                  variant='outlined'
+                  startIcon={<IconFilePlus size={16} />}
+                  disabled={uploadingDocuments}
+                  onClick={() => {
+                    uploadInputRef.current?.click();
+                  }}
+                >
+                  Add files
+                </Button>
+                <Button
+                  variant='contained'
+                  startIcon={<IconUpload size={16} />}
+                  disabled={uploadingDocuments || pendingUploadFiles.length === 0}
+                  onClick={() => {
+                    void onUploadDocuments();
+                  }}
+                >
+                  {uploadingDocuments ? 'Uploading...' : `Upload ${pendingUploadFiles.length || ''}`.trim()}
+                </Button>
+              </Stack>
+            </Stack>
             <Stack sx={{ gap: 0.4 }}>
-              <Typography variant='body1' sx={{ fontWeight: 700 }}>
-                Uploaded docs
+              <Typography variant='body2' sx={{ fontWeight: 600 }}>
+                Drop zone
               </Typography>
-              <Typography variant='body2' color='text.secondary'>
-                Mockup only for V1. Real upload parsing will land after the local-path and URL pipeline is stable.
+              <Typography variant='caption' color='text.secondary'>
+                Supported: TXT, Markdown, JSON, HTML/XML, PDF, DOCX, ODT, ODS, ODP
               </Typography>
             </Stack>
-            <Button variant='outlined' startIcon={<IconUpload size={16} />} disabled>
-              Coming soon
-            </Button>
+            {pendingUploadFiles.length > 0 ? (
+              <Stack sx={{ gap: 0.75 }}>
+                <Typography variant='body2' sx={{ fontWeight: 600 }}>
+                  Ready to upload
+                </Typography>
+                {pendingUploadFiles.map((item) => (
+                  <Paper key={item.id} variant='outlined' sx={{ p: 1, borderRadius: 2, bgcolor: 'background.default' }}>
+                    <Stack direction='row' sx={{ justifyContent: 'space-between', alignItems: 'center', gap: 1 }}>
+                      <Stack sx={{ minWidth: 0, gap: 0.2 }}>
+                        <Typography variant='body2' sx={{ fontWeight: 600 }} noWrap>
+                          {item.file.name}
+                        </Typography>
+                        <Typography variant='caption' color='text.secondary'>
+                          {formatFileSize(item.file.size)}
+                        </Typography>
+                      </Stack>
+                      <Tooltip title='Remove from upload list'>
+                        <span>
+                          <IconButton
+                            size='small'
+                            onClick={() => removePendingUploadFile(item.id)}
+                            disabled={uploadingDocuments}
+                          >
+                            <IconX size={15} />
+                          </IconButton>
+                        </span>
+                      </Tooltip>
+                    </Stack>
+                  </Paper>
+                ))}
+              </Stack>
+            ) : (
+              <Typography variant='body2' color='text.secondary'>
+                No files selected yet.
+              </Typography>
+            )}
           </Stack>
         </Paper>
       </Stack>
@@ -611,7 +803,7 @@ export default function PageKnowledge() {
         <Stack sx={{ gap: 0.5 }}>
           <Typography variant='h3'>Sources</Typography>
           <Typography variant='body2' color='text.secondary'>
-            Explicitly ingested workspace paths and URLs tracked under the current workspace-scoped knowledge store.
+            Explicitly ingested workspace paths, uploaded documents, and URLs tracked under the current workspace-scoped knowledge store.
           </Typography>
         </Stack>
         <Stack sx={{ gap: 1, minHeight: 0, overflowY: 'auto', pr: 0.25 }}>

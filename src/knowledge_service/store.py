@@ -1826,6 +1826,26 @@ class KnowledgeStore:
             job_summary=f"Ingesting URL source {url}",
         )
 
+    def ingest_uploaded_source(
+        self,
+        workspace_root: str | Path | None,
+        filename: str,
+        document: ExtractedDocument,
+    ) -> dict[str, Any]:
+        context = self.workspace_context(workspace_root)
+        normalized_filename = Path(str(filename or document.title or "uploaded-document")).name
+        canonical_uri = f"upload://{normalized_filename}"
+        return self._ingest_documents(
+            context=context,
+            source_type="uploaded_file",
+            title=normalized_filename,
+            canonical_uri=canonical_uri,
+            root_path=canonical_uri,
+            documents=[document],
+            job_type="ingest_upload",
+            job_summary=f"Ingesting uploaded source {normalized_filename}",
+        )
+
     def search(
         self,
         workspace_root: str | Path | None,

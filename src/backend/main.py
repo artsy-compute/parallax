@@ -10,7 +10,7 @@ import zlib
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request, WebSocket
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -1095,6 +1095,24 @@ async def knowledge_source_url(raw_request: Request) -> JSONResponse:
         payload = await knowledge_client.ingest_url_source(str(request_data.get("url") or ""))
     except KnowledgeServiceError as error:
         return _knowledge_error_response("knowledge_source_create", error)
+    return JSONResponse(
+        content={"type": "knowledge_source_create", "data": payload},
+        status_code=200,
+    )
+
+
+@app.post("/knowledge/sources/upload")
+async def knowledge_source_upload(file: UploadFile = File(...)) -> JSONResponse:
+    try:
+        payload = await knowledge_client.ingest_uploaded_source(
+            file.filename or "uploaded-document",
+            await file.read(),
+            file.content_type,
+        )
+    except KnowledgeServiceError as error:
+        return _knowledge_error_response("knowledge_source_create", error)
+    finally:
+        await file.close()
     return JSONResponse(
         content={"type": "knowledge_source_create", "data": payload},
         status_code=200,

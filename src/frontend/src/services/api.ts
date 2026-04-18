@@ -580,6 +580,23 @@ export const createKnowledgeUrlSource = async (url: string): Promise<KnowledgeCr
   return message.data;
 };
 
+export const createKnowledgeUploadedSource = async (file: File): Promise<KnowledgeCreateResponse> => {
+  const formData = new FormData();
+  formData.append('file', file);
+  const response = await fetch(`${API_BASE_URL}/knowledge/sources/upload`, {
+    method: 'POST',
+    body: formData,
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'knowledge_source_create') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
 export const deleteKnowledgeSource = async (sourceId: string): Promise<KnowledgeDeleteSourceResponse> => {
   const response = await fetch(`${API_BASE_URL}/knowledge/sources/${encodeURIComponent(sourceId)}`, {
     method: 'DELETE',

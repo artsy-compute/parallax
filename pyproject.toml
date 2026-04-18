@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=68", "wheel", "poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
 
 
 [project]
@@ -9,15 +9,9 @@ version = "0.1.2"
 description = "Decentralised pipeline-parallel LLM serving with Sglang + MLX-LM + Lattica"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
-packages = [
-  { include = "parallax", from = "src" },
-  { include = "scheduling", from = "src" },
-  { include = "parallax_utils", from = "src" },
-  { include = "parallax_extensions", from = "src" },
-  { include = "knowledge_service", from = "src" },
-]
 
 dependencies = [
+  "requests>=2.31",
   "msgpack>=1.0.7",
   "safetensors>=0.5.1",
   "huggingface-hub",
@@ -32,7 +26,9 @@ dependencies = [
   "uvicorn[standard]",
   "uvloop",
   "fastapi",
+  "python-multipart",
   "pydantic",
+  "pypdf>=5.4.0",
   "protobuf==6.31.1",
   "dijkstar==2.6.0",
   "lattica==1.0.21",
@@ -87,7 +83,21 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["src"]                # put your code under ./src/…
+where = ["src"]
+include = [
+  "parallax",
+  "parallax.*",
+  "scheduling",
+  "scheduling.*",
+  "parallax_utils",
+  "parallax_utils.*",
+  "parallax_extensions",
+  "parallax_extensions.*",
+  "knowledge_service",
+  "knowledge_service.*",
+  "backend",
+  "backend.*",
+]
 
 [tool.black]
 line-length = 100

@@ -107,6 +107,48 @@ class KnowledgeServiceClient:
             json_body={**self._workspace_params(), "url": url},
         )
 
+    async def ingest_uploaded_source(
+        self,
+        filename: str,
+        data: bytes,
+        content_type: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.timeout,
+                follow_redirects=True,
+                trust_env=False,
+            ) as client:
+                response = await client.post(
+                    f"{self.base_url}/sources/upload",
+                    data=self._workspace_params(),
+                    files={
+                        "file": (
+                            str(filename or "uploaded-document"),
+                            data,
+                            str(content_type or "application/octet-stream"),
+                        )
+                    },
+                )
+        except httpx.RequestError as error:
+            raise KnowledgeServiceError(
+                f"Knowledge service unavailable at {self.base_url}: {error}",
+                status_code=503,
+            ) from error
+
+        try:
+            payload = response.json()
+        except Exception:
+            payload = {"detail": response.text or f"HTTP {response.status_code}"}
+
+        if response.status_code >= 400:
+            if isinstance(payload, dict):
+                message = str(payload.get("detail") or payload.get("error") or payload)
+            else:
+                message = str(payload)
+            raise KnowledgeServiceError(message, status_code=response.status_code)
+        return payload
+
     async def search(self, query: str, limit: int = 10) -> dict[str, Any]:
         return await self._request(
             "GET",

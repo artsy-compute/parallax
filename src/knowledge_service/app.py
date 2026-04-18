@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from typing import Any
 
+# Allow running the knowledge service directly from a source checkout without
+# requiring PYTHONPATH=src.
+_SRC_ROOT = Path(__file__).resolve().parents[1]
+if str(_SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SRC_ROOT))
+
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
 
 from knowledge_service.config import KnowledgeServiceConfig, load_config
+from knowledge_service.ingest.local_files import extract_uploaded_document
 from knowledge_service.ingest.urls import extract_url_document
 from knowledge_service.models import LocalSourceCreateRequest, UrlSourceCreateRequest
 from knowledge_service.store import KnowledgeStore
@@ -88,6 +97,34 @@ def create_app(config: KnowledgeServiceConfig | None = None) -> FastAPI:
             )
         except Exception as error:
             raise _as_http_exception(error) from error
+
+    @app.post("/sources/upload")
+    async def ingest_uploaded_source(
+        file: UploadFile = File(...),
+        workspace_root: str | None = Form(default=None),
+    ) -> dict[str, Any]:
+        try:
+            file_bytes = await file.read()
+            extracted = extract_uploaded_document(
+                file.filename or "uploaded-document",
+                file_bytes,
+                file.content_type,
+            )
+            if extracted is None:
+                raise ValueError(
+                    "The uploaded file did not produce readable text. "
+                    "PDF, DOCX, and OpenDocument text formats are supported. OCR is not enabled."
+                )
+            return await run_in_threadpool(
+                _service_store().ingest_uploaded_source,
+                workspace_root,
+                file.filename or extracted.title,
+                extracted,
+            )
+        except Exception as error:
+            raise _as_http_exception(error) from error
+        finally:
+            await file.close()
 
     @app.get("/search")
     async def search(

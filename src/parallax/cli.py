@@ -19,6 +19,20 @@ import subprocess
 import sys
 import time
 
+# Support running the installed CLI from a source checkout even if the venv
+# package was built without sibling src packages. The proper fix is packaging,
+# but this keeps repo-local workflows usable.
+_CANDIDATE_SRC_ROOTS = [
+    Path.cwd() / "src",
+    Path(__file__).resolve().parents[3] / "src",
+]
+for _candidate_src_root in _CANDIDATE_SRC_ROOTS:
+    if (_candidate_src_root / "parallax_utils").exists():
+        candidate_text = str(_candidate_src_root)
+        if candidate_text not in sys.path:
+            sys.path.insert(0, candidate_text)
+        break
+
 import requests
 import psutil
 
