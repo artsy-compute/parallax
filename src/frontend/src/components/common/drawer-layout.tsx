@@ -345,16 +345,9 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
                     <Tooltip
                       placement='right'
                       title={(
-                        <Stack sx={{ gap: 0.35, maxWidth: '20rem' }}>
-                          <Typography variant='body2' sx={{ fontWeight: 700 }}>
-                            {page.title}
-                          </Typography>
-                          {page.summary && (
-                            <Typography variant='caption' sx={{ color: 'inherit' }}>
-                              {page.summary}
-                            </Typography>
-                          )}
-                        </Stack>
+                        <Typography variant='body2' sx={{ fontWeight: 700, maxWidth: '20rem' }}>
+                          {page.title}
+                        </Typography>
                       )}
                     >
                       <Button

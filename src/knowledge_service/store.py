@@ -520,8 +520,15 @@ class KnowledgeStore:
     @staticmethod
     def _wiki_system_prompt() -> str:
         return (
-            "You create concise internal wiki pages in markdown using only provided source material. "
-            "Write clearly, organize with headings, and avoid mentioning missing context."
+            "You are maintaining a persistent, compounding markdown wiki from curated sources. "
+            "This is not a one-off RAG answer. The wiki should accumulate knowledge over time, "
+            "sit between raw sources and future questions, and become more useful after each ingest. "
+            "Write with the mindset that the wiki is the durable artifact: structured, interlinked, "
+            "and meant to be revised as new information arrives. "
+            "Using only the provided source material, extract durable knowledge, preserve important nuance, "
+            "identify tensions or contradictions when present, and mention relationships to other topics when justified. "
+            "Prefer clear markdown with strong headings, concrete details, and useful internal cross-references over shallow summarization. "
+            "Do not invent facts, do not mention missing context, and do not describe yourself or the prompt."
         )
 
     def _infer_page_title(
@@ -586,13 +593,18 @@ class KnowledgeStore:
 
         user_prompt = "\n\n".join(
             [
-                "Create a wiki page in markdown for this source.",
+                "Create a substantial markdown wiki page for this source.",
                 f"Preferred title: {source_title}",
                 f"Canonical URI: {source_row['canonical_uri'] or ''}",
+                "Treat this as part of a long-lived wiki, not a disposable answer.",
+                "The page should compile durable knowledge from the source so future queries do not have to rediscover it from raw documents.",
                 "Write explicit markdown headings.",
                 "Start with `## Overview`, then `## Key Details`, then `## Important Notes`.",
-                "Use bullet lists where useful and keep prose concise.",
+                "If the source supports it, include concise subsections or bullets for entities, concepts, timelines, claims, comparisons, or mechanisms.",
+                "Surface tensions, contradictions, caveats, or changes over time when the source contains them.",
+                "Make the page rich enough to stand on its own as a useful reference, not just a short summary.",
                 "Do not use the raw URL or file path as the page title if a better topic/title can be inferred from the text.",
+                "When another likely wiki topic is clearly referenced, mention it naturally so it can be linked later.",
                 "Source material:",
                 source_material,
             ]
@@ -626,7 +638,10 @@ class KnowledgeStore:
         home_prompt = "\n\n".join(
             [
                 "Create a markdown homepage for this knowledge wiki.",
-                "Introduce the knowledge base, summarize the main pages, and include a short navigation section.",
+                "Treat the wiki as a persistent, compounding knowledge artifact rather than a temporary retrieval layer.",
+                "The homepage should orient the reader, summarize the strongest themes across pages, and make the wiki feel like a maintained knowledge base.",
+                "Include clear navigation, a synthesis of the current collection, and mention where important questions or tensions remain open.",
+                "Do not reduce the homepage to a thin introduction; it should be a substantive overview of what the collection currently knows.",
                 "Available child pages:",
                 "\n".join(child_summaries),
             ]

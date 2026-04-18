@@ -64,6 +64,7 @@ class MLXModelLoader:
     def register_block_class(self):
         """Automatically read all EntryClass from models directory and generate block class map."""
         self.block_class_map = {}
+        self.block_class_import_errors: dict[str, str] = {}
 
         # Get models directory path
         models_dir = pathlib.Path(__file__).parent.parent / "models"
@@ -90,7 +91,8 @@ class MLXModelLoader:
                         logger.warning(f"No architecture attribute found in {entry_class.__name__}")
 
             except Exception as e:
-                logger.warning(f"Failed to load model from {model_file}: {e}")
+                self.block_class_import_errors[model_file.stem] = str(e)
+                logger.warning(f"Failed to load model from {model_file}: {e}", exc_info=True)
 
     def linear_to_lora_layers(
         self,
@@ -251,7 +253,27 @@ class MLXModelLoader:
         architecture = architectures[0]
         block_class = self.block_class_map.get(architecture, None)
         if block_class is None:
-            raise ValueError(f"block_class not found for architecture: {architecture}")
+            normalized_architecture = architecture.lower()
+            matching_import_errors = [
+                f"{module_name}: {error}"
+                for module_name, error in self.block_class_import_errors.items()
+                if module_name in normalized_architecture or normalized_architecture.startswith(module_name)
+            ]
+            details: list[str] = [f"block_class not found for architecture: {architecture}"]
+            if matching_import_errors:
+                details.append(
+                    "Related model module import failures: " + "; ".join(matching_import_errors)
+                )
+            elif self.block_class_import_errors:
+                details.append(
+                    "Model module import failures were detected during registration. "
+                    "Check earlier loader warnings for the root cause."
+                )
+            if self.block_class_map:
+                details.append(
+                    "Registered architectures: " + ", ".join(sorted(self.block_class_map.keys()))
+                )
+            raise ValueError(". ".join(details))
 
         num_hidden_layers = config.get("num_hidden_layers", 0)
         current_start_layer = self.start_layer if self.start_layer is not None else 0

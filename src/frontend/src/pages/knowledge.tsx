@@ -1080,11 +1080,6 @@ export default function PageKnowledge() {
                   >
                     <Stack sx={{ gap: 0.5, minWidth: 0 }}>
                       <Typography variant='h2'>{selectedPage.title}</Typography>
-                      {selectedPage.summary && (
-                        <Typography variant='body2' color='text.secondary'>
-                          {selectedPage.summary}
-                        </Typography>
-                      )}
                       <Typography variant='caption' color='text.secondary'>
                         {Math.abs((selectedPage.updated_at || 0) - (selectedPage.created_at || 0)) < 1
                           ? 'Generated'
