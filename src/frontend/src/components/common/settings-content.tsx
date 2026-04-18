@@ -27,6 +27,7 @@ import {
   IconAdjustments,
   IconCheck,
   IconCirclesRelation,
+  IconDeviceFloppy,
   IconDownload,
   IconMessageCircle,
   IconInfoCircle,
@@ -67,19 +68,28 @@ import {
   type CustomModelSourceOption,
   type CustomModelSourceRoot,
 } from '../../services/api';
+import {
+  mergeAdvancedLlmSettings,
+  parseKnowledgeGenerationConfig,
+  parseLlmProviderConfigs,
+  type KnowledgeGenerationConfig,
+  type LlmProviderConfig,
+  type LlmProviderId,
+} from '../../services/llm-providers';
 import { useRefCallback } from '../../hooks';
 import { NodeManagementContent } from './node-management-content';
 import { JoinCommand, ModelSelect } from '../inputs';
 import { AlertDialog } from '../mui';
 import { useThemeMode } from '../../themes';
 
-type SettingsSectionKey = 'cluster' | 'custom-models' | 'nodes' | 'tools' | 'chat' | 'transfer' | 'misc';
+type SettingsSectionKey = 'cluster' | 'custom-models' | 'nodes' | 'tools' | 'llm-providers' | 'chat' | 'transfer' | 'misc';
 
 const SETTINGS_SECTIONS: ReadonlyArray<{ key: SettingsSectionKey; label: string; icon: FC<{ size?: number }> }> = [
   { key: 'nodes', label: 'Nodes', icon: IconCirclesRelation },
   { key: 'cluster', label: 'Clusters', icon: IconStack3 },
   { key: 'custom-models', label: 'Custom Models', icon: IconAdjustments },
   { key: 'tools', label: 'Tools', icon: IconAdjustments },
+  { key: 'llm-providers', label: 'LLM Providers', icon: IconAdjustments },
   { key: 'chat', label: 'Chats', icon: IconMessageCircle },
   { key: 'transfer', label: 'Import & Export', icon: IconTransfer },
   { key: 'misc', label: 'Miscellaneous', icon: IconSettingsCog },
@@ -284,6 +294,14 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     tools: {},
   });
   const [savingToolSettings, setSavingToolSettings] = useState(false);
+  const [llmProviders, setLlmProviders] = useState<Record<LlmProviderId, LlmProviderConfig>>(
+    parseLlmProviderConfigs(undefined),
+  );
+  const [knowledgeGenerationConfig, setKnowledgeGenerationConfig] = useState<KnowledgeGenerationConfig>(
+    parseKnowledgeGenerationConfig(undefined, parseLlmProviderConfigs(undefined)),
+  );
+  const [llmProvidersError, setLlmProvidersError] = useState('');
+  const [savingLlmProviders, setSavingLlmProviders] = useState(false);
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
   const inventoryRowIdRef = useRef(0);
 
@@ -353,6 +371,21 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     }
   });
 
+  const loadLlmProviders = useRefCallback(async () => {
+    try {
+      const payload = await getAppSettings();
+      const providers = parseLlmProviderConfigs(payload.cluster_settings.advanced);
+      setLlmProviders(providers);
+      setKnowledgeGenerationConfig(parseKnowledgeGenerationConfig(payload.cluster_settings.advanced, providers));
+      setLlmProvidersError('');
+    } catch (error) {
+      const providers = parseLlmProviderConfigs(undefined);
+      setLlmProviders(providers);
+      setKnowledgeGenerationConfig(parseKnowledgeGenerationConfig(undefined, providers));
+      setLlmProvidersError(error instanceof Error ? error.message : 'Failed to load LLM provider settings');
+    }
+  });
+
   const onSaveToolSettings = useRefCallback(async () => {
     try {
       setSavingToolSettings(true);
@@ -368,6 +401,25 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
       await Promise.all([reloadSettings(), loadAvailableTools()]);
     } finally {
       setSavingToolSettings(false);
+    }
+  });
+
+  const onSaveLlmProviderSettings = useRefCallback(async () => {
+    try {
+      setSavingLlmProviders(true);
+      const payload = await getAppSettings();
+      const clusterSettings = payload.cluster_settings || { model_name: '', init_nodes_num: 1, is_local_network: true, network_type: 'local' as const };
+      const advanced = mergeAdvancedLlmSettings(clusterSettings.advanced, llmProviders, knowledgeGenerationConfig);
+      await updateAppSettings({
+        cluster_settings: {
+          advanced,
+        },
+      });
+      await Promise.all([reloadSettings(), loadLlmProviders()]);
+    } catch (error) {
+      setLlmProvidersError(error instanceof Error ? error.message : 'Failed to save LLM provider settings');
+    } finally {
+      setSavingLlmProviders(false);
     }
   });
 
@@ -397,8 +449,11 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
       loadAvailableTools().catch((error) => {
         console.error('getAppSettings error', error);
       });
+      loadLlmProviders().catch((error) => {
+        console.error('getAppSettings error', error);
+      });
     }
-  }, [hostType, loadAvailableTools, loadCustomModelSources]);
+  }, [hostType, loadAvailableTools, loadCustomModelSources, loadLlmProviders]);
 
   useEffect(() => {
     if (hostType === 'node' || activeSection !== 'custom-models' || !customModelEditorOpen) {
@@ -2783,6 +2838,120 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
               </Stack>
             ))}
           </Stack>
+        </Stack>
+      );
+    }
+
+    if (activeSection === 'llm-providers') {
+      return (
+        <Stack sx={{ gap: 1.25 }}>
+          <Stack direction={{ xs: 'column', md: 'row' }} sx={{ gap: 1, alignItems: { md: 'center' }, justifyContent: 'space-between' }}>
+            <Stack sx={{ gap: 0.5 }}>
+              <Typography variant='h2'>LLM Providers</Typography>
+              <Typography variant='body2' color='text.secondary'>
+                Configure the generation backends Parallax can use. Knowledge chooses among these configured providers in its own settings.
+              </Typography>
+            </Stack>
+            <Button
+              variant='contained'
+              startIcon={<IconDeviceFloppy size={16} />}
+              onClick={() => void onSaveLlmProviderSettings()}
+              disabled={savingLlmProviders}
+            >
+              {savingLlmProviders ? 'Saving...' : 'Save'}
+            </Button>
+          </Stack>
+          {llmProvidersError && <Alert severity='warning'>{llmProvidersError}</Alert>}
+          <Stack sx={{ gap: 1 }}>
+            {([
+              {
+                id: 'openai',
+                apiKeyLabel: 'API key',
+                baseUrlLabel: 'Base URL',
+                defaultBaseUrl: 'https://api.openai.com/v1',
+              },
+              {
+                id: 'anthropic',
+                apiKeyLabel: 'API key',
+                baseUrlLabel: 'Base URL',
+                defaultBaseUrl: 'https://api.anthropic.com',
+              },
+              {
+                id: 'compatible',
+                apiKeyLabel: 'API key',
+                baseUrlLabel: 'Base URL',
+                defaultBaseUrl: '',
+              },
+            ] as const).map(({ id, apiKeyLabel, baseUrlLabel, defaultBaseUrl }) => {
+              const provider = llmProviders[id];
+              return (
+                <Stack
+                  key={id}
+                  sx={{
+                    gap: 0.75,
+                    px: 1.25,
+                    py: 1,
+                    borderRadius: 2,
+                    border: '1px solid',
+                    borderColor: 'divider',
+                    bgcolor: 'background.paper',
+                  }}
+                >
+                  <Stack direction={{ xs: 'column', sm: 'row' }} sx={{ alignItems: { sm: 'center' }, justifyContent: 'space-between', gap: 1 }}>
+                    <Typography variant='body2' sx={{ fontWeight: 600 }}>
+                      {provider.displayName}
+                    </Typography>
+                    <Switch
+                      checked={provider.enabled}
+                      onChange={(event) => setLlmProviders((prev) => ({
+                        ...prev,
+                        [id]: { ...prev[id], enabled: event.target.checked },
+                      }))}
+                    />
+                  </Stack>
+                  <Stack direction={{ xs: 'column', md: 'row' }} sx={{ gap: 1 }}>
+                    <TextField
+                      size='small'
+                      label='Default model'
+                      value={provider.defaultModel}
+                      onChange={(event) => setLlmProviders((prev) => ({
+                        ...prev,
+                        [id]: { ...prev[id], defaultModel: event.target.value },
+                      }))}
+                      placeholder={id === 'openai' ? 'gpt-5.4-mini' : id === 'anthropic' ? 'claude-sonnet-4-5' : 'model-id'}
+                      fullWidth
+                    />
+                    <TextField
+                      size='small'
+                      label={baseUrlLabel}
+                      value={provider.baseUrl}
+                      onChange={(event) => setLlmProviders((prev) => ({
+                        ...prev,
+                        [id]: { ...prev[id], baseUrl: event.target.value },
+                      }))}
+                      placeholder={defaultBaseUrl || 'https://api.example.com/v1'}
+                      fullWidth
+                    />
+                    <TextField
+                      size='small'
+                      type='password'
+                      label={apiKeyLabel}
+                      value={provider.apiKey}
+                      onChange={(event) => setLlmProviders((prev) => ({
+                        ...prev,
+                        [id]: { ...prev[id], apiKey: event.target.value },
+                      }))}
+                      placeholder='Stored with settings'
+                      fullWidth
+                    />
+                  </Stack>
+                </Stack>
+              );
+            })}
+          </Stack>
+          <Typography variant='caption' color='text.secondary'>
+            Provider credentials are stored in the current Parallax settings bundle, including exported settings JSON.
+          </Typography>
         </Stack>
       );
     }

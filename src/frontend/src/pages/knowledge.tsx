@@ -7,6 +7,7 @@ import {
   Dialog,
   DialogContent,
   DialogTitle,
+  MenuItem,
   Paper,
   Stack,
   Tab,
@@ -23,14 +24,17 @@ import {
 } from '@tabler/icons-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { DrawerLayout } from '../components/common';
+import { useCluster } from '../services';
 import {
   createKnowledgeLocalSource,
   createKnowledgeUrlSource,
+  getAppSettings,
   getKnowledgeDocument,
   getKnowledgeHealth,
   getKnowledgeJobs,
   getKnowledgeSources,
   searchKnowledge,
+  updateAppSettings,
   type KnowledgeDocumentDetail,
   type KnowledgeHealth,
   type KnowledgeJob,
@@ -38,8 +42,18 @@ import {
   type KnowledgeSourceSummary,
 } from '../services/api';
 import { useRefCallback } from '../hooks';
+import {
+  enabledLlmProviders,
+  maskSecret,
+  mergeAdvancedLlmSettings,
+  parseKnowledgeGenerationConfig,
+  parseLlmProviderConfigs,
+  type KnowledgeGenerationConfig,
+  type LlmProviderConfig,
+  type LlmProviderId,
+} from '../services/llm-providers';
 
-type KnowledgeSection = 'overview' | 'ingest' | 'search' | 'sources' | 'jobs';
+type KnowledgeSection = 'overview' | 'ingest' | 'search' | 'sources' | 'jobs' | 'settings';
 
 const KNOWLEDGE_SECTIONS: readonly KnowledgeSection[] = [
   'overview',
@@ -47,6 +61,7 @@ const KNOWLEDGE_SECTIONS: readonly KnowledgeSection[] = [
   'search',
   'sources',
   'jobs',
+  'settings',
 ];
 
 const formatDateTime = (value: number) =>
@@ -83,6 +98,7 @@ export default function PageKnowledge() {
   const location = useLocation();
   const navigate = useNavigate();
   const activeSection = normalizeSection(location.search);
+  const [{ config: { clusterProfiles } }] = useCluster();
 
   const [health, setHealth] = useState<KnowledgeHealth | null>(null);
   const [sources, setSources] = useState<readonly KnowledgeSourceSummary[]>([]);
@@ -98,19 +114,30 @@ export default function PageKnowledge() {
   const [ingestingLocal, setIngestingLocal] = useState(false);
   const [ingestingUrl, setIngestingUrl] = useState(false);
   const [documentLoading, setDocumentLoading] = useState(false);
+  const [llmProviders, setLlmProviders] = useState<Record<LlmProviderId, LlmProviderConfig>>(
+    parseLlmProviderConfigs(undefined),
+  );
+  const [knowledgeGenerationConfig, setKnowledgeGenerationConfig] = useState<KnowledgeGenerationConfig>(
+    parseKnowledgeGenerationConfig(undefined, parseLlmProviderConfigs(undefined)),
+  );
+  const [savingGenerationConfig, setSavingGenerationConfig] = useState(false);
   const [error, setError] = useState('');
 
   const loadPageData = useRefCallback(async () => {
     setRefreshing(true);
     try {
-      const [nextHealth, nextSources, nextJobs] = await Promise.all([
+      const [nextHealth, nextSources, nextJobs, nextSettings] = await Promise.all([
         getKnowledgeHealth(),
         getKnowledgeSources(),
         getKnowledgeJobs(),
+        getAppSettings(),
       ]);
       setHealth(nextHealth);
       setSources(nextSources);
       setJobs(nextJobs);
+      const providers = parseLlmProviderConfigs(nextSettings.cluster_settings.advanced);
+      setLlmProviders(providers);
+      setKnowledgeGenerationConfig(parseKnowledgeGenerationConfig(nextSettings.cluster_settings.advanced, providers));
       setError('');
     } catch (nextError) {
       setHealth(null);
@@ -199,6 +226,26 @@ export default function PageKnowledge() {
     navigate(`/knowledge?section=${value}`);
   });
 
+  const onSaveGenerationConfig = useRefCallback(async () => {
+    try {
+      setSavingGenerationConfig(true);
+      const payload = await getAppSettings();
+      const clusterSettings = payload.cluster_settings || { model_name: '', init_nodes_num: 1, is_local_network: true, network_type: 'local' as const };
+      const advanced = mergeAdvancedLlmSettings(clusterSettings.advanced, llmProviders, knowledgeGenerationConfig);
+      await updateAppSettings({
+        cluster_settings: {
+          advanced,
+        },
+      });
+      await loadPageData();
+      setError('');
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    } finally {
+      setSavingGenerationConfig(false);
+    }
+  });
+
   const summaryCards = useMemo(
     () => [
       { label: 'Sources', value: health?.counts.sources ?? sources.length, hint: 'Tracked inputs across workspace paths and URLs' },
@@ -208,6 +255,8 @@ export default function PageKnowledge() {
     ],
     [health, jobs.length, sources.length],
   );
+  const enabledProviders = useMemo(() => enabledLlmProviders(llmProviders), [llmProviders]);
+  const selectedGenerationProvider = llmProviders[knowledgeGenerationConfig.provider];
 
   const renderIngestSection = () => (
     <Paper variant='outlined' sx={{ p: 2, borderRadius: 3, bgcolor: 'background.default' }}>
@@ -460,6 +509,164 @@ export default function PageKnowledge() {
     </Paper>
   );
 
+  const renderSettingsSection = () => (
+    <Paper variant='outlined' sx={{ p: 2, borderRadius: 3, bgcolor: 'background.default' }}>
+      <Stack sx={{ gap: 1.5 }}>
+        <Stack sx={{ gap: 0.5 }}>
+          <Typography variant='h3'>Settings</Typography>
+          <Typography variant='body2' color='text.secondary'>
+            Choose which configured provider Knowledge should use for future wiki-page generation. Provider credentials stay in global Settings.
+          </Typography>
+        </Stack>
+        {enabledProviders.length === 0 ? (
+          <Alert severity='warning'>
+            No LLM providers are enabled. Configure one in Settings before adding wiki-page generation.
+          </Alert>
+        ) : (
+          <Stack direction={{ xs: 'column', md: 'row' }} sx={{ gap: 1, alignItems: { md: 'flex-start' } }}>
+            <TextField
+              select
+              label='Page generation provider'
+              value={knowledgeGenerationConfig.provider}
+              onChange={(event) => {
+                const nextProvider = event.target.value as LlmProviderId;
+                setKnowledgeGenerationConfig({
+                  provider: nextProvider,
+                  model: llmProviders[nextProvider]?.defaultModel || '',
+                });
+              }}
+              sx={{ width: { xs: '100%', md: '50%' } }}
+            >
+              {enabledProviders.map((provider) => (
+                <MenuItem key={provider.id} value={provider.id}>
+                  {provider.displayName}
+                </MenuItem>
+              ))}
+            </TextField>
+          </Stack>
+        )}
+        {selectedGenerationProvider && selectedGenerationProvider.id !== 'local_cluster' && (
+          <>
+            <Stack direction={{ xs: 'column', md: 'row' }} sx={{ gap: 1 }}>
+              <TextField
+                size='small'
+                label='Default model'
+                value={selectedGenerationProvider.defaultModel || 'Not configured'}
+                fullWidth
+                InputProps={{ readOnly: true }}
+              />
+              <TextField
+                size='small'
+                label='API key'
+                value={maskSecret(selectedGenerationProvider.apiKey)}
+                fullWidth
+                InputProps={{ readOnly: true }}
+              />
+            </Stack>
+            <Stack direction='row' sx={{ justifyContent: 'flex-start', gap: 1 }}>
+              <Button
+                variant='contained'
+                onClick={() => {
+                  void onSaveGenerationConfig();
+                }}
+                disabled={savingGenerationConfig}
+              >
+                {savingGenerationConfig ? 'Saving...' : 'Save'}
+              </Button>
+              <Button variant='outlined' onClick={() => navigate('/settings/llm-providers')}>
+                Manage providers
+              </Button>
+            </Stack>
+          </>
+        )}
+        {knowledgeGenerationConfig.provider === 'local_cluster' && (
+          <Stack sx={{ gap: 1 }}>
+            <Typography variant='body2' sx={{ fontWeight: 600 }}>
+              Local cluster options
+            </Typography>
+            <Stack direction={{ xs: 'column', md: 'row' }} sx={{ gap: 1 }}>
+              <TextField
+                select
+                size='small'
+                label='Routing'
+                value={llmProviders.local_cluster.useActiveCluster ? 'active' : 'specific'}
+                onChange={(event) => setLlmProviders((prev) => ({
+                  ...prev,
+                  local_cluster: {
+                    ...prev.local_cluster,
+                    useActiveCluster: event.target.value !== 'specific',
+                  },
+                }))}
+                fullWidth
+              >
+                <MenuItem value='active'>Use active cluster</MenuItem>
+                <MenuItem value='specific'>Pin a specific cluster</MenuItem>
+              </TextField>
+              <TextField
+                select
+                size='small'
+                label='Cluster'
+                value={llmProviders.local_cluster.clusterId}
+                onChange={(event) => setLlmProviders((prev) => ({
+                  ...prev,
+                  local_cluster: {
+                    ...prev.local_cluster,
+                    clusterId: String(event.target.value || ''),
+                  },
+                }))}
+                fullWidth
+                disabled={llmProviders.local_cluster.useActiveCluster}
+              >
+                {clusterProfiles.map((profile) => (
+                  <MenuItem key={profile.id} value={profile.id}>
+                    {profile.name}
+                  </MenuItem>
+                ))}
+              </TextField>
+              <TextField
+                size='small'
+                label='Model override'
+                value={llmProviders.local_cluster.defaultModel}
+                onChange={(event) => setLlmProviders((prev) => ({
+                  ...prev,
+                  local_cluster: { ...prev.local_cluster, defaultModel: event.target.value },
+                }))}
+                placeholder='Optional'
+                fullWidth
+              />
+            </Stack>
+            <Stack direction='row' sx={{ justifyContent: 'flex-start' }}>
+              <Button
+                variant='contained'
+                onClick={() => {
+                  void onSaveGenerationConfig();
+                }}
+                disabled={savingGenerationConfig}
+              >
+                {savingGenerationConfig ? 'Saving...' : 'Save'}
+              </Button>
+            </Stack>
+          </Stack>
+        )}
+        {selectedGenerationProvider && (
+          <Typography variant='caption' color='text.secondary'>
+            {selectedGenerationProvider.id === 'local_cluster'
+              ? (
+                selectedGenerationProvider.useActiveCluster
+                  ? 'Local generation follows the currently active cluster.'
+                  : `Local generation is pinned to cluster ${selectedGenerationProvider.clusterId || 'not set'}.`
+              )
+              : (
+                selectedGenerationProvider.baseUrl
+                  ? `Requests will be routed through ${selectedGenerationProvider.baseUrl}.`
+                  : 'Provider routing will use the configured default endpoint.'
+              )}{selectedGenerationProvider.defaultModel ? ` Default model: ${selectedGenerationProvider.defaultModel}.` : ''}
+          </Typography>
+        )}
+      </Stack>
+    </Paper>
+  );
+
   return (
     <DrawerLayout contentWidth='wide'>
       <Stack sx={{ minHeight: 0, gap: 2.5 }}>
@@ -495,6 +702,7 @@ export default function PageKnowledge() {
             <Tab value='search' label='Search' />
             <Tab value='sources' label='Sources' />
             <Tab value='jobs' label='Jobs' />
+            <Tab value='settings' label='Settings' />
           </Tabs>
           <Box sx={{ p: 2 }}>
             {activeSection === 'overview' && (
@@ -538,6 +746,7 @@ export default function PageKnowledge() {
             {activeSection === 'search' && renderSearchSection()}
             {activeSection === 'sources' && renderSourcesSection()}
             {activeSection === 'jobs' && renderJobsSection()}
+            {activeSection === 'settings' && renderSettingsSection()}
           </Box>
         </Paper>
 

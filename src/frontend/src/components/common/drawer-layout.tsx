@@ -496,6 +496,15 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
                     >
                       Jobs
                     </Button>
+                    <Button
+                      component={RouterLink}
+                      to='/knowledge?section=settings'
+                      color='inherit'
+                      variant='text'
+                      sx={secondaryNavButtonSx(knowledgeSection === 'settings')}
+                    >
+                      Settings
+                    </Button>
                   </Stack>
                 )}
               </Stack>
