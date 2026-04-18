@@ -43,7 +43,7 @@ export const MainRouter = () => {
       return lazyNavigate(PATH_SETTINGS);
     }
     debugLog('pathname', pathname, 'cluster status', status);
-    if (status === 'idle' && pathname.startsWith(PATH_CHAT)) {
+    if (status === 'idle' && pathname === PATH_CHAT) {
       return lazyNavigate(PATH_SETTINGS);
     }
     if (
@@ -68,6 +68,14 @@ export const MainRouter = () => {
     },
     {
       path: PATH_CHAT,
+      element: (
+        <Suspense fallback={<div>Loading...</div>}>
+          <PageChat />
+        </Suspense>
+      ),
+    },
+    {
+      path: `${PATH_CHAT}/:conversationId`,
       element: (
         <Suspense fallback={<div>Loading...</div>}>
           <PageChat />

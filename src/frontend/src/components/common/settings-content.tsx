@@ -1112,7 +1112,7 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
     } catch (error) {
       console.error('open chat conversation error', error);
     }
-    navigate('/chat');
+    navigate(`/chat/${normalizedConversationId}`);
   });
 
   const onDeleteChatConversation = async (conversationId: string) => {
