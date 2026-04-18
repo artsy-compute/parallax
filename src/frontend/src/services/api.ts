@@ -481,6 +481,10 @@ export interface KnowledgePageSummary {
   readonly workspace_id: string;
   readonly parent_page_id: string | null;
   readonly source_id: string;
+  readonly source_ids: readonly string[];
+  readonly page_type: string;
+  readonly aliases: readonly string[];
+  readonly updated_from_job_id: string;
   readonly title: string;
   readonly slug: string;
   readonly summary: string;
@@ -510,6 +514,12 @@ export interface KnowledgeGeneratePagesResponse {
 
 export interface KnowledgeRegeneratePageResponse {
   readonly page: KnowledgePageDetail | null;
+  readonly job: KnowledgeJob | null;
+  readonly pages: KnowledgePageListResponse;
+}
+
+export interface KnowledgeLintWikiResponse {
+  readonly report_markdown: string;
   readonly job: KnowledgeJob | null;
   readonly pages: KnowledgePageListResponse;
 }
@@ -672,6 +682,21 @@ export const generateKnowledgePages = async (): Promise<KnowledgeGeneratePagesRe
   });
   const message = await parseJsonResponse(response);
   if (message.type !== 'knowledge_pages_generate') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const lintKnowledgeWiki = async (): Promise<KnowledgeLintWikiResponse> => {
+  const response = await fetch(`${API_BASE_URL}/knowledge/wiki/lint`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'knowledge_wiki_lint') {
     throw new Error(`Invalid message type: ${message.type}.`);
   }
   if (message.error) {

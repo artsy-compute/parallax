@@ -10,6 +10,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 import numpy as np
 import requests
@@ -28,6 +29,30 @@ except Exception:  # pragma: no cover - optional dependency
 
 logger = get_logger(__name__)
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
+_PAGE_TYPES = {
+    "home",
+    "hub",
+    "index",
+    "log",
+    "source_summary",
+    "entity",
+    "concept",
+    "topic",
+    "timeline",
+    "comparison",
+}
+_HUB_PAGE_CONFIGS = [
+    {"slug": "sources", "title": "Sources", "page_type": "hub", "child_page_type": "source_summary", "sort_order": 100},
+    {"slug": "entities", "title": "Entities", "page_type": "hub", "child_page_type": "entity", "sort_order": 200},
+    {"slug": "concepts", "title": "Concepts", "page_type": "hub", "child_page_type": "concept", "sort_order": 300},
+    {"slug": "topics", "title": "Topics", "page_type": "hub", "child_page_type": "topic", "sort_order": 400},
+    {"slug": "timelines", "title": "Timelines", "page_type": "hub", "child_page_type": "timeline", "sort_order": 500},
+    {"slug": "comparisons", "title": "Comparisons", "page_type": "hub", "child_page_type": "comparison", "sort_order": 600},
+]
+_SPECIAL_PAGE_CONFIGS = [
+    {"slug": "index", "title": "Index", "page_type": "index", "sort_order": 900},
+    {"slug": "log", "title": "Log", "page_type": "log", "sort_order": 910},
+]
 
 
 @dataclass(frozen=True)
@@ -164,6 +189,10 @@ class KnowledgeStore:
                 workspace_id TEXT NOT NULL,
                 parent_page_id TEXT,
                 source_id TEXT NOT NULL DEFAULT '',
+                page_type TEXT NOT NULL DEFAULT 'topic',
+                source_ids_json TEXT NOT NULL DEFAULT '[]',
+                aliases_json TEXT NOT NULL DEFAULT '[]',
+                updated_from_job_id TEXT NOT NULL DEFAULT '',
                 title TEXT NOT NULL,
                 slug TEXT NOT NULL,
                 summary TEXT NOT NULL DEFAULT '',
@@ -176,9 +205,93 @@ class KnowledgeStore:
             );
             CREATE INDEX IF NOT EXISTS idx_pages_workspace_parent
                 ON pages(workspace_id, parent_page_id, sort_order ASC, title ASC);
+            CREATE INDEX IF NOT EXISTS idx_pages_workspace_slug
+                ON pages(workspace_id, slug);
+
+            CREATE TABLE IF NOT EXISTS wiki_log_entries (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                source_id TEXT NOT NULL DEFAULT '',
+                job_id TEXT NOT NULL DEFAULT '',
+                details TEXT NOT NULL DEFAULT '',
+                touched_page_ids_json TEXT NOT NULL DEFAULT '[]',
+                created_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_wiki_log_entries_workspace_created
+                ON wiki_log_entries(workspace_id, created_at DESC);
             """
         )
+        self._ensure_column(connection, "pages", "page_type", "TEXT NOT NULL DEFAULT 'topic'")
+        self._ensure_column(connection, "pages", "source_ids_json", "TEXT NOT NULL DEFAULT '[]'")
+        self._ensure_column(connection, "pages", "aliases_json", "TEXT NOT NULL DEFAULT '[]'")
+        self._ensure_column(connection, "pages", "updated_from_job_id", "TEXT NOT NULL DEFAULT ''")
+        self._backfill_page_metadata(connection)
         connection.commit()
+
+    @staticmethod
+    def _has_column(connection: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+        rows = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+        return any(str(row["name"]) == column_name for row in rows)
+
+    def _ensure_column(
+        self,
+        connection: sqlite3.Connection,
+        table_name: str,
+        column_name: str,
+        column_sql: str,
+    ) -> None:
+        if self._has_column(connection, table_name, column_name):
+            return
+        connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
+
+    def _backfill_page_metadata(self, connection: sqlite3.Connection) -> None:
+        if self._has_column(connection, "pages", "page_type"):
+            connection.execute(
+                """
+                UPDATE pages
+                SET page_type='home'
+                WHERE is_home=1 AND (page_type='' OR page_type='topic')
+                """
+            )
+            connection.execute(
+                """
+                UPDATE pages
+                SET page_type='source_summary'
+                WHERE is_home=0 AND source_id<>'' AND (page_type='' OR page_type='topic')
+                """
+            )
+        if self._has_column(connection, "pages", "source_ids_json"):
+            rows = connection.execute(
+                "SELECT id, source_id, source_ids_json FROM pages"
+            ).fetchall()
+            for row in rows:
+                page_id = str(row["id"])
+                existing_source_ids = self._decode_string_list(row["source_ids_json"])
+                fallback_source_id = str(row["source_id"] or "").strip()
+                if fallback_source_id and fallback_source_id not in existing_source_ids:
+                    existing_source_ids.append(fallback_source_id)
+                connection.execute(
+                    "UPDATE pages SET source_ids_json=? WHERE id=?",
+                    (self._encode_string_list(existing_source_ids), page_id),
+                )
+        if self._has_column(connection, "pages", "aliases_json"):
+            connection.execute(
+                """
+                UPDATE pages
+                SET aliases_json='[]'
+                WHERE aliases_json IS NULL OR aliases_json=''
+                """
+            )
+        if self._has_column(connection, "pages", "updated_from_job_id"):
+            connection.execute(
+                """
+                UPDATE pages
+                SET updated_from_job_id=''
+                WHERE updated_from_job_id IS NULL
+                """
+            )
 
     @staticmethod
     def _now() -> float:
@@ -194,6 +307,36 @@ class KnowledgeStore:
         if len(compact) <= max_chars:
             return compact
         return compact[: max_chars - 1].rstrip() + "…"
+
+    @staticmethod
+    def _decode_string_list(value: Any) -> list[str]:
+        items: list[str] = []
+        raw_items: list[Any]
+        if isinstance(value, list):
+            raw_items = list(value)
+        else:
+            compact = str(value or "").strip()
+            if not compact:
+                return []
+            try:
+                parsed = json.loads(compact)
+                raw_items = list(parsed) if isinstance(parsed, list) else [parsed]
+            except Exception:
+                raw_items = [part.strip() for part in compact.split(",")]
+        for item in raw_items:
+            text = str(item or "").strip()
+            if text and text not in items:
+                items.append(text)
+        return items
+
+    @staticmethod
+    def _encode_string_list(items: list[str]) -> str:
+        normalized: list[str] = []
+        for item in items:
+            text = str(item or "").strip()
+            if text and text not in normalized:
+                normalized.append(text)
+        return json.dumps(normalized, ensure_ascii=True)
 
     def _vector_matrix_path(self, context: WorkspaceContext) -> Path:
         return context.vectors_dir / "chunks.npy"
@@ -304,11 +447,19 @@ class KnowledgeStore:
         }
 
     def _row_to_page_summary(self, row: sqlite3.Row, *, child_count: int = 0) -> dict[str, Any]:
+        source_ids = self._decode_string_list(row["source_ids_json"]) if "source_ids_json" in row.keys() else []
+        fallback_source_id = str(row["source_id"] or "").strip()
+        if fallback_source_id and fallback_source_id not in source_ids:
+            source_ids.append(fallback_source_id)
         return {
             "id": row["id"],
             "workspace_id": row["workspace_id"],
             "parent_page_id": row["parent_page_id"] or None,
             "source_id": row["source_id"] or "",
+            "source_ids": source_ids,
+            "page_type": row["page_type"] or ("home" if bool(row["is_home"]) else "topic"),
+            "aliases": self._decode_string_list(row["aliases_json"]) if "aliases_json" in row.keys() else [],
+            "updated_from_job_id": row["updated_from_job_id"] or "",
             "title": row["title"] or "",
             "slug": row["slug"] or "",
             "summary": row["summary"] or "",
@@ -355,6 +506,237 @@ class KnowledgeStore:
                 continue
             return compact[:240]
         return ""
+
+    @staticmethod
+    def _normalize_page_key(value: str) -> str:
+        return _SLUG_RE.sub("-", " ".join(str(value or "").split()).strip().lower()).strip("-")
+
+    @staticmethod
+    def _normalize_page_type(value: str, fallback: str = "topic") -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized in _PAGE_TYPES:
+            return normalized
+        return fallback
+
+    @staticmethod
+    def _page_parent_slug(page_type: str) -> str | None:
+        normalized_type = str(page_type or "").strip()
+        for item in _HUB_PAGE_CONFIGS:
+            if item["child_page_type"] == normalized_type:
+                return str(item["slug"])
+        return None
+
+    @staticmethod
+    def _page_sort_order(page_type: str, offset: int = 0) -> int:
+        base_sort_orders = {
+            "source_summary": 1000,
+            "entity": 2000,
+            "concept": 3000,
+            "topic": 4000,
+            "timeline": 5000,
+            "comparison": 6000,
+            "home": 0,
+            "hub": 50,
+            "index": 9000,
+            "log": 9100,
+        }
+        return int(base_sort_orders.get(str(page_type or "").strip(), 4000) + max(0, int(offset or 0)))
+
+    @staticmethod
+    def _format_event_time(value: float) -> str:
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(float(value or 0)))
+
+    @staticmethod
+    def _strip_sources_section(content: str) -> str:
+        return re.sub(r"\n## Sources\s*\n(?:.|\n)*\Z", "", str(content or "").rstrip(), flags=re.IGNORECASE)
+
+    def _append_sources_section(self, content: str, source_rows: list[sqlite3.Row | dict[str, Any]]) -> str:
+        normalized_content = self._strip_sources_section(content)
+        items: list[str] = []
+        for row in source_rows:
+            title = str(row["title"] or row["canonical_uri"] or "Source").strip()
+            canonical_uri = str(row["canonical_uri"] or "").strip()
+            entry = f"- [{title}]({canonical_uri})" if canonical_uri else f"- {title}"
+            if entry not in items:
+                items.append(entry)
+        if not items:
+            return normalized_content.strip()
+        return (
+            normalized_content.rstrip()
+            + "\n\n## Sources\n"
+            + "\n".join(items)
+        ).strip()
+
+    @staticmethod
+    def _extract_json_value(text: str) -> Any:
+        compact = str(text or "").strip()
+        if not compact:
+            raise ValueError("No JSON payload returned")
+        fenced_match = re.search(r"```(?:json)?\s*(.+?)\s*```", compact, flags=re.DOTALL | re.IGNORECASE)
+        if fenced_match:
+            compact = fenced_match.group(1).strip()
+        decoder = json.JSONDecoder()
+        for index, char in enumerate(compact):
+            if char not in "{[":
+                continue
+            try:
+                value, _end = decoder.raw_decode(compact[index:])
+                return value
+            except Exception:
+                continue
+        return json.loads(compact)
+
+    def _load_source_rows_by_ids(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        source_ids: list[str],
+    ) -> list[sqlite3.Row]:
+        normalized_ids = [str(source_id or "").strip() for source_id in source_ids if str(source_id or "").strip()]
+        if not normalized_ids:
+            return []
+        placeholders = ",".join("?" for _ in normalized_ids)
+        return connection.execute(
+            f"""
+            SELECT *
+            FROM sources
+            WHERE workspace_id=? AND id IN ({placeholders})
+            ORDER BY updated_at DESC, created_at DESC
+            """,
+            [workspace_id, *normalized_ids],
+        ).fetchall()
+
+    def _load_maintainable_pages_catalog(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+    ) -> list[dict[str, Any]]:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM pages
+            WHERE workspace_id=?
+              AND page_type NOT IN ('home', 'hub', 'index', 'log')
+            ORDER BY updated_at DESC, sort_order ASC, title ASC
+            """,
+            (workspace_id,),
+        ).fetchall()
+        return [self._row_to_page_summary(row) for row in rows]
+
+    def _find_existing_page_match(
+        self,
+        pages: list[dict[str, Any]],
+        *,
+        title: str,
+        aliases: list[str] | None = None,
+        page_type: str | None = None,
+    ) -> dict[str, Any] | None:
+        desired_key = self._normalize_page_key(title)
+        alias_keys = {self._normalize_page_key(item) for item in list(aliases or []) if str(item or "").strip()}
+        if desired_key:
+            alias_keys.add(desired_key)
+        normalized_page_type = self._normalize_page_type(page_type or "", fallback="")
+        for page in pages:
+            if normalized_page_type and page.get("page_type") == "source_summary" and normalized_page_type != "source_summary":
+                continue
+            page_keys = {
+                self._normalize_page_key(str(page.get("title") or "")),
+                *[self._normalize_page_key(item) for item in list(page.get("aliases") or [])],
+            }
+            if alias_keys & page_keys:
+                return page
+        return None
+
+    def _plan_source_page_updates(
+        self,
+        *,
+        source_row: sqlite3.Row,
+        source_material: str,
+        existing_pages: list[dict[str, Any]],
+        generation_settings: dict[str, Any],
+    ) -> dict[str, Any]:
+        catalog_lines = [
+            f"- {page['title']} | type={page.get('page_type') or 'topic'} | summary={page.get('summary') or ''}"
+            for page in existing_pages[:60]
+        ]
+        user_prompt = "\n\n".join(
+            [
+                "Plan how this new source should maintain the wiki.",
+                "Return strict JSON only. Do not include markdown fences or commentary.",
+                "The JSON schema is:",
+                json.dumps(
+                    {
+                        "page_updates": [
+                            {
+                                "title": "Page title",
+                                "page_type": "entity|concept|topic|timeline|comparison",
+                                "action": "create|update",
+                                "reason": "Why this page should be touched",
+                                "summary": "One-line description of the page after this ingest",
+                                "aliases": ["Optional alternate titles"],
+                            }
+                        ],
+                        "contradictions": ["Important tension or contradiction introduced by the source"],
+                        "open_questions": ["Question that remains unresolved after reading the source"],
+                    },
+                    ensure_ascii=True,
+                ),
+                "Rules:",
+                "- Choose only pages materially worth creating or updating.",
+                "- Prefer 2 to 8 page updates.",
+                "- Reuse existing pages when a topic clearly overlaps the current wiki.",
+                "- Use page_type values only from entity, concept, topic, timeline, comparison.",
+                f"Source title: {source_row['title'] or source_row['canonical_uri'] or 'Untitled source'}",
+                f"Source canonical URI: {source_row['canonical_uri'] or ''}",
+                "Existing wiki pages:",
+                "\n".join(catalog_lines) if catalog_lines else "(none)",
+                "Source material:",
+                source_material,
+            ]
+        )
+        try:
+            raw_plan = self._call_generation_provider(
+                settings=generation_settings,
+                system_prompt=(
+                    "You are a wiki ingest planner. "
+                    "Given a new source and the current wiki catalog, decide which durable pages should be created or updated. "
+                    "Return strict JSON only."
+                ),
+                user_prompt=user_prompt,
+                max_tokens=1200,
+            )
+            plan = self._extract_json_value(raw_plan)
+        except Exception:
+            logger.warning("Failed to generate structured wiki ingest plan; using fallback plan", exc_info=True)
+            plan = {}
+        raw_updates = list(plan.get("page_updates") or []) if isinstance(plan, dict) else []
+        page_updates: list[dict[str, Any]] = []
+        seen_titles: set[str] = set()
+        for item in raw_updates:
+            if not isinstance(item, dict):
+                continue
+            title = self._normalize_page_title(str(item.get("title") or ""))
+            key = self._normalize_page_key(title)
+            if not key or key in seen_titles:
+                continue
+            seen_titles.add(key)
+            page_updates.append(
+                {
+                    "title": title,
+                    "page_type": self._normalize_page_type(item.get("page_type"), fallback="topic"),
+                    "action": str(item.get("action") or "update").strip().lower() or "update",
+                    "reason": str(item.get("reason") or "").strip(),
+                    "summary": str(item.get("summary") or "").strip(),
+                    "aliases": self._decode_string_list(item.get("aliases")),
+                }
+            )
+        return {
+            "page_updates": page_updates,
+            "contradictions": self._decode_string_list(plan.get("contradictions") if isinstance(plan, dict) else []),
+            "open_questions": self._decode_string_list(plan.get("open_questions") if isinstance(plan, dict) else []),
+        }
 
     def _build_generation_settings(
         self,
@@ -593,27 +975,26 @@ class KnowledgeStore:
 
         user_prompt = "\n\n".join(
             [
-                "Create a substantial markdown wiki page for this source.",
+                "Create the source summary page for this source inside a persistent wiki.",
                 f"Preferred title: {source_title}",
                 f"Canonical URI: {source_row['canonical_uri'] or ''}",
-                "Treat this as part of a long-lived wiki, not a disposable answer.",
-                "The page should compile durable knowledge from the source so future queries do not have to rediscover it from raw documents.",
+                "This page should summarize the source itself while also surfacing the entities, concepts, claims, timelines, comparisons, contradictions, and open questions that should propagate into the wider wiki.",
                 "Write explicit markdown headings.",
                 "Start with `## Overview`, then `## Key Details`, then `## Important Notes`.",
-                "If the source supports it, include concise subsections or bullets for entities, concepts, timelines, claims, comparisons, or mechanisms.",
-                "Surface tensions, contradictions, caveats, or changes over time when the source contains them.",
-                "Make the page rich enough to stand on its own as a useful reference, not just a short summary.",
+                "Include concise bullets or subsections for important entities, concepts, timelines, claims, comparisons, contradictions, and open questions when supported by the source.",
                 "Do not use the raw URL or file path as the page title if a better topic/title can be inferred from the text.",
-                "When another likely wiki topic is clearly referenced, mention it naturally so it can be linked later.",
                 "Source material:",
                 source_material,
             ]
         )
-        content = self._call_generation_provider(
-            settings=generation_settings,
-            system_prompt=self._wiki_system_prompt(),
-            user_prompt=user_prompt,
-            max_tokens=1400,
+        content = self._append_sources_section(
+            self._call_generation_provider(
+                settings=generation_settings,
+                system_prompt=self._wiki_system_prompt(),
+                user_prompt=user_prompt,
+                max_tokens=1600,
+            ),
+            [source_row],
         )
         summary = self._extract_summary_markdown(content)
         return {
@@ -622,28 +1003,116 @@ class KnowledgeStore:
             "summary": summary,
             "content": content,
             "source_id": str(source_row["id"]),
+            "source_ids": [str(source_row["id"])],
+            "aliases": [],
+            "page_type": "source_summary",
             "sort_order": int(sort_order),
+        }
+
+    def _generate_maintained_page_payload(
+        self,
+        *,
+        page_title: str,
+        page_type: str,
+        page_plan: dict[str, Any],
+        source_row: sqlite3.Row,
+        source_material: str,
+        generation_settings: dict[str, Any],
+        existing_page: dict[str, Any] | None,
+        existing_page_source_rows: list[sqlite3.Row],
+        related_pages: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        related_page_lines = [
+            f"- {page['title']} | type={page.get('page_type') or 'topic'} | summary={page.get('summary') or ''}"
+            for page in related_pages[:12]
+            if self._normalize_page_key(page.get("title")) != self._normalize_page_key(page_title)
+        ]
+        prompt_lines = [
+            f"Maintain the markdown wiki page `{page_title}`.",
+            f"Page type: {page_type}",
+            f"Reason to touch this page now: {page_plan.get('reason') or 'The new source materially affects this topic.'}",
+            f"Target page summary: {page_plan.get('summary') or ''}",
+            f"New source title: {source_row['title'] or source_row['canonical_uri'] or ''}",
+            f"New source canonical URI: {source_row['canonical_uri'] or ''}",
+            "Treat this as a persistent knowledge-base page. Preserve useful existing knowledge, integrate the new source carefully, and explicitly note contradictions or unresolved questions when the source introduces them.",
+            "Write markdown only. Prefer durable structure over chatty prose.",
+            "Use headings such as `## Overview`, `## Key Details`, and `## Important Notes`, then add more sections if the material benefits from them.",
+            "Mention related wiki topics naturally when warranted so internal links can be added later.",
+            "Do not invent facts.",
+        ]
+        if existing_page and str(existing_page.get("content") or "").strip():
+            prompt_lines.extend(
+                [
+                    "Existing page content:",
+                    str(existing_page.get("content") or ""),
+                ]
+            )
+        if existing_page_source_rows:
+            prompt_lines.extend(
+                [
+                    "Existing page sources:",
+                    "\n".join(
+                        f"- {row['title'] or row['canonical_uri'] or 'Source'} ({row['canonical_uri'] or ''})"
+                        for row in existing_page_source_rows
+                    ),
+                ]
+            )
+        if related_page_lines:
+            prompt_lines.extend(
+                [
+                    "Related wiki pages already present:",
+                    "\n".join(related_page_lines),
+                ]
+            )
+        prompt_lines.extend(
+            [
+                "New source material:",
+                source_material,
+            ]
+        )
+        content = self._call_generation_provider(
+            settings=generation_settings,
+            system_prompt=self._wiki_system_prompt(),
+            user_prompt="\n\n".join(prompt_lines),
+            max_tokens=1800,
+        )
+        source_ids = self._decode_string_list(existing_page.get("source_ids") if existing_page else [])
+        source_id = str(source_row["id"])
+        if source_id not in source_ids:
+            source_ids.append(source_id)
+        content = self._append_sources_section(content, [*existing_page_source_rows, source_row])
+        summary = self._extract_summary_markdown(content)
+        return {
+            "title": page_title,
+            "slug": self._slugify(page_title),
+            "summary": summary,
+            "content": content,
+            "source_id": "",
+            "source_ids": source_ids,
+            "aliases": self._decode_string_list(page_plan.get("aliases")),
+            "page_type": page_type,
         }
 
     def _generate_home_page_payload(
         self,
-        child_pages: list[dict[str, Any]],
+        all_pages: list[dict[str, Any]],
         *,
         generation_settings: dict[str, Any],
     ) -> dict[str, str]:
-        child_summaries = [
-            f"- {page['title']}: {page.get('summary') or 'Generated wiki page'}"
-            for page in child_pages
+        page_summaries = [
+            f"- {page['title']} | type={page.get('page_type') or 'topic'} | summary={page.get('summary') or 'Generated wiki page'}"
+            for page in all_pages
+            if page.get("page_type") not in {"home", "hub", "index", "log"}
         ]
         home_prompt = "\n\n".join(
             [
-                "Create a markdown homepage for this knowledge wiki.",
+                "Create or refresh the homepage for this knowledge wiki.",
                 "Treat the wiki as a persistent, compounding knowledge artifact rather than a temporary retrieval layer.",
                 "The homepage should orient the reader, summarize the strongest themes across pages, and make the wiki feel like a maintained knowledge base.",
                 "Include clear navigation, a synthesis of the current collection, and mention where important questions or tensions remain open.",
                 "Do not reduce the homepage to a thin introduction; it should be a substantive overview of what the collection currently knows.",
-                "Available child pages:",
-                "\n".join(child_summaries),
+                "Pages currently in the wiki:",
+                "\n".join(page_summaries) if page_summaries else "(none)",
             ]
         )
         home_content = self._call_generation_provider(
@@ -653,11 +1122,93 @@ class KnowledgeStore:
             max_tokens=1400,
         )
         return {
-            "title": "Knowledge wiki",
-            "slug": "knowledge-wiki",
+            "title": "Knowledge",
+            "slug": "knowledge",
             "summary": self._extract_summary_markdown(home_content),
             "content": home_content,
         }
+
+    def _render_hub_page_content(self, hub_title: str, child_pages: list[dict[str, Any]]) -> str:
+        lines = [f"# {hub_title}", "", f"Pages in this section: {len(child_pages)}", ""]
+        if not child_pages:
+            lines.append("No pages yet.")
+        else:
+            for page in child_pages:
+                lines.append(
+                    f"- [{page['title']}](/knowledge?page={page['id']})"
+                    + (f" - {page.get('summary')}" if str(page.get("summary") or "").strip() else "")
+                )
+        return "\n".join(lines).strip()
+
+    def _render_index_page_content(self, pages: list[dict[str, Any]]) -> str:
+        sections: list[str] = ["# Index", "", "A catalog of the current wiki pages grouped by type.", ""]
+        page_type_titles = {
+            "source_summary": "Sources",
+            "entity": "Entities",
+            "concept": "Concepts",
+            "topic": "Topics",
+            "timeline": "Timelines",
+            "comparison": "Comparisons",
+        }
+        for page_type, section_title in page_type_titles.items():
+            items = [page for page in pages if page.get("page_type") == page_type]
+            if not items:
+                continue
+            sections.extend([f"## {section_title}", ""])
+            for page in items:
+                line = f"- [{page['title']}](/knowledge?page={page['id']})"
+                if str(page.get("summary") or "").strip():
+                    line += f" - {page['summary']}"
+                sections.append(line)
+            sections.append("")
+        return "\n".join(section for section in sections if section is not None).strip()
+
+    def _render_log_page_content(self, entries: list[sqlite3.Row]) -> str:
+        lines = ["# Log", "", "Chronological record of wiki maintenance activity.", ""]
+        if not entries:
+            lines.append("No log entries yet.")
+            return "\n".join(lines).strip()
+        for entry in entries:
+            lines.extend(
+                [
+                    f"## [{self._format_event_time(entry['created_at'])}] {entry['event_type']} | {entry['title']}",
+                    str(entry["details"] or "").strip() or "- No details recorded.",
+                    "",
+                ]
+            )
+        return "\n".join(lines).strip()
+
+    def _append_log_entry(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        event_type: str,
+        title: str,
+        source_id: str,
+        job_id: str,
+        details: str,
+        touched_page_ids: list[str],
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO wiki_log_entries (
+                id, workspace_id, event_type, title, source_id, job_id, details, touched_page_ids_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                self._new_id("log"),
+                workspace_id,
+                event_type,
+                title,
+                source_id,
+                job_id,
+                details.strip(),
+                self._encode_string_list(touched_page_ids),
+                self._now(),
+            ),
+        )
 
     def _link_page_references_in_text(
         self,
@@ -717,6 +1268,670 @@ class KnowledgeStore:
             )
             next_pages.append(next_page)
         return next_pages
+
+    def _load_page_payloads(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+    ) -> list[dict[str, Any]]:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM pages
+            WHERE workspace_id=?
+            ORDER BY is_home DESC, sort_order ASC, title ASC
+            """,
+            (workspace_id,),
+        ).fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            item = self._row_to_page_summary(row)
+            item["content"] = row["content"] or ""
+            items.append(item)
+        return items
+
+    def _upsert_page_record(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        payload: dict[str, Any],
+        parent_page_id: str | None,
+        is_home: bool = False,
+        job_id: str = "",
+    ) -> dict[str, Any]:
+        slug = str(payload.get("slug") or self._slugify(str(payload.get("title") or ""))).strip()
+        existing_row = connection.execute(
+            """
+            SELECT *
+            FROM pages
+            WHERE workspace_id=? AND slug=?
+            ORDER BY is_home DESC, updated_at DESC
+            LIMIT 1
+            """,
+            (workspace_id, slug),
+        ).fetchone()
+        now = self._now()
+        page_type = self._normalize_page_type(
+            payload.get("page_type"),
+            fallback="home" if is_home else "topic",
+        )
+        source_ids = self._decode_string_list(payload.get("source_ids"))
+        if existing_row is not None:
+            existing_source_ids = self._decode_string_list(existing_row["source_ids_json"])
+            for source_id in existing_source_ids:
+                if source_id not in source_ids:
+                    source_ids.append(source_id)
+        source_id = str(payload.get("source_id") or "").strip()
+        if not source_id and page_type == "source_summary":
+            source_id = source_ids[0] if source_ids else ""
+        aliases = self._decode_string_list(payload.get("aliases"))
+        if existing_row is not None:
+            existing_aliases = self._decode_string_list(existing_row["aliases_json"])
+            for alias in existing_aliases:
+                if alias not in aliases:
+                    aliases.append(alias)
+        sort_order = int(
+            payload.get("sort_order")
+            if payload.get("sort_order") is not None
+            else (existing_row["sort_order"] if existing_row is not None else self._page_sort_order(page_type))
+        )
+        title = self._normalize_page_title(str(payload.get("title") or existing_row["title"] if existing_row is not None else "Untitled page"))
+        summary = str(payload.get("summary") or "").strip()
+        content = str(payload.get("content") or "").strip()
+        parent_value = None if is_home else parent_page_id
+        if existing_row is None:
+            page_id = str(payload.get("id") or self._new_id("page"))
+            connection.execute(
+                """
+                INSERT INTO pages (
+                    id, workspace_id, parent_page_id, source_id, page_type, source_ids_json, aliases_json,
+                    updated_from_job_id, title, slug, summary, content, sort_order, is_home, status, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)
+                """,
+                (
+                    page_id,
+                    workspace_id,
+                    parent_value,
+                    source_id,
+                    page_type,
+                    self._encode_string_list(source_ids),
+                    self._encode_string_list(aliases),
+                    str(job_id or ""),
+                    title,
+                    slug,
+                    summary,
+                    content,
+                    sort_order,
+                    1 if is_home else 0,
+                    now,
+                    now,
+                ),
+            )
+        else:
+            page_id = str(existing_row["id"])
+            connection.execute(
+                """
+                UPDATE pages
+                SET parent_page_id=?, source_id=?, page_type=?, source_ids_json=?, aliases_json=?,
+                    updated_from_job_id=?, title=?, slug=?, summary=?, content=?, sort_order=?, is_home=?,
+                    status='ready', updated_at=?
+                WHERE id=?
+                """,
+                (
+                    parent_value,
+                    source_id,
+                    page_type,
+                    self._encode_string_list(source_ids),
+                    self._encode_string_list(aliases),
+                    str(job_id or ""),
+                    title,
+                    slug,
+                    summary,
+                    content,
+                    sort_order,
+                    1 if is_home else 0,
+                    now,
+                    page_id,
+                ),
+            )
+        row = connection.execute("SELECT * FROM pages WHERE id=?", (page_id,)).fetchone()
+        item = self._row_to_page_summary(row)
+        item["content"] = row["content"] or ""
+        return item
+
+    def _ensure_wiki_scaffold(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        job_id: str,
+    ) -> dict[str, Any]:
+        home = self._upsert_page_record(
+            connection,
+            workspace_id=workspace_id,
+            payload={
+                "title": "Knowledge",
+                "slug": "knowledge",
+                "summary": "",
+                "content": "# Knowledge",
+                "page_type": "home",
+                "sort_order": 0,
+            },
+            parent_page_id=None,
+            is_home=True,
+            job_id=job_id,
+        )
+        hubs: dict[str, dict[str, Any]] = {}
+        for config in _HUB_PAGE_CONFIGS:
+            hubs[str(config["slug"])] = self._upsert_page_record(
+                connection,
+                workspace_id=workspace_id,
+                payload={
+                    "title": config["title"],
+                    "slug": config["slug"],
+                    "summary": "",
+                    "content": f"# {config['title']}",
+                    "page_type": config["page_type"],
+                    "sort_order": int(config["sort_order"]),
+                },
+                parent_page_id=str(home["id"]),
+                job_id=job_id,
+            )
+        special_pages: dict[str, dict[str, Any]] = {}
+        for config in _SPECIAL_PAGE_CONFIGS:
+            special_pages[str(config["slug"])] = self._upsert_page_record(
+                connection,
+                workspace_id=workspace_id,
+                payload={
+                    "title": config["title"],
+                    "slug": config["slug"],
+                    "summary": "",
+                    "content": f"# {config['title']}",
+                    "page_type": config["page_type"],
+                    "sort_order": int(config["sort_order"]),
+                },
+                parent_page_id=str(home["id"]),
+                job_id=job_id,
+            )
+        return {"home": home, "hubs": hubs, "special_pages": special_pages}
+
+    def _refresh_special_pages(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        generation_settings: dict[str, Any],
+        scaffold: dict[str, Any],
+        job_id: str,
+    ) -> None:
+        all_pages = self._load_page_payloads(connection, workspace_id=workspace_id)
+        home_page = dict(scaffold["home"])
+        hub_pages = dict(scaffold["hubs"])
+        special_pages = dict(scaffold["special_pages"])
+        pages_by_type: dict[str, list[dict[str, Any]]] = {}
+        for page in all_pages:
+            page_type = str(page.get("page_type") or "topic")
+            items = pages_by_type.get(page_type) or []
+            items.append(page)
+            pages_by_type[page_type] = items
+
+        for config in _HUB_PAGE_CONFIGS:
+            slug = str(config["slug"])
+            child_page_type = str(config["child_page_type"])
+            hub_page = hub_pages[slug]
+            child_pages = sorted(
+                pages_by_type.get(child_page_type) or [],
+                key=lambda page: (int(page.get("sort_order") or 0), str(page.get("title") or "").lower()),
+            )
+            self._upsert_page_record(
+                connection,
+                workspace_id=workspace_id,
+                payload={
+                    "id": hub_page["id"],
+                    "title": hub_page["title"],
+                    "slug": hub_page["slug"],
+                    "summary": f"{len(child_pages)} pages",
+                    "content": self._render_hub_page_content(hub_page["title"], child_pages),
+                    "page_type": "hub",
+                    "sort_order": hub_page["sort_order"],
+                },
+                parent_page_id=str(home_page["id"]),
+                job_id=job_id,
+            )
+
+        maintainable_pages = [
+            page for page in self._load_page_payloads(connection, workspace_id=workspace_id)
+            if page.get("page_type") not in {"home", "hub", "index", "log"}
+        ]
+        index_page = special_pages["index"]
+        self._upsert_page_record(
+            connection,
+            workspace_id=workspace_id,
+            payload={
+                "id": index_page["id"],
+                "title": index_page["title"],
+                "slug": index_page["slug"],
+                "summary": f"{len(maintainable_pages)} pages indexed",
+                "content": self._render_index_page_content(maintainable_pages),
+                "page_type": "index",
+                "sort_order": index_page["sort_order"],
+            },
+            parent_page_id=str(home_page["id"]),
+            job_id=job_id,
+        )
+        log_entries = connection.execute(
+            """
+            SELECT *
+            FROM wiki_log_entries
+            WHERE workspace_id=?
+            ORDER BY created_at DESC
+            LIMIT 200
+            """,
+            (workspace_id,),
+        ).fetchall()
+        log_page = special_pages["log"]
+        self._upsert_page_record(
+            connection,
+            workspace_id=workspace_id,
+            payload={
+                "id": log_page["id"],
+                "title": log_page["title"],
+                "slug": log_page["slug"],
+                "summary": f"{len(log_entries)} recent events",
+                "content": self._render_log_page_content(log_entries),
+                "page_type": "log",
+                "sort_order": log_page["sort_order"],
+            },
+            parent_page_id=str(home_page["id"]),
+            job_id=job_id,
+        )
+        refreshed_pages = self._load_page_payloads(connection, workspace_id=workspace_id)
+        home_payload = self._generate_home_page_payload(refreshed_pages, generation_settings=generation_settings)
+        self._upsert_page_record(
+            connection,
+            workspace_id=workspace_id,
+            payload={
+                "id": home_page["id"],
+                "title": home_payload["title"],
+                "slug": home_payload["slug"],
+                "summary": home_payload["summary"],
+                "content": home_payload["content"],
+                "page_type": "home",
+                "sort_order": 0,
+            },
+            parent_page_id=None,
+            is_home=True,
+            job_id=job_id,
+        )
+
+    def _relink_all_pages(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+    ) -> None:
+        all_pages = self._load_page_payloads(connection, workspace_id=workspace_id)
+        linked_pages = self._apply_page_cross_links(all_pages)
+        now = self._now()
+        for page in linked_pages:
+            current = next((item for item in all_pages if str(item["id"]) == str(page["id"])), None)
+            if current is None:
+                continue
+            if str(current.get("content") or "") == str(page.get("content") or ""):
+                continue
+            connection.execute(
+                """
+                UPDATE pages
+                SET content=?, summary=?, updated_at=?
+                WHERE id=?
+                """,
+                (
+                    str(page.get("content") or ""),
+                    self._extract_summary_markdown(str(page.get("content") or "")),
+                    now,
+                    str(page["id"]),
+                ),
+            )
+
+    @staticmethod
+    def _extract_internal_link_targets(content: str) -> list[str]:
+        return [
+            unquote(match.group(1)).strip()
+            for match in re.finditer(r"/knowledge\?page=([^)\s&#]+)", str(content or ""))
+            if unquote(match.group(1)).strip()
+        ]
+
+    def _plan_lint_followups(
+        self,
+        *,
+        pages: list[dict[str, Any]],
+        heuristic_findings: dict[str, list[str]],
+        generation_settings: dict[str, Any],
+    ) -> dict[str, Any]:
+        page_lines = [
+            f"- {page['title']} | type={page.get('page_type') or 'topic'} | summary={page.get('summary') or ''}"
+            for page in pages[:60]
+        ]
+        heuristic_lines = [
+            f"{key}: {', '.join(values[:8]) if values else '(none)'}"
+            for key, values in heuristic_findings.items()
+        ]
+        user_prompt = "\n\n".join(
+            [
+                "Lint this persistent markdown wiki and suggest the highest-value maintenance follow-ups.",
+                "Return strict JSON only. Do not include markdown fences or commentary.",
+                "The JSON schema is:",
+                json.dumps(
+                    {
+                        "summary": "Two concise sentences about the current wiki health.",
+                        "contradiction_candidates": ["Potential contradiction or tension worth checking"],
+                        "missing_pages": ["Important page that likely should exist"],
+                        "data_gaps": ["Gap that could be closed with more sources or clarification"],
+                    },
+                    ensure_ascii=True,
+                ),
+                "Rules:",
+                "- Focus on durable maintenance work, not stylistic edits.",
+                "- Prefer 0 to 5 items per list.",
+                "- Only name pages or gaps that are materially justified by the current wiki state.",
+                "Current wiki pages:",
+                "\n".join(page_lines) if page_lines else "(none)",
+                "Heuristic findings:",
+                "\n".join(heuristic_lines) if heuristic_lines else "(none)",
+            ]
+        )
+        try:
+            raw_plan = self._call_generation_provider(
+                settings=generation_settings,
+                system_prompt=(
+                    "You are a wiki maintenance reviewer. "
+                    "Given a current wiki catalog and heuristic lint findings, identify the most important contradictions, "
+                    "missing pages, and data gaps. Return strict JSON only."
+                ),
+                user_prompt=user_prompt,
+                max_tokens=1000,
+            )
+            plan = self._extract_json_value(raw_plan)
+        except Exception:
+            logger.warning("Failed to generate wiki lint follow-ups; using heuristic-only report", exc_info=True)
+            plan = {}
+        return {
+            "summary": str(plan.get("summary") or "").strip(),
+            "contradiction_candidates": self._decode_string_list(
+                plan.get("contradiction_candidates") if isinstance(plan, dict) else []
+            ),
+            "missing_pages": self._decode_string_list(plan.get("missing_pages") if isinstance(plan, dict) else []),
+            "data_gaps": self._decode_string_list(plan.get("data_gaps") if isinstance(plan, dict) else []),
+        }
+
+    def _run_wiki_lint(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        generation_settings: dict[str, Any],
+    ) -> dict[str, Any]:
+        maintainable_pages = [
+            page
+            for page in self._load_page_payloads(connection, workspace_id=workspace_id)
+            if page.get("page_type") not in {"home", "hub", "index", "log"}
+        ]
+        if not maintainable_pages:
+            return {
+                "summary": "The wiki has no maintainable pages yet. Ingest sources and generate the wiki before running lint.",
+                "orphan_pages": [],
+                "stale_pages": [],
+                "missing_cross_references": [],
+                "broken_links": [],
+                "missing_provenance": [],
+                "contradiction_candidates": [],
+                "missing_pages": [],
+                "data_gaps": [],
+                "report_markdown": "# Wiki Maintenance Check\n\nThe wiki has no maintainable pages yet.",
+            }
+
+        page_by_id = {str(page["id"]): page for page in maintainable_pages}
+        inbound_counts = {page_id: 0 for page_id in page_by_id}
+        broken_links: list[str] = []
+        for page in maintainable_pages:
+            seen_targets: set[str] = set()
+            for target_id in self._extract_internal_link_targets(str(page.get("content") or "")):
+                if target_id in seen_targets:
+                    continue
+                seen_targets.add(target_id)
+                if target_id in inbound_counts:
+                    inbound_counts[target_id] += 1
+                elif target_id not in broken_links:
+                    broken_links.append(target_id)
+
+        orphan_pages = [
+            str(page["title"])
+            for page in maintainable_pages
+            if page.get("page_type") != "source_summary" and inbound_counts.get(str(page["id"]), 0) == 0
+        ]
+
+        all_source_ids: list[str] = []
+        for page in maintainable_pages:
+            for source_id in self._decode_string_list(page.get("source_ids")):
+                if source_id not in all_source_ids:
+                    all_source_ids.append(source_id)
+        source_rows_by_id = {
+            str(row["id"]): row
+            for row in self._load_source_rows_by_ids(
+                connection,
+                workspace_id=workspace_id,
+                source_ids=all_source_ids,
+            )
+        }
+
+        stale_pages: list[str] = []
+        missing_provenance: list[str] = []
+        for page in maintainable_pages:
+            source_ids = self._decode_string_list(page.get("source_ids"))
+            if not source_ids:
+                if page.get("page_type") != "source_summary":
+                    missing_provenance.append(str(page["title"]))
+                continue
+            linked_sources = [source_rows_by_id[source_id] for source_id in source_ids if source_id in source_rows_by_id]
+            if not linked_sources:
+                missing_provenance.append(f"{page['title']} (missing source records)")
+                continue
+            latest_source = max(linked_sources, key=lambda row: float(row["updated_at"] or 0))
+            if float(latest_source["updated_at"] or 0) > float(page.get("updated_at") or 0) + 5:
+                latest_source_title = str(latest_source["title"] or latest_source["canonical_uri"] or latest_source["id"])
+                stale_pages.append(f"{page['title']} (newer linked source: {latest_source_title})")
+
+        missing_cross_references: list[str] = []
+        for page in maintainable_pages:
+            content = str(page.get("content") or "")
+            linked_target_ids = set(self._extract_internal_link_targets(content))
+            unlinked_titles: list[str] = []
+            for other_page in maintainable_pages:
+                if str(other_page["id"]) == str(page["id"]):
+                    continue
+                other_title = str(other_page.get("title") or "").strip()
+                if len(other_title) < 4 or str(other_page["id"]) in linked_target_ids:
+                    continue
+                if re.search(
+                    rf"(?<!\[)(?<!\]\()(?<!/knowledge\?page=)(?<![\w/]){re.escape(other_title)}(?![\w])(?!\]\()",
+                    content,
+                ):
+                    unlinked_titles.append(other_title)
+            if unlinked_titles:
+                missing_cross_references.append(
+                    f"{page['title']} -> {', '.join(unlinked_titles[:3])}"
+                )
+
+        heuristic_findings = {
+            "orphan_pages": orphan_pages,
+            "stale_pages": stale_pages,
+            "missing_cross_references": missing_cross_references,
+            "broken_links": broken_links,
+            "missing_provenance": missing_provenance,
+        }
+        llm_followups = self._plan_lint_followups(
+            pages=maintainable_pages,
+            heuristic_findings=heuristic_findings,
+            generation_settings=generation_settings,
+        )
+        summary = (
+            llm_followups["summary"]
+            or f"The wiki currently has {len(orphan_pages)} orphan pages, {len(stale_pages)} stale pages, "
+            f"and {len(missing_cross_references)} pages with likely missing cross-references."
+        )
+
+        sections = ["# Wiki Maintenance Check", "", "## Summary", "", summary.strip(), ""]
+        report_sections = [
+            ("Orphan Pages", orphan_pages),
+            ("Stale Pages", stale_pages),
+            ("Missing Cross-References", missing_cross_references),
+            ("Broken Internal Links", broken_links),
+            ("Missing Provenance", missing_provenance),
+            ("Contradiction Candidates", llm_followups["contradiction_candidates"]),
+            ("Missing Pages", llm_followups["missing_pages"]),
+            ("Data Gaps", llm_followups["data_gaps"]),
+        ]
+        for heading, items in report_sections:
+            sections.extend([f"## {heading}", ""])
+            if items:
+                sections.extend([f"- {item}" for item in items])
+            else:
+                sections.append("- None identified.")
+            sections.append("")
+
+        return {
+            "summary": summary.strip(),
+            "orphan_pages": orphan_pages,
+            "stale_pages": stale_pages,
+            "missing_cross_references": missing_cross_references,
+            "broken_links": broken_links,
+            "missing_provenance": missing_provenance,
+            "contradiction_candidates": llm_followups["contradiction_candidates"],
+            "missing_pages": llm_followups["missing_pages"],
+            "data_gaps": llm_followups["data_gaps"],
+            "report_markdown": "\n".join(sections).strip(),
+        }
+
+    def _maintain_source_in_wiki(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        source_row: sqlite3.Row,
+        generation_settings: dict[str, Any],
+        scaffold: dict[str, Any],
+        job_id: str,
+        sort_order: int,
+    ) -> dict[str, Any]:
+        source_material = self._collect_source_material(
+            connection,
+            workspace_id=workspace_id,
+            source_id=str(source_row["id"]),
+        )
+        if not source_material:
+            raise ValueError("No readable source material was available for wiki maintenance")
+
+        source_page_payload = self._generate_source_page_payload(
+            connection,
+            workspace_id=workspace_id,
+            source_row=source_row,
+            generation_settings=generation_settings,
+            sort_order=sort_order,
+        )
+        if source_page_payload is None:
+            raise ValueError("Failed to build source summary page")
+        source_summary_page = self._upsert_page_record(
+            connection,
+            workspace_id=workspace_id,
+            payload=source_page_payload,
+            parent_page_id=str(scaffold["hubs"]["sources"]["id"]),
+            job_id=job_id,
+        )
+
+        existing_pages = self._load_maintainable_pages_catalog(connection, workspace_id=workspace_id)
+        planner_output = self._plan_source_page_updates(
+            source_row=source_row,
+            source_material=source_material,
+            existing_pages=existing_pages,
+            generation_settings=generation_settings,
+        )
+        touched_pages: list[dict[str, Any]] = [source_summary_page]
+        for page_plan in planner_output["page_updates"]:
+            existing_page = self._find_existing_page_match(
+                existing_pages,
+                title=str(page_plan.get("title") or ""),
+                aliases=self._decode_string_list(page_plan.get("aliases")),
+                page_type=str(page_plan.get("page_type") or "topic"),
+            )
+            existing_page_source_rows = self._load_source_rows_by_ids(
+                connection,
+                workspace_id=workspace_id,
+                source_ids=self._decode_string_list(existing_page.get("source_ids")) if existing_page else [],
+            )
+            page_type = self._normalize_page_type(page_plan.get("page_type"), fallback="topic")
+            maintained_payload = self._generate_maintained_page_payload(
+                page_title=self._normalize_page_title(str(page_plan.get("title") or "")),
+                page_type=page_type,
+                page_plan=page_plan,
+                source_row=source_row,
+                source_material=source_material,
+                generation_settings=generation_settings,
+                existing_page=existing_page,
+                existing_page_source_rows=existing_page_source_rows,
+                related_pages=existing_pages,
+            )
+            parent_slug = self._page_parent_slug(page_type)
+            parent_page_id = str(scaffold["hubs"][parent_slug]["id"]) if parent_slug and parent_slug in scaffold["hubs"] else str(scaffold["home"]["id"])
+            maintained_page = self._upsert_page_record(
+                connection,
+                workspace_id=workspace_id,
+                payload={
+                    **maintained_payload,
+                    "sort_order": self._page_sort_order(page_type, len(touched_pages)),
+                },
+                parent_page_id=parent_page_id,
+                job_id=job_id,
+            )
+            touched_pages.append(maintained_page)
+            existing_pages = [
+                page for page in existing_pages
+                if self._normalize_page_key(str(page.get("title") or "")) != self._normalize_page_key(maintained_page["title"])
+            ]
+            existing_pages.append(maintained_page)
+
+        contradiction_lines = [f"- {item}" for item in planner_output["contradictions"]]
+        question_lines = [f"- {item}" for item in planner_output["open_questions"]]
+        log_lines = [
+            f"- Source: [{source_row['title'] or source_row['canonical_uri'] or 'Source'}]({source_row['canonical_uri'] or ''})",
+            "- Pages touched:",
+            *[
+                f"  - [{page['title']}](/knowledge?page={page['id']})"
+                for page in touched_pages
+            ],
+        ]
+        if contradiction_lines:
+            log_lines.extend(["- Contradictions or tensions:", *[f"  {line}" for line in contradiction_lines]])
+        if question_lines:
+            log_lines.extend(["- Open questions:", *[f"  {line}" for line in question_lines]])
+        self._append_log_entry(
+            connection,
+            workspace_id=workspace_id,
+            event_type="ingest",
+            title=str(source_row["title"] or source_row["canonical_uri"] or "Source"),
+            source_id=str(source_row["id"]),
+            job_id=job_id,
+            details="\n".join(log_lines),
+            touched_page_ids=[str(page["id"]) for page in touched_pages],
+        )
+        return {
+            "source_summary_page_id": str(source_summary_page["id"]),
+            "touched_page_ids": [str(page["id"]) for page in touched_pages],
+            "contradictions": planner_output["contradictions"],
+            "open_questions": planner_output["open_questions"],
+        }
 
     def list_pages(self, workspace_root: str | Path | None = None) -> dict[str, Any]:
         context = self.workspace_context(workspace_root)
@@ -811,29 +2026,40 @@ class KnowledgeStore:
             )
             connection.commit()
 
-            generated_pages: list[dict[str, Any]] = []
+            scaffold = self._ensure_wiki_scaffold(
+                connection,
+                workspace_id=context.workspace_id,
+                job_id=job_id,
+            )
             total_sources = max(1, len(ready_sources))
+            last_source_summary_page_id = str(scaffold["home"]["id"])
 
             for index, source_row in enumerate(ready_sources, start=1):
-                generated_page = self._generate_source_page_payload(
+                maintenance_result = self._maintain_source_in_wiki(
                     connection,
                     workspace_id=context.workspace_id,
                     source_row=source_row,
                     generation_settings=generation_settings,
+                    scaffold=scaffold,
+                    job_id=job_id,
                     sort_order=index,
                 )
-                if generated_page is None:
-                    continue
-                generated_pages.append(generated_page)
+                last_source_summary_page_id = str(
+                    maintenance_result.get("source_summary_page_id") or last_source_summary_page_id
+                )
                 self._update_job(
                     connection,
                     job_id,
                     progress=0.15 + (0.55 * (index / total_sources)),
-                    summary=f"Generated {index}/{total_sources} source pages",
+                    summary=f"Maintained wiki from {index}/{total_sources} ready sources",
                 )
                 connection.commit()
 
-            if not generated_pages:
+            maintainable_pages = [
+                page for page in self._load_page_payloads(connection, workspace_id=context.workspace_id)
+                if page.get("page_type") not in {"home", "hub", "index", "log"}
+            ]
+            if not maintainable_pages:
                 self._update_job(
                     connection,
                     job_id,
@@ -846,89 +2072,33 @@ class KnowledgeStore:
                 connection.commit()
                 raise ValueError("No readable source material was available for wiki generation")
 
-            home_page = self._generate_home_page_payload(
-                generated_pages,
+            self._refresh_special_pages(
+                connection,
+                workspace_id=context.workspace_id,
                 generation_settings=generation_settings,
+                scaffold=scaffold,
+                job_id=job_id,
             )
-
-            connection.execute("DELETE FROM pages WHERE workspace_id=?", (context.workspace_id,))
-            now = self._now()
-            home_page_id = self._new_id("page")
-            home_page["id"] = home_page_id
-            home_page["parent_page_id"] = None
-            home_page["source_id"] = ""
-            home_page["sort_order"] = 0
-            home_page["is_home"] = True
-            home_page["status"] = "ready"
-            for page in generated_pages:
-                page["id"] = self._new_id("page")
-                page["parent_page_id"] = home_page_id
-                page["is_home"] = False
-                page["status"] = "ready"
-
-            linked_pages = self._apply_page_cross_links([home_page, *generated_pages])
-            linked_home_page = linked_pages[0]
-            linked_child_pages = linked_pages[1:]
-            connection.execute(
-                """
-                INSERT INTO pages (
-                    id, workspace_id, parent_page_id, source_id, title, slug, summary,
-                    content, sort_order, is_home, status, created_at, updated_at
-                )
-                VALUES (?, ?, NULL, '', ?, ?, ?, ?, 0, 1, 'ready', ?, ?)
-                """,
-                (
-                    home_page_id,
-                    context.workspace_id,
-                    linked_home_page["title"],
-                    linked_home_page["slug"],
-                    linked_home_page["summary"],
-                    linked_home_page["content"],
-                    now,
-                    now,
-                ),
-            )
-
-            for page in linked_child_pages:
-                connection.execute(
-                    """
-                    INSERT INTO pages (
-                        id, workspace_id, parent_page_id, source_id, title, slug, summary,
-                        content, sort_order, is_home, status, created_at, updated_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'ready', ?, ?)
-                    """,
-                    (
-                        page["id"],
-                        context.workspace_id,
-                        home_page_id,
-                        page["source_id"],
-                        page["title"],
-                        page["slug"],
-                        page["summary"],
-                        page["content"],
-                        page["sort_order"],
-                        now,
-                        now,
-                    ),
-                )
+            self._relink_all_pages(connection, workspace_id=context.workspace_id)
+            connection.commit()
 
             self._update_job(
                 connection,
                 job_id,
                 status="completed",
                 progress=1.0,
-                summary=f"Generated wiki homepage and {len(generated_pages)} child pages",
+                summary=f"Maintained wiki from {len(ready_sources)} ready sources and refreshed index, log, and home pages",
                 error="",
                 completed=True,
             )
             connection.commit()
 
+        pages_payload = self.list_pages(context.workspace_root)
         return {
-            "home_page_id": home_page_id,
-            "pages_created": len(generated_pages) + 1,
+            "home_page_id": pages_payload.get("home_page_id"),
+            "pages_created": len(pages_payload.get("items") or []),
             "job": self.get_job(context.workspace_root, job_id),
-            "pages": self.list_pages(context.workspace_root),
+            "pages": pages_payload,
         }
 
     def regenerate_page(
@@ -983,146 +2153,132 @@ class KnowledgeStore:
                 summary=f"Regenerating page {page_row['title'] or normalized_page_id}",
             )
             connection.commit()
-
-            generated_page = self._generate_source_page_payload(
+            scaffold = self._ensure_wiki_scaffold(
+                connection,
+                workspace_id=context.workspace_id,
+                job_id=job_id,
+            )
+            maintenance_result = self._maintain_source_in_wiki(
                 connection,
                 workspace_id=context.workspace_id,
                 source_row=source_row,
                 generation_settings=generation_settings,
-                sort_order=int(page_row["sort_order"] or 0),
+                scaffold=scaffold,
+                job_id=job_id,
+                sort_order=int(page_row["sort_order"] or 0) or 1,
             )
-            if generated_page is None:
-                self._update_job(
-                    connection,
-                    job_id,
-                    status="failed",
-                    progress=1.0,
-                    summary="Page regeneration failed",
-                    error="No readable source material was available for this page",
-                    completed=True,
-                )
-                connection.commit()
-                raise ValueError("No readable source material was available for this page")
-
-            now = self._now()
-            home_row = connection.execute(
-                "SELECT * FROM pages WHERE workspace_id=? AND is_home=1 LIMIT 1",
-                (context.workspace_id,),
-            ).fetchone()
-            home_page_payload: dict[str, Any] | None = None
-            if home_row is not None:
-                child_rows = connection.execute(
-                    """
-                    SELECT id, source_id, parent_page_id, title, slug, summary, content, sort_order, is_home, status
-                    FROM pages
-                    WHERE workspace_id=? AND parent_page_id=?
-                    ORDER BY sort_order ASC, title ASC
-                    """,
-                    (context.workspace_id, home_row["id"]),
-                ).fetchall()
-                child_pages: list[dict[str, Any]] = []
-                for row in child_rows:
-                    if str(row["id"]) == normalized_page_id:
-                        child_pages.append(
-                            {
-                                "id": normalized_page_id,
-                                "source_id": str(row["source_id"] or ""),
-                                "parent_page_id": str(row["parent_page_id"] or "") or None,
-                                "title": generated_page["title"],
-                                "slug": generated_page["slug"],
-                                "summary": generated_page["summary"],
-                                "content": generated_page["content"],
-                                "sort_order": int(row["sort_order"] or 0),
-                                "is_home": bool(row["is_home"]),
-                                "status": str(row["status"] or "ready"),
-                            }
-                        )
-                        continue
-                    child_pages.append(
-                        {
-                            "id": str(row["id"]),
-                            "source_id": str(row["source_id"] or ""),
-                            "parent_page_id": str(row["parent_page_id"] or "") or None,
-                            "title": str(row["title"] or ""),
-                            "slug": str(row["slug"] or ""),
-                            "summary": str(row["summary"] or ""),
-                            "content": str(row["content"] or ""),
-                            "sort_order": int(row["sort_order"] or 0),
-                            "is_home": bool(row["is_home"]),
-                            "status": str(row["status"] or "ready"),
-                        }
-                    )
-                home_page = self._generate_home_page_payload(
-                    [
-                        {
-                            "title": str(page["title"] or ""),
-                            "summary": str(page["summary"] or ""),
-                        }
-                        for page in child_pages
-                    ],
-                    generation_settings=generation_settings,
-                )
-                home_page_payload = {
-                    "id": str(home_row["id"]),
-                    "source_id": "",
-                    "parent_page_id": None,
-                    "title": str(home_row["title"] or home_page["title"] or "Knowledge wiki"),
-                    "slug": str(home_row["slug"] or home_page["slug"] or "knowledge-wiki"),
-                    "summary": home_page["summary"],
-                    "content": home_page["content"],
-                    "sort_order": int(home_row["sort_order"] or 0),
-                    "is_home": True,
-                    "status": str(home_row["status"] or "ready"),
-                }
-                linked_pages = self._apply_page_cross_links([home_page_payload, *child_pages])
-                linked_home_page = linked_pages[0]
-                linked_child_pages = {str(page["id"]): page for page in linked_pages[1:]}
-                generated_page = dict(linked_child_pages.get(normalized_page_id) or generated_page)
-                connection.execute(
-                    """
-                    UPDATE pages
-                    SET summary=?, content=?, updated_at=?
-                    WHERE workspace_id=? AND id=?
-                    """,
-                    (
-                        linked_home_page["summary"],
-                        linked_home_page["content"],
-                        now,
-                        context.workspace_id,
-                        home_row["id"],
-                    ),
-                )
-
-            connection.execute(
-                """
-                UPDATE pages
-                SET title=?, slug=?, summary=?, content=?, status='ready', updated_at=?
-                WHERE workspace_id=? AND id=?
-                """,
-                (
-                    generated_page["title"],
-                    generated_page["slug"],
-                    generated_page["summary"],
-                    generated_page["content"],
-                    now,
-                    context.workspace_id,
-                    normalized_page_id,
-                ),
+            self._refresh_special_pages(
+                connection,
+                workspace_id=context.workspace_id,
+                generation_settings=generation_settings,
+                scaffold=scaffold,
+                job_id=job_id,
             )
+            self._relink_all_pages(connection, workspace_id=context.workspace_id)
+            connection.commit()
 
             self._update_job(
                 connection,
                 job_id,
                 status="completed",
                 progress=1.0,
-                summary=f"Regenerated page {generated_page['title']}",
+                summary=f"Regenerated source-backed wiki content for {source_row['title'] or normalized_page_id}",
+                error="",
+                completed=True,
+            )
+            connection.commit()
+
+        selected_page_id = str(maintenance_result.get("source_summary_page_id") or normalized_page_id)
+        return {
+            "page": self.get_page(context.workspace_root, selected_page_id),
+            "job": self.get_job(context.workspace_root, job_id),
+            "pages": self.list_pages(context.workspace_root),
+        }
+
+    def lint_wiki(
+        self,
+        workspace_root: str | Path | None,
+        *,
+        advanced: dict[str, Any] | None,
+        cluster_model_name: str,
+        backend_base_url: str,
+    ) -> dict[str, Any]:
+        context = self.workspace_context(workspace_root)
+        generation_settings = self._build_generation_settings(
+            advanced,
+            cluster_model_name=cluster_model_name,
+            backend_base_url=backend_base_url,
+        )
+
+        with self._lock, self._connect(context) as connection:
+            job_id = self._create_job(
+                connection,
+                workspace_id=context.workspace_id,
+                job_type="lint_wiki",
+                summary="Running wiki maintenance checks",
+            )
+            self._update_job(
+                connection,
+                job_id,
+                status="running",
+                progress=0.1,
+                summary="Scanning wiki pages for maintenance issues",
+            )
+            connection.commit()
+
+            scaffold = self._ensure_wiki_scaffold(
+                connection,
+                workspace_id=context.workspace_id,
+                job_id=job_id,
+            )
+            lint_report = self._run_wiki_lint(
+                connection,
+                workspace_id=context.workspace_id,
+                generation_settings=generation_settings,
+            )
+            self._append_log_entry(
+                connection,
+                workspace_id=context.workspace_id,
+                event_type="lint",
+                title="Wiki maintenance check",
+                source_id="",
+                job_id=job_id,
+                details=str(lint_report.get("report_markdown") or "").strip(),
+                touched_page_ids=[],
+            )
+            self._update_job(
+                connection,
+                job_id,
+                progress=0.8,
+                summary="Refreshing wiki log after maintenance checks",
+            )
+            self._refresh_special_pages(
+                connection,
+                workspace_id=context.workspace_id,
+                generation_settings=generation_settings,
+                scaffold=scaffold,
+                job_id=job_id,
+            )
+            self._relink_all_pages(connection, workspace_id=context.workspace_id)
+            connection.commit()
+
+            self._update_job(
+                connection,
+                job_id,
+                status="completed",
+                progress=1.0,
+                summary=(
+                    f"Wiki lint completed: {len(lint_report.get('orphan_pages') or [])} orphan pages, "
+                    f"{len(lint_report.get('stale_pages') or [])} stale pages, "
+                    f"{len(lint_report.get('missing_cross_references') or [])} missing cross-reference candidates"
+                ),
                 error="",
                 completed=True,
             )
             connection.commit()
 
         return {
-            "page": self.get_page(context.workspace_root, normalized_page_id),
+            "report_markdown": str(lint_report.get("report_markdown") or ""),
             "job": self.get_job(context.workspace_root, job_id),
             "pages": self.list_pages(context.workspace_root),
         }

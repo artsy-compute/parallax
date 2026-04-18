@@ -168,6 +168,19 @@ def create_app(config: KnowledgeServiceConfig | None = None) -> FastAPI:
         except Exception as error:
             raise _as_http_exception(error) from error
 
+    @app.post("/wiki/lint")
+    async def lint_wiki(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return await run_in_threadpool(
+                _service_store().lint_wiki,
+                payload.get("workspace_root"),
+                advanced=dict(payload.get("advanced") or {}),
+                cluster_model_name=str(payload.get("cluster_model_name") or ""),
+                backend_base_url=str(payload.get("backend_base_url") or ""),
+            )
+        except Exception as error:
+            raise _as_http_exception(error) from error
+
     @app.post("/pages/{page_id}/generate")
     async def regenerate_page(page_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         try:

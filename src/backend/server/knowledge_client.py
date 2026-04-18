@@ -195,6 +195,24 @@ class KnowledgeServiceClient:
             },
         )
 
+    async def lint_wiki(
+        self,
+        *,
+        advanced: dict[str, Any],
+        cluster_model_name: str,
+        backend_base_url: str,
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/wiki/lint",
+            json_body={
+                **self._workspace_params(),
+                "advanced": advanced,
+                "cluster_model_name": cluster_model_name,
+                "backend_base_url": backend_base_url,
+            },
+        )
+
     async def regenerate_page(
         self,
         page_id: str,

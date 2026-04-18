@@ -49,6 +49,7 @@ import {
   getKnowledgePages,
   getKnowledgeSources,
   generateKnowledgePages,
+  lintKnowledgeWiki,
   regenerateKnowledgePage,
   searchKnowledge,
   updateAppSettings,
@@ -204,6 +205,8 @@ export default function PageKnowledge() {
   const [documentLoading, setDocumentLoading] = useState(false);
   const [pageLoading, setPageLoading] = useState(false);
   const [generatingWiki, setGeneratingWiki] = useState(false);
+  const [lintingWiki, setLintingWiki] = useState(false);
+  const [lintReportMarkdown, setLintReportMarkdown] = useState('');
   const [regeneratingPage, setRegeneratingPage] = useState(false);
   const [wikiViewMode, setWikiViewMode] = useState<WikiViewMode>('rendered');
   const [deletingSourceId, setDeletingSourceId] = useState('');
@@ -490,6 +493,20 @@ export default function PageKnowledge() {
       setError(nextError instanceof Error ? nextError.message : String(nextError));
     } finally {
       setRegeneratingPage(false);
+    }
+  });
+
+  const onLintWiki = useRefCallback(async () => {
+    setLintingWiki(true);
+    try {
+      const result = await lintKnowledgeWiki();
+      setLintReportMarkdown(String(result.report_markdown || '').trim());
+      await loadPageData();
+      setError('');
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    } finally {
+      setLintingWiki(false);
     }
   });
 
@@ -1334,23 +1351,47 @@ export default function PageKnowledge() {
                   <Stack direction={{ xs: 'column', md: 'row' }} sx={{ gap: 1.5, alignItems: { md: 'center' }, justifyContent: 'space-between' }}>
                     <Stack sx={{ gap: 0.35 }}>
                       <Typography variant='body1' sx={{ fontWeight: 700 }}>
-                        Wiki generation
+                        Wiki maintenance
                       </Typography>
                       <Typography variant='body2' color='text.secondary'>
-                        Use management for whole-wiki generation. Use the reader for single-page regeneration.
+                        Run whole-wiki maintenance here. Use the reader for single-page regeneration.
                       </Typography>
                     </Stack>
-                    <Button
-                      variant='contained'
-                      onClick={() => {
-                        void onGenerateWiki();
-                      }}
-                      disabled={generatingWiki || sources.length === 0}
-                    >
-                      {generatingWiki ? 'Generating...' : (pages.length > 0 ? 'Regenerate all pages' : 'Generate wiki')}
-                    </Button>
+                    <Stack direction='row' sx={{ gap: 1, flexWrap: 'wrap' }}>
+                      <Button
+                        variant='outlined'
+                        onClick={() => {
+                          void onLintWiki();
+                        }}
+                        disabled={lintingWiki}
+                      >
+                        {lintingWiki ? 'Running lint...' : 'Run wiki lint'}
+                      </Button>
+                      <Button
+                        variant='contained'
+                        onClick={() => {
+                          void onGenerateWiki();
+                        }}
+                        disabled={generatingWiki || sources.length === 0}
+                      >
+                        {generatingWiki ? 'Generating...' : (pages.length > 0 ? 'Regenerate all pages' : 'Generate wiki')}
+                      </Button>
+                    </Stack>
                   </Stack>
                 </Paper>
+
+                {lintReportMarkdown && (
+                  <Paper variant='outlined' sx={{ p: 2, borderRadius: 3, bgcolor: 'background.paper' }}>
+                    <Stack sx={{ gap: 1 }}>
+                      <Typography variant='body1' sx={{ fontWeight: 700 }}>
+                        Latest lint report
+                      </Typography>
+                      <Box sx={{ minWidth: 0 }}>
+                        <ChatMarkdown content={lintReportMarkdown} />
+                      </Box>
+                    </Stack>
+                  </Paper>
+                )}
 
                 {!error && health && (
                   <Alert severity='info'>

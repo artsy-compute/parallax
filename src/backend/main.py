@@ -1186,6 +1186,25 @@ async def knowledge_pages_generate(raw_request: Request) -> JSONResponse:
     )
 
 
+@app.post("/knowledge/wiki/lint")
+async def knowledge_wiki_lint(raw_request: Request) -> JSONResponse:
+    await _read_json_request(raw_request)
+    try:
+        cluster_settings = settings_store.get_cluster_settings()
+        advanced = dict(cluster_settings.get("advanced") or {})
+        payload = await knowledge_client.lint_wiki(
+            advanced=advanced,
+            cluster_model_name=str(cluster_settings.get("model_name") or ""),
+            backend_base_url=str(raw_request.base_url).rstrip("/"),
+        )
+    except KnowledgeServiceError as error:
+        return _knowledge_error_response("knowledge_wiki_lint", error)
+    return JSONResponse(
+        content={"type": "knowledge_wiki_lint", "data": payload},
+        status_code=200,
+    )
+
+
 @app.post("/knowledge/pages/{page_id}/generate")
 async def knowledge_page_generate(page_id: str, raw_request: Request) -> JSONResponse:
     await _read_json_request(raw_request)

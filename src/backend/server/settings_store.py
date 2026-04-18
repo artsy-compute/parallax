@@ -14,11 +14,49 @@ logger = get_logger(__name__)
 
 class SettingsStore:
     DEFAULT_CLUSTER_ID = 'cluster-default'
+    DEFAULT_SETTINGS_DIR = Path('~/.parallax').expanduser()
+    DEFAULT_SETTINGS_DB_PATH = DEFAULT_SETTINGS_DIR / 'settings.sqlite3'
+    LEGACY_SETTINGS_DB_PATH = Path('/tmp/parallax_settings.sqlite3')
+
+    @classmethod
+    def _resolve_default_db_path(cls) -> Path:
+        configured = os.environ.get('PARALLAX_SETTINGS_DB')
+        if configured:
+            return Path(configured).expanduser()
+        return cls.DEFAULT_SETTINGS_DB_PATH
+
+    @classmethod
+    def _migrate_legacy_db_if_needed(cls, target_path: Path) -> None:
+        if os.environ.get('PARALLAX_SETTINGS_DB'):
+            return
+        legacy_path = cls.LEGACY_SETTINGS_DB_PATH
+        if target_path == legacy_path or target_path.exists() or not legacy_path.exists():
+            return
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            source = sqlite3.connect(str(legacy_path), check_same_thread=False)
+            destination = sqlite3.connect(str(target_path), check_same_thread=False)
+            try:
+                source.backup(destination)
+                destination.commit()
+            finally:
+                destination.close()
+                source.close()
+            logger.info('Migrated legacy settings DB from %s to %s', legacy_path, target_path)
+        except Exception:
+            logger.warning(
+                'Failed to migrate legacy settings DB from %s to %s',
+                legacy_path,
+                target_path,
+                exc_info=True,
+            )
 
     def __init__(self, db_path: str | None = None):
         if db_path is None:
-            db_path = os.environ.get('PARALLAX_SETTINGS_DB', '/tmp/parallax_settings.sqlite3')
-        self.db_path = str(Path(db_path))
+            db_path = str(self._resolve_default_db_path())
+        resolved_path = Path(db_path).expanduser()
+        self._migrate_legacy_db_if_needed(resolved_path)
+        self.db_path = str(resolved_path)
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._init_db()
