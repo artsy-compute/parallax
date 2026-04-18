@@ -12,6 +12,7 @@ import {
   Typography,
 } from '@mui/material';
 import { IconArrowLeft } from '@tabler/icons-react';
+import { useRefCallback } from '../hooks';
 import { DrawerLayout } from '../components/common';
 import {
   approveAgentRunApproval,
@@ -114,7 +115,7 @@ export default function PageRuns() {
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const loadRuns = async (keepCurrentSelection = false) => {
+  const loadRuns = useRefCallback(async (keepCurrentSelection = false) => {
     setListLoading(true);
     try {
       const data = await getAgentRunList();
@@ -129,9 +130,9 @@ export default function PageRuns() {
     } finally {
       setListLoading(false);
     }
-  };
+  });
 
-  const loadRunDetail = async (nextRunId: string) => {
+  const loadRunDetail = useRefCallback(async (nextRunId: string) => {
     setDetailLoading(true);
     try {
       const data = await getAgentRunDetail(nextRunId);
@@ -144,14 +145,14 @@ export default function PageRuns() {
     } finally {
       setDetailLoading(false);
     }
-  };
+  });
 
-  const refreshAll = async (nextRunId: string | null) => {
+  const refreshAll = useRefCallback(async (nextRunId: string | null) => {
     await loadRuns(true);
     if (nextRunId) {
       await loadRunDetail(nextRunId);
     }
-  };
+  });
 
   useEffect(() => {
     let cancelled = false;

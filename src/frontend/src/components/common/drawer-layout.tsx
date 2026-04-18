@@ -7,6 +7,7 @@ import {
   IconButton,
   MenuItem,
   Stack,
+  Switch,
   styled,
   TextField,
   Tooltip,
@@ -14,7 +15,7 @@ import {
   useMediaQuery,
   useTheme,
 } from '@mui/material';
-import { useCluster, useHost } from '../../services';
+import { useChat, useCluster, useHost } from '../../services';
 import { AlertDialog, useAlertDialog } from '../mui';
 import { IconBrandGradient } from '../brand';
 import {
@@ -22,6 +23,7 @@ import {
   IconLayoutSidebarLeftCollapse,
   IconLayoutSidebarLeftExpand,
   IconMoonStars,
+  IconBolt,
   IconStack3,
   IconSettings,
   IconSunHigh,
@@ -101,6 +103,7 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
   const theme = useTheme();
   const narrowWindow = useMediaQuery(theme.breakpoints.down('lg'));
   const { mode, toggleMode } = useThemeMode();
+  const [{ autoUseTools }, { setAutoUseTools }] = useChat();
 
   const [
     {
@@ -391,6 +394,31 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
             >
               Runs
             </Button>
+            <Stack
+              direction='row'
+              sx={{
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 1,
+                px: 1,
+                py: 0.25,
+                borderRadius: 2,
+              }}
+            >
+              <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75, minWidth: 0 }}>
+                <IconBolt size={16} />
+                <Typography variant='body2' color='text.secondary' noWrap>
+                  Auto tools
+                </Typography>
+              </Stack>
+              <Switch
+                size='small'
+                checked={autoUseTools}
+                onChange={(event) => {
+                  setAutoUseTools(event.target.checked);
+                }}
+              />
+            </Stack>
             <Button
               component={RouterLink}
               to='/settings'
@@ -429,10 +457,29 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
                   borderRadius: '10px',
                   '&:hover': { bgcolor: runsSelected ? 'brand.lighter' : 'action.hover' },
                 }}
-              >
-                <IconStack3 size={18} />
-              </IconButton>
-            </Tooltip>
+            >
+              <IconStack3 size={18} />
+            </IconButton>
+          </Tooltip>
+          <Tooltip
+            title={autoUseTools ? 'Auto tools on' : 'Auto tools off'}
+            placement='right'
+            slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
+          >
+            <IconButton
+              onClick={() => {
+                setAutoUseTools((prev) => !prev);
+              }}
+              sx={{
+                color: autoUseTools ? 'brand.main' : 'text.secondary',
+                bgcolor: autoUseTools ? 'brand.lighter' : 'transparent',
+                borderRadius: '10px',
+                '&:hover': { bgcolor: autoUseTools ? 'brand.lighter' : 'action.hover' },
+              }}
+            >
+              <IconBolt size={18} />
+            </IconButton>
+          </Tooltip>
             <Tooltip
               title='Settings'
               placement='right'

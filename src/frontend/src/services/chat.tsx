@@ -32,6 +32,7 @@ const debugLog = async (...args: any[]) => {
 };
 
 const STORAGE_KEY = 'parallax.chat.conversation_id';
+const AUTO_TOOLS_STORAGE_KEY = 'parallax.chat.auto_tools';
 const FIRST_TOKEN_TIMEOUT_MS = 120000;
 const NO_PROGRESS_TIMEOUT_MS = 90000;
 const ERROR_RECOVERY_ATTEMPTS = 5;
@@ -218,6 +219,7 @@ export type ChatStatus = 'closed' | 'opened' | 'generating' | 'error';
 export interface ChatStates {
   readonly input: string;
   readonly status: ChatStatus;
+  readonly autoUseTools: boolean;
   readonly messages: readonly ChatMessage[];
   readonly conversationId: string;
   readonly history: readonly ChatHistorySummary[];
@@ -256,6 +258,7 @@ export type ChatTaskMode = 'task' | 'live_data' | 'workspace' | 'cluster';
 
 export interface ChatActions {
   readonly setInput: Dispatch<SetStateAction<string>>;
+  readonly setAutoUseTools: Dispatch<SetStateAction<boolean>>;
   readonly generate: (message?: ChatMessage) => void;
   readonly runTask: (message: ChatMessage, mode?: ChatTaskMode) => void;
   readonly stop: () => void;
@@ -277,6 +280,10 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
   ] = useCluster();
 
   const [input, setInput] = useState<string>('');
+  const [autoUseTools, setAutoUseTools] = useState<boolean>(() => {
+    const stored = globalThis.localStorage?.getItem(AUTO_TOOLS_STORAGE_KEY);
+    return stored == null ? true : stored === '1';
+  });
 
   const [status, _setStatus] = useState<ChatStatus>('closed');
   const setStatus = useRefCallback<typeof _setStatus>((value) => {
@@ -412,6 +419,10 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
   useEffect(() => {
     globalThis.localStorage?.setItem(STORAGE_KEY, conversationId);
   }, [conversationId]);
+
+  useEffect(() => {
+    globalThis.localStorage?.setItem(AUTO_TOOLS_STORAGE_KEY, autoUseTools ? '1' : '0');
+  }, [autoUseTools]);
 
   const refreshHistory = useRefCallback(async () => {
     setHistoryLoading(true);
@@ -935,7 +946,9 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     setMessages(nextMessages);
     refreshHistory();
     const requestStartedAt = Date.now() / 1000;
-    const autoMode = message ? null : detectAutoTaskMode(nextMessages[nextMessages.length - 1]?.content || '', availableTools);
+    const autoMode = autoUseTools && !message
+      ? detectAutoTaskMode(nextMessages[nextMessages.length - 1]?.content || '', availableTools)
+      : null;
     sse.connect(
       modelName,
       conversationId,
@@ -1044,6 +1057,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
 
   const actions = useConst<ChatActions>({
     setInput,
+    setAutoUseTools,
     generate,
     runTask,
     stop,
@@ -1061,6 +1075,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
       {
         input,
         status,
+        autoUseTools,
         messages,
         conversationId,
         history,
@@ -1073,7 +1088,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
       },
       actions,
     ],
-    [input, status, messages, conversationId, history, historyLoading, activeRun, runsByMessageId, inputTruncationNotice, requestHealthNotice, promptBudgetNotice, actions],
+    [input, status, autoUseTools, messages, conversationId, history, historyLoading, activeRun, runsByMessageId, inputTruncationNotice, requestHealthNotice, promptBudgetNotice, actions],
   );
 
   return <context.Provider value={value}>{children}</context.Provider>;
