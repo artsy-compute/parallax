@@ -20,6 +20,7 @@ import sys
 import time
 
 import requests
+import psutil
 
 from parallax_utils.file_util import get_project_root
 from parallax_utils.logging_config import get_logger
@@ -190,33 +191,7 @@ def _execute_with_graceful_shutdown(cmd: list[str], env: dict[str, str] | None =
 
         if sub_process is not None:
             try:
-                logger.info("Terminating subprocess group...")
-                # Gracefully terminate the entire process group
-                try:
-                    os.killpg(sub_process.pid, signal.SIGINT)
-                except Exception:
-                    # Fall back to signaling just the child process
-                    sub_process.send_signal(signal.SIGINT)
-
-                logger.info("Waiting for subprocess to exit...")
-                # Wait for the subprocess to exit gracefully
-                try:
-                    sub_process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    logger.info("SIGINT timeout; sending SIGTERM to process group...")
-                    try:
-                        os.killpg(sub_process.pid, signal.SIGTERM)
-                    except Exception:
-                        sub_process.terminate()
-                    try:
-                        sub_process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        logger.info("SIGTERM timeout; forcing SIGKILL on process group...")
-                        try:
-                            os.killpg(sub_process.pid, signal.SIGKILL)
-                        except Exception:
-                            sub_process.kill()
-                        sub_process.wait()
+                _terminate_process_tree(sub_process, "subprocess")
                 logger.info("Subprocess exited.")
             except Exception as e:
                 logger.error(f"Failed to terminate subprocess: {e}")
@@ -225,36 +200,99 @@ def _execute_with_graceful_shutdown(cmd: list[str], env: dict[str, str] | None =
         sys.exit(0)
 
 
+def _signal_process_tree(pid: int, sig: signal.Signals) -> None:
+    try:
+        root = psutil.Process(pid)
+    except psutil.Error:
+        return
+
+    descendants = root.children(recursive=True)
+    # Signal children first so they stop spawning or holding resources before the root exits.
+    for process in reversed(descendants):
+        try:
+            process.send_signal(sig)
+        except psutil.Error:
+            continue
+    try:
+        root.send_signal(sig)
+    except psutil.Error:
+        return
+
+
+def _wait_for_process_tree_exit(pid: int, timeout: float) -> bool:
+    deadline = time.time() + max(0.1, timeout)
+    while time.time() < deadline:
+        try:
+            root = psutil.Process(pid)
+        except psutil.Error:
+            return True
+
+        alive = [root]
+        try:
+            alive.extend(root.children(recursive=True))
+        except psutil.Error:
+            pass
+
+        remaining = [process for process in alive if process.is_running() and process.status() != psutil.STATUS_ZOMBIE]
+        if not remaining:
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def _terminate_process_tree(sub_process: subprocess.Popen | None, label: str) -> None:
+    if sub_process is None:
+        return
+    if sub_process.poll() is not None:
+        return
+
+    pid = int(sub_process.pid)
+    try:
+        logger.info("Terminating %s process tree...", label)
+        _signal_process_tree(pid, signal.SIGINT)
+        try:
+            os.killpg(pid, signal.SIGINT)
+        except Exception:
+            pass
+        if _wait_for_process_tree_exit(pid, timeout=5):
+            try:
+                sub_process.wait(timeout=0.5)
+            except Exception:
+                pass
+            return
+
+        logger.info("%s SIGINT timeout; sending SIGTERM to process tree...", label)
+        _signal_process_tree(pid, signal.SIGTERM)
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except Exception:
+            pass
+        if _wait_for_process_tree_exit(pid, timeout=5):
+            try:
+                sub_process.wait(timeout=0.5)
+            except Exception:
+                pass
+            return
+
+        logger.info("%s SIGTERM timeout; forcing SIGKILL on process tree...", label)
+        _signal_process_tree(pid, signal.SIGKILL)
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except Exception:
+            pass
+        _wait_for_process_tree_exit(pid, timeout=2)
+        try:
+            sub_process.wait(timeout=0.5)
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error("Failed to terminate %s process tree: %s", label, e)
+
+
 def _terminate_process_group(sub_process: subprocess.Popen | None, label: str) -> None:
     if sub_process is None:
         return
-    try:
-        logger.info("Terminating %s...", label)
-        try:
-            os.killpg(sub_process.pid, signal.SIGINT)
-        except Exception:
-            sub_process.send_signal(signal.SIGINT)
-        try:
-            sub_process.wait(timeout=5)
-            return
-        except subprocess.TimeoutExpired:
-            logger.info("%s SIGINT timeout; sending SIGTERM...", label)
-        try:
-            os.killpg(sub_process.pid, signal.SIGTERM)
-        except Exception:
-            sub_process.terminate()
-        try:
-            sub_process.wait(timeout=5)
-            return
-        except subprocess.TimeoutExpired:
-            logger.info("%s SIGTERM timeout; forcing SIGKILL...", label)
-        try:
-            os.killpg(sub_process.pid, signal.SIGKILL)
-        except Exception:
-            sub_process.kill()
-        sub_process.wait()
-    except Exception as e:
-        logger.error("Failed to terminate %s: %s", label, e)
+    _terminate_process_tree(sub_process, label)
 
 
 def _execute_dev_processes(
