@@ -16,7 +16,6 @@ import {
   useTheme,
 } from '@mui/material';
 import { useCluster, useHost } from '../../services';
-import { getKnowledgeHealth, type KnowledgeHealth } from '../../services/api';
 import { AlertDialog, useAlertDialog } from '../mui';
 import { IconBrandGradient } from '../brand';
 import {
@@ -104,7 +103,6 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
   const theme = useTheme();
   const narrowWindow = useMediaQuery(theme.breakpoints.down('lg'));
   const { mode, toggleMode } = useThemeMode();
-  const [knowledgeHealth, setKnowledgeHealth] = useState<KnowledgeHealth | null>(null);
 
   const [
     {
@@ -297,28 +295,6 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
       setRebalancingTopology(false);
     }
   };
-
-  useEffect(() => {
-    if (!knowledgeSelected || hideConversationHistory) {
-      return;
-    }
-    let cancelled = false;
-    void (async () => {
-      try {
-        const nextHealth = await getKnowledgeHealth();
-        if (!cancelled) {
-          setKnowledgeHealth(nextHealth);
-        }
-      } catch {
-        if (!cancelled) {
-          setKnowledgeHealth(null);
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [hideConversationHistory, knowledgeSelected]);
 
   return (
     <DrawerLayoutRoot direction='row'>
@@ -596,18 +572,10 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
           )}
           {!hideConversationHistory ? (
             knowledgeSelected ? (
-              <Stack sx={{ minWidth: 0, flex: 1, gap: 0.35 }}>
+              <Stack sx={{ minWidth: 0, flex: 1 }}>
                 <Typography variant='caption' color='text.secondary'>Knowledge</Typography>
-                <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75, minWidth: 0, flexWrap: 'wrap' }}>
-                  <Typography variant='body2' sx={{ fontWeight: 600 }} noWrap>
-                    {knowledgeHealth?.workspace_id ? `Workspace · ${knowledgeHealth.workspace_id}` : 'Knowledge workspace'}
-                  </Typography>
-                  {knowledgeHealth?.vector_backend && (
-                    <Chip size='small' label={knowledgeHealth.vector_backend} />
-                  )}
-                </Stack>
-                <Typography variant='caption' color='text.secondary' noWrap>
-                  {knowledgeHealth?.embeddings.active_provider || knowledgeHealth?.embeddings.configured_provider || 'Loading knowledge status'}
+                <Typography variant='body2' sx={{ fontWeight: 600 }} noWrap>
+                  Knowledge workspace
                 </Typography>
               </Stack>
             ) : (

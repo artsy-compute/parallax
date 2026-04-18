@@ -51,6 +51,16 @@ def create_app(config: KnowledgeServiceConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=f"Source not found: {source_id}")
         return item
 
+    @app.delete("/sources/{source_id}")
+    async def delete_source(
+        source_id: str,
+        workspace_root: str | None = None,
+    ) -> dict[str, Any]:
+        item = await run_in_threadpool(_service_store().delete_source, workspace_root, source_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail=f"Source not found: {source_id}")
+        return item
+
     @app.post("/sources/local")
     async def ingest_local_source(request: LocalSourceCreateRequest) -> dict[str, Any]:
         try:

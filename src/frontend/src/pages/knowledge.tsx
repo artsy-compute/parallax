@@ -7,27 +7,33 @@ import {
   Dialog,
   DialogContent,
   DialogTitle,
+  IconButton,
   MenuItem,
   Paper,
   Stack,
   Tab,
   Tabs,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import {
   IconDatabaseSearch,
   IconFilePlus,
   IconLink,
+  IconExternalLink,
   IconRefresh,
+  IconTrash,
   IconUpload,
 } from '@tabler/icons-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { DrawerLayout } from '../components/common';
+import { AlertDialog } from '../components/mui';
 import { useCluster } from '../services';
 import {
   createKnowledgeLocalSource,
   createKnowledgeUrlSource,
+  deleteKnowledgeSource,
   getAppSettings,
   getKnowledgeDocument,
   getKnowledgeHealth,
@@ -114,6 +120,8 @@ export default function PageKnowledge() {
   const [ingestingLocal, setIngestingLocal] = useState(false);
   const [ingestingUrl, setIngestingUrl] = useState(false);
   const [documentLoading, setDocumentLoading] = useState(false);
+  const [deletingSourceId, setDeletingSourceId] = useState('');
+  const [pendingDeleteSource, setPendingDeleteSource] = useState<null | { id: string; label: string }>(null);
   const [llmProviders, setLlmProviders] = useState<Record<LlmProviderId, LlmProviderConfig>>(
     parseLlmProviderConfigs(undefined),
   );
@@ -217,6 +225,34 @@ export default function PageKnowledge() {
     } finally {
       setDocumentLoading(false);
     }
+  });
+
+  const onDeleteSource = useRefCallback(async (sourceId: string) => {
+    const normalizedSourceId = String(sourceId || '').trim();
+    if (!normalizedSourceId) {
+      return;
+    }
+    setDeletingSourceId(normalizedSourceId);
+    try {
+      await deleteKnowledgeSource(normalizedSourceId);
+      if (selectedDocument?.source_id === normalizedSourceId) {
+        setSelectedDocument(null);
+      }
+      setPendingDeleteSource(null);
+      await loadPageData();
+      setError('');
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    } finally {
+      setDeletingSourceId('');
+    }
+  });
+
+  const confirmDeleteSource = useRefCallback(async () => {
+    if (!pendingDeleteSource) {
+      return;
+    }
+    await onDeleteSource(pendingDeleteSource.id);
   });
 
   const onSectionChange = useRefCallback((_event: SyntheticEvent, value: string) => {
@@ -437,15 +473,53 @@ export default function PageKnowledge() {
             <Paper key={source.id} variant='outlined' sx={{ p: 1.5, borderRadius: 2.5, bgcolor: 'background.paper' }}>
               <Stack sx={{ gap: 0.75 }}>
                 <Stack direction='row' sx={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 1, flexWrap: 'wrap' }}>
-                  <Stack sx={{ gap: 0.25 }}>
-                    <Typography variant='body1' sx={{ fontWeight: 700 }}>
-                      {source.title}
-                    </Typography>
-                    <Typography variant='caption' color='text.secondary'>
-                      {source.canonical_uri}
-                    </Typography>
+                  <Stack direction='row' sx={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 1, width: '100%' }}>
+                    <Stack sx={{ gap: 0.25, minWidth: 0, flex: 1 }}>
+                      <Typography variant='body1' sx={{ fontWeight: 700 }}>
+                        {source.title}
+                      </Typography>
+                      <Stack direction='row' sx={{ alignItems: 'center', gap: 0.25, minWidth: 0 }}>
+                        <Typography variant='caption' color='text.secondary' sx={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {source.canonical_uri}
+                        </Typography>
+                        {source.source_type === 'url' && source.canonical_uri && (
+                          <Tooltip title='Open source URL'>
+                            <span>
+                              <IconButton
+                                size='small'
+                                onClick={() => {
+                                  globalThis.open(source.canonical_uri, '_blank', 'noopener,noreferrer');
+                                }}
+                                sx={{ p: 0.25 }}
+                              >
+                                <IconExternalLink size={14} />
+                              </IconButton>
+                            </span>
+                          </Tooltip>
+                        )}
+                      </Stack>
+                    </Stack>
+                    <Stack direction='row' sx={{ gap: 0.25, alignItems: 'center', flex: 'none' }}>
+                      <Chip size='small' color={getStatusColor(source.status)} label={source.status} />
+                      <Tooltip title={deletingSourceId === source.id ? 'Deleting source' : 'Delete source'}>
+                        <span>
+                          <IconButton
+                            size='small'
+                            color='error'
+                            disabled={deletingSourceId === source.id}
+                            onClick={() => {
+                              setPendingDeleteSource({
+                                id: source.id,
+                                label: source.title || source.canonical_uri || 'this source',
+                              });
+                            }}
+                          >
+                            <IconTrash size={16} />
+                          </IconButton>
+                        </span>
+                      </Tooltip>
+                    </Stack>
                   </Stack>
-                  <Chip size='small' color={getStatusColor(source.status)} label={source.status} />
                 </Stack>
                 <Typography variant='body2' color='text.secondary'>
                   {source.document_count} document{source.document_count === 1 ? '' : 's'} indexed
@@ -786,6 +860,21 @@ export default function PageKnowledge() {
             )}
           </DialogContent>
         </Dialog>
+        <AlertDialog
+          open={!!pendingDeleteSource}
+          onClose={() => setPendingDeleteSource(null)}
+          color='warning'
+          title='Delete source'
+          content={(
+            <Typography variant='body2'>
+              Delete {pendingDeleteSource ? `"${pendingDeleteSource.label}"` : 'this source'}? This removes its documents, chunks, and search index entries.
+            </Typography>
+          )}
+          cancelLabel='Cancel'
+          confirmLabel='Delete'
+          autoFocusAction='cancel'
+          onConfirm={confirmDeleteSource}
+        />
       </Stack>
     </DrawerLayout>
   );

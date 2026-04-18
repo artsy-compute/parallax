@@ -86,6 +86,13 @@ class KnowledgeServiceClient:
             params=self._workspace_params(),
         )
 
+    async def delete_source(self, source_id: str) -> dict[str, Any]:
+        return await self._request(
+            "DELETE",
+            f"/sources/{source_id}",
+            params=self._workspace_params(),
+        )
+
     async def ingest_local_source(self, path: str) -> dict[str, Any]:
         return await self._request(
             "POST",

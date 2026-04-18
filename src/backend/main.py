@@ -1063,6 +1063,18 @@ async def knowledge_source_detail(source_id: str) -> JSONResponse:
     )
 
 
+@app.delete("/knowledge/sources/{source_id}")
+async def knowledge_source_delete(source_id: str) -> JSONResponse:
+    try:
+        payload = await knowledge_client.delete_source(source_id)
+    except KnowledgeServiceError as error:
+        return _knowledge_error_response("knowledge_source_delete", error)
+    return JSONResponse(
+        content={"type": "knowledge_source_delete", "data": payload},
+        status_code=200,
+    )
+
+
 @app.post("/knowledge/sources/local")
 async def knowledge_source_local(raw_request: Request) -> JSONResponse:
     request_data = await _read_json_request(raw_request)

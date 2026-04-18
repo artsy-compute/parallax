@@ -776,6 +776,119 @@ class KnowledgeStore:
                 "documents": [self._row_to_document_summary(item) for item in documents],
             }
 
+    def delete_source(self, workspace_root: str | Path | None, source_id: str) -> dict[str, Any] | None:
+        context = self.workspace_context(workspace_root)
+        normalized_source_id = str(source_id or "").strip()
+        if not normalized_source_id:
+            return None
+
+        deleted_document_count = 0
+        deleted_chunk_count = 0
+        job_id: str | None = None
+
+        with self._lock, self._connect(context) as connection:
+            source_row = connection.execute(
+                "SELECT * FROM sources WHERE workspace_id=? AND id=?",
+                (context.workspace_id, normalized_source_id),
+            ).fetchone()
+            if source_row is None:
+                return None
+
+            source_label = str(source_row["title"] or source_row["canonical_uri"] or normalized_source_id)
+            job_id = self._create_job(
+                connection,
+                workspace_id=context.workspace_id,
+                job_type="delete_source",
+                summary=f"Deleting source {source_label}",
+            )
+            self._update_job(
+                connection,
+                job_id,
+                status="running",
+                progress=0.2,
+                summary=f"Deleting source {source_label}",
+            )
+            connection.commit()
+
+            document_rows = connection.execute(
+                """
+                SELECT id
+                FROM documents
+                WHERE workspace_id=? AND source_id=?
+                """,
+                (context.workspace_id, normalized_source_id),
+            ).fetchall()
+            document_ids = [str(row["id"]) for row in document_rows]
+            deleted_document_count = len(document_ids)
+
+            chunk_rows = connection.execute(
+                """
+                SELECT chunks.id
+                FROM chunks
+                JOIN documents ON chunks.document_id=documents.id
+                WHERE documents.workspace_id=? AND documents.source_id=?
+                """,
+                (context.workspace_id, normalized_source_id),
+            ).fetchall()
+            chunk_ids = [str(row["id"]) for row in chunk_rows]
+            deleted_chunk_count = len(chunk_ids)
+
+            if chunk_ids:
+                connection.executemany(
+                    "DELETE FROM chunk_fts WHERE chunk_id=?",
+                    [(chunk_id,) for chunk_id in chunk_ids],
+                )
+
+            connection.execute(
+                "DELETE FROM sources WHERE workspace_id=? AND id=?",
+                (context.workspace_id, normalized_source_id),
+            )
+            if job_id is not None:
+                self._update_job(
+                    connection,
+                    job_id,
+                    progress=0.7,
+                    summary=(
+                        f"Deleted source {source_label} with "
+                        f"{deleted_document_count} documents and {deleted_chunk_count} chunks"
+                    ),
+                )
+            connection.commit()
+
+        for document_id in document_ids:
+            raw_path = context.raw_dir / f"{document_id}.txt"
+            if raw_path.exists():
+                try:
+                    raw_path.unlink()
+                except Exception:
+                    logger.warning("Failed to remove cached knowledge document %s", raw_path, exc_info=True)
+
+        vector_status = self._rebuild_vector_index(context)
+        if job_id is not None:
+            with self._lock, self._connect(context) as connection:
+                self._update_job(
+                    connection,
+                    job_id,
+                    status="completed",
+                    progress=1.0,
+                    summary=(
+                        f"Deleted source {source_label} with "
+                        f"{deleted_document_count} documents and {deleted_chunk_count} chunks "
+                        f"and rebuilt vectors using {vector_status.get('provider_name') or 'embeddings'} "
+                        f"({vector_status.get('backend') or 'none'})"
+                    ),
+                    error="",
+                    completed=True,
+                )
+                connection.commit()
+        return {
+            "source_id": normalized_source_id,
+            "deleted_documents": deleted_document_count,
+            "deleted_chunks": deleted_chunk_count,
+            "job": self.get_job(context.workspace_root, job_id) if job_id else None,
+            "vector_status": vector_status,
+        }
+
     def list_jobs(self, workspace_root: str | Path | None = None, limit: int = 20) -> list[dict[str, Any]]:
         context = self.workspace_context(workspace_root)
         limit = max(1, min(int(limit or 20), 200))

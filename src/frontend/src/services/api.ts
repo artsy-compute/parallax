@@ -476,6 +476,18 @@ export interface KnowledgeCreateResponse {
   };
 }
 
+export interface KnowledgeDeleteSourceResponse {
+  readonly source_id: string;
+  readonly deleted_documents: number;
+  readonly deleted_chunks: number;
+  readonly vector_status: {
+    readonly backend: string;
+    readonly provider_name: string;
+    readonly count: number;
+    readonly dim?: number;
+  };
+}
+
 export const getKnowledgeHealth = async (): Promise<KnowledgeHealth> => {
   const response = await fetch(`${API_BASE_URL}/knowledge/health`, { method: 'GET' });
   const message = await parseJsonResponse(response);
@@ -522,6 +534,20 @@ export const createKnowledgeUrlSource = async (url: string): Promise<KnowledgeCr
   });
   const message = await parseJsonResponse(response);
   if (message.type !== 'knowledge_source_create') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const deleteKnowledgeSource = async (sourceId: string): Promise<KnowledgeDeleteSourceResponse> => {
+  const response = await fetch(`${API_BASE_URL}/knowledge/sources/${encodeURIComponent(sourceId)}`, {
+    method: 'DELETE',
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'knowledge_source_delete') {
     throw new Error(`Invalid message type: ${message.type}.`);
   }
   if (message.error) {
