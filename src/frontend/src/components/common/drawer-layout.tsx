@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, type FC, type PropsWithChildren } from 'react';
-import { Link as RouterLink } from 'react-router-dom';
+import { Link as RouterLink, useLocation } from 'react-router-dom';
 import {
   Alert,
   Box,
   Button,
+  Chip,
   IconButton,
   MenuItem,
   Stack,
@@ -15,12 +16,15 @@ import {
   useTheme,
 } from '@mui/material';
 import { useCluster, useHost } from '../../services';
+import { getKnowledgeHealth, type KnowledgeHealth } from '../../services/api';
 import { AlertDialog, useAlertDialog } from '../mui';
 import { IconBrandGradient } from '../brand';
 import {
+  IconDatabaseSearch,
   IconInfoCircle,
   IconLayoutSidebarLeftCollapse,
   IconLayoutSidebarLeftExpand,
+  IconMessageCircle,
   IconMoonStars,
   IconSettings,
   IconSunHigh,
@@ -96,9 +100,11 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
   hideConversationHistory = false,
 }) => {
   const [{ type: hostType }] = useHost();
+  const { pathname, search } = useLocation();
   const theme = useTheme();
   const narrowWindow = useMediaQuery(theme.breakpoints.down('lg'));
   const { mode, toggleMode } = useThemeMode();
+  const [knowledgeHealth, setKnowledgeHealth] = useState<KnowledgeHealth | null>(null);
 
   const [
     {
@@ -215,6 +221,35 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
   const activeNodes = nodeInfoList.filter((node) => node.status === 'available').length;
   const inactiveNodes = nodeInfoList.length - activeNodes;
   const [rebalancingTopology, setRebalancingTopology] = useState(false);
+  const chatSelected = pathname.startsWith('/chat');
+  const knowledgeSelected = pathname.startsWith('/knowledge');
+  const settingsSelected = pathname.startsWith('/settings');
+  const showConversationList = !hideConversationHistory && !knowledgeSelected;
+  const knowledgeSection = knowledgeSelected
+    ? new URLSearchParams(search).get('section') || 'overview'
+    : '';
+
+  const primaryNavButtonSx = (selected: boolean) => ({
+    justifyContent: 'flex-start',
+    color: selected ? 'primary.main' : 'text.secondary',
+    bgcolor: selected ? 'action.selected' : 'transparent',
+    borderRadius: 2,
+    px: 1,
+    py: 0.75,
+    '&:hover': { bgcolor: selected ? 'action.selected' : 'action.hover' },
+  });
+
+  const secondaryNavButtonSx = (selected: boolean) => ({
+    justifyContent: 'flex-start',
+    color: selected ? 'primary.main' : 'text.secondary',
+    bgcolor: selected ? 'action.selected' : 'transparent',
+    borderRadius: 2,
+    px: 1,
+    py: 0.45,
+    minHeight: '2rem',
+    fontSize: '0.85rem',
+    '&:hover': { bgcolor: selected ? 'action.selected' : 'action.hover' },
+  });
 
   const getClusterStatusCounts = (clusterId: string) => {
     if (clusterId === activeClusterId) {
@@ -262,6 +297,28 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
       setRebalancingTopology(false);
     }
   };
+
+  useEffect(() => {
+    if (!knowledgeSelected || hideConversationHistory) {
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const nextHealth = await getKnowledgeHealth();
+        if (!cancelled) {
+          setKnowledgeHealth(nextHealth);
+        }
+      } catch {
+        if (!cancelled) {
+          setKnowledgeHealth(null);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [hideConversationHistory, knowledgeSelected]);
 
   return (
     <DrawerLayoutRoot direction='row'>
@@ -367,23 +424,91 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
 
         {sidebarExpanded && (
           <Stack sx={{ minHeight: 0, flex: 1, gap: 2, overflow: 'hidden' }}>
-            {!hideConversationHistory && <ConversationHistory />}
+            {showConversationList && <ConversationHistory />}
+            {!hideConversationHistory && !showConversationList && (
+              <Button
+                component={RouterLink}
+                to='/chat'
+                color='inherit'
+                variant='text'
+                startIcon={<IconMessageCircle size={18} />}
+                sx={primaryNavButtonSx(chatSelected)}
+              >
+                Conversations
+              </Button>
+            )}
+            {!hideConversationHistory && (
+              <Stack sx={{ gap: 0.5, mt: showConversationList ? 'auto' : 0 }}>
+                <Button
+                  component={RouterLink}
+                  to='/knowledge'
+                  color='inherit'
+                  variant='text'
+                  startIcon={<IconDatabaseSearch size={18} />}
+                  sx={primaryNavButtonSx(knowledgeSelected)}
+                >
+                  Knowledge
+                </Button>
+                {knowledgeSelected && (
+                  <Stack sx={{ gap: 0.35, pl: 1.75 }}>
+                    <Button
+                      component={RouterLink}
+                      to='/knowledge?section=overview'
+                      color='inherit'
+                      variant='text'
+                      sx={secondaryNavButtonSx(knowledgeSection === 'overview')}
+                    >
+                      Overview
+                    </Button>
+                    <Button
+                      component={RouterLink}
+                      to='/knowledge?section=ingest'
+                      color='inherit'
+                      variant='text'
+                      sx={secondaryNavButtonSx(knowledgeSection === 'ingest')}
+                    >
+                      Ingest
+                    </Button>
+                    <Button
+                      component={RouterLink}
+                      to='/knowledge?section=search'
+                      color='inherit'
+                      variant='text'
+                      sx={secondaryNavButtonSx(knowledgeSection === 'search')}
+                    >
+                      Search
+                    </Button>
+                    <Button
+                      component={RouterLink}
+                      to='/knowledge?section=sources'
+                      color='inherit'
+                      variant='text'
+                      sx={secondaryNavButtonSx(knowledgeSection === 'sources')}
+                    >
+                      Sources
+                    </Button>
+                    <Button
+                      component={RouterLink}
+                      to='/knowledge?section=jobs'
+                      color='inherit'
+                      variant='text'
+                      sx={secondaryNavButtonSx(knowledgeSection === 'jobs')}
+                    >
+                      Jobs
+                    </Button>
+                  </Stack>
+                )}
+              </Stack>
+            )}
             {hideConversationHistory && <Box sx={{ flex: 1 }} />}
+            {!hideConversationHistory && !showConversationList && <Box sx={{ flex: 1 }} />}
             <Button
               component={RouterLink}
               to='/settings'
               color='inherit'
               variant='text'
               startIcon={<IconSettings size={18} />}
-              sx={{
-                mt: 'auto',
-                justifyContent: 'flex-start',
-                color: 'text.secondary',
-                borderRadius: 2,
-                px: 1,
-                py: 0.75,
-                '&:hover': { bgcolor: 'action.hover' },
-              }}
+              sx={primaryNavButtonSx(settingsSelected)}
             >
               Settings
             </Button>
@@ -391,24 +516,62 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
         )}
 
         {!sidebarExpanded && (
-          <Tooltip
-            title='Settings'
-            placement='right'
-            slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
-          >
-            <IconButton
-              component={RouterLink}
-              to='/settings'
-              sx={{
-                mt: 'auto',
-                color: 'text.secondary',
-                borderRadius: '10px',
-                '&:hover': { bgcolor: 'action.hover' },
-              }}
+          <Stack sx={{ mt: 'auto', gap: 0.5 }}>
+            <Tooltip
+              title='Conversations'
+              placement='right'
+              slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
             >
-              <IconSettings size={18} />
-            </IconButton>
-          </Tooltip>
+              <IconButton
+                component={RouterLink}
+                to='/chat'
+                sx={{
+                  color: chatSelected ? 'primary.main' : 'text.secondary',
+                  bgcolor: chatSelected ? 'action.selected' : 'transparent',
+                  borderRadius: '10px',
+                  '&:hover': { bgcolor: chatSelected ? 'action.selected' : 'action.hover' },
+                }}
+              >
+                <IconMessageCircle size={18} />
+              </IconButton>
+            </Tooltip>
+            <Tooltip
+              title='Knowledge'
+              placement='right'
+              slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
+            >
+              <IconButton
+                component={RouterLink}
+                to='/knowledge'
+                sx={{
+                  color: knowledgeSelected ? 'primary.main' : 'text.secondary',
+                  bgcolor: knowledgeSelected ? 'action.selected' : 'transparent',
+                  borderRadius: '10px',
+                  '&:hover': { bgcolor: knowledgeSelected ? 'action.selected' : 'action.hover' },
+                }}
+              >
+                <IconDatabaseSearch size={18} />
+              </IconButton>
+            </Tooltip>
+            <Tooltip
+              title='Settings'
+              placement='right'
+              slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
+            >
+              <IconButton
+                component={RouterLink}
+                to='/settings'
+                sx={{
+                  color: settingsSelected ? 'primary.main' : 'text.secondary',
+                  bgcolor: settingsSelected ? 'action.selected' : 'transparent',
+                  borderRadius: '10px',
+                  '&:hover': { bgcolor: settingsSelected ? 'action.selected' : 'action.hover' },
+                }}
+              >
+                <IconSettings size={18} />
+              </IconButton>
+            </Tooltip>
+          </Stack>
         )}
         </DrawerLayoutSide>
       )}
@@ -423,6 +586,22 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
             </Stack>
           )}
           {!hideConversationHistory ? (
+            knowledgeSelected ? (
+              <Stack sx={{ minWidth: 0, flex: 1, gap: 0.35 }}>
+                <Typography variant='caption' color='text.secondary'>Knowledge</Typography>
+                <Stack direction='row' sx={{ alignItems: 'center', gap: 0.75, minWidth: 0, flexWrap: 'wrap' }}>
+                  <Typography variant='body2' sx={{ fontWeight: 600 }} noWrap>
+                    {knowledgeHealth?.workspace_id ? `Workspace · ${knowledgeHealth.workspace_id}` : 'Knowledge workspace'}
+                  </Typography>
+                  {knowledgeHealth?.vector_backend && (
+                    <Chip size='small' label={knowledgeHealth.vector_backend} />
+                  )}
+                </Stack>
+                <Typography variant='caption' color='text.secondary' noWrap>
+                  {knowledgeHealth?.embeddings.active_provider || knowledgeHealth?.embeddings.configured_provider || 'Loading knowledge status'}
+                </Typography>
+              </Stack>
+            ) : (
             <Stack sx={{ minWidth: 0, flex: 1 }}>
               <Typography variant='caption' color='text.secondary'>Cluster</Typography>
               {clusterProfiles.length > 0 ? (
@@ -552,6 +731,7 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
                 </Typography>
               )}
             </Stack>
+            )
           ) : (
             <Box sx={{ flex: 1 }} />
           )}

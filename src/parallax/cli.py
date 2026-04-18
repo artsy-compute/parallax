@@ -264,12 +264,18 @@ def _execute_dev_processes(
     backend_env: dict[str, str] | None = None,
     frontend_env: dict[str, str] | None = None,
     frontend_cwd: str | None = None,
+    knowledge_cmd: list[str] | None = None,
+    knowledge_env: dict[str, str] | None = None,
+    knowledge_cwd: str | None = None,
 ) -> None:
     logger.info("Running backend command: %s", " ".join(backend_cmd))
     logger.info("Running frontend command: %s", " ".join(frontend_cmd))
+    if knowledge_cmd:
+        logger.info("Running knowledge command: %s", " ".join(knowledge_cmd))
 
     backend_process = None
     frontend_process = None
+    knowledge_process = None
     try:
         backend_process = subprocess.Popen(
             backend_cmd,
@@ -282,22 +288,37 @@ def _execute_dev_processes(
             cwd=frontend_cwd,
             start_new_session=True,
         )
+        if knowledge_cmd:
+            knowledge_process = subprocess.Popen(
+                knowledge_cmd,
+                env=knowledge_env,
+                cwd=knowledge_cwd,
+                start_new_session=True,
+            )
+
+        managed_processes = [
+            ("backend server", backend_process),
+            ("frontend dev server", frontend_process),
+            ("knowledge service", knowledge_process),
+        ]
         while True:
-            backend_rc = backend_process.poll()
-            frontend_rc = frontend_process.poll()
-            if backend_rc is not None:
-                _terminate_process_group(frontend_process, "frontend dev server")
-                if backend_rc != 0:
-                    logger.error("Backend exited with code %s", backend_rc)
-                sys.exit(backend_rc)
-            if frontend_rc is not None:
-                _terminate_process_group(backend_process, "backend server")
-                if frontend_rc != 0:
-                    logger.error("Frontend dev server exited with code %s", frontend_rc)
-                sys.exit(frontend_rc)
+            for label, process in managed_processes:
+                if process is None:
+                    continue
+                return_code = process.poll()
+                if return_code is None:
+                    continue
+                for other_label, other_process in managed_processes:
+                    if other_process is None or other_process is process:
+                        continue
+                    _terminate_process_group(other_process, other_label)
+                if return_code != 0:
+                    logger.error("%s exited with code %s", label.capitalize(), return_code)
+                sys.exit(return_code)
             time.sleep(0.5)
     except KeyboardInterrupt:
         logger.info("Received interrupt signal, shutting down dev-run...")
+        _terminate_process_group(knowledge_process, "knowledge service")
         _terminate_process_group(frontend_process, "frontend dev server")
         _terminate_process_group(backend_process, "backend server")
         sys.exit(0)
@@ -409,11 +430,16 @@ def dev_run_command(args, passthrough_args: list[str] | None = None):
 
     project_root = get_project_root()
     backend_main = project_root / "src" / "backend" / "main.py"
+    knowledge_src_root = project_root / "src"
+    knowledge_main = knowledge_src_root / "knowledge_service" / "app.py"
     frontend_dir = project_root / "src" / "frontend"
     package_json = frontend_dir / "package.json"
 
     if not backend_main.exists():
         logger.info(f"Error: Backend main.py not found at {backend_main}")
+        sys.exit(1)
+    if not knowledge_main.exists():
+        logger.info(f"Error: knowledge service app.py not found at {knowledge_main}")
         sys.exit(1)
     if not package_json.exists():
         logger.info(f"Error: frontend package.json not found at {package_json}")
@@ -426,6 +452,9 @@ def dev_run_command(args, passthrough_args: list[str] | None = None):
     frontend_host = str(args.frontend_host or "127.0.0.1")
     explicit_backend_port = _flag_present(passthrough_args, ["--port"])
     explicit_frontend_port = int(args.frontend_port or 5173) != 5173
+    knowledge_host = str(os.environ.get("PARALLAX_KB_HOST", "127.0.0.1")).strip() or "127.0.0.1"
+    requested_knowledge_port = max(1, int(os.environ.get("PARALLAX_KB_PORT", "3012")))
+    explicit_knowledge_port = "PARALLAX_KB_PORT" in os.environ
 
     if explicit_backend_port:
         if not _is_local_port_available(backend_host, requested_backend_port):
@@ -465,10 +494,36 @@ def dev_run_command(args, passthrough_args: list[str] | None = None):
                 frontend_port,
             )
 
+    if explicit_knowledge_port:
+        if not _is_local_port_available(knowledge_host, requested_knowledge_port):
+            logger.error(
+                "Error: knowledge dev-run port %s is already in use on %s. Stop the other process or unset PARALLAX_KB_PORT.",
+                requested_knowledge_port,
+                knowledge_host,
+            )
+            sys.exit(1)
+        knowledge_port = requested_knowledge_port
+    else:
+        knowledge_port = _pick_available_local_port(knowledge_host, requested_knowledge_port)
+        if knowledge_port != requested_knowledge_port:
+            logger.info(
+                "Knowledge port %s is in use on %s; dev-run selected free port %s instead.",
+                requested_knowledge_port,
+                knowledge_host,
+                knowledge_port,
+            )
+
     backend_cmd = [sys.executable, str(backend_main)]
     log_file = args.log_file or _find_flag_value(passthrough_args, ["--log-file"]) or _default_log_file("run")
     backend_env = os.environ.copy()
     backend_env["PARALLAX_LOG_FILE"] = log_file
+    backend_env["PARALLAX_KB_HOST"] = knowledge_host
+    backend_env["PARALLAX_KB_PORT"] = str(knowledge_port)
+    backend_env["PYTHONPATH"] = (
+        f"{knowledge_src_root}{os.pathsep}{backend_env['PYTHONPATH']}"
+        if backend_env.get("PYTHONPATH")
+        else str(knowledge_src_root)
+    )
 
     if not _flag_present(passthrough_args, ["--port"]):
         backend_cmd.extend(["--port", str(backend_port)])
@@ -497,9 +552,19 @@ def dev_run_command(args, passthrough_args: list[str] | None = None):
     frontend_env["PARALLAX_BACKEND_HOST"] = backend_host
     frontend_env["PARALLAX_BACKEND_PORT"] = str(backend_port)
     backend_env["PARALLAX_FRONTEND_DEV_SERVER_URL"] = f"http://{frontend_host}:{frontend_port}"
+    knowledge_cmd = [sys.executable, "-m", "knowledge_service.app"]
+    knowledge_env = os.environ.copy()
+    knowledge_env["PARALLAX_KB_HOST"] = knowledge_host
+    knowledge_env["PARALLAX_KB_PORT"] = str(knowledge_port)
+    knowledge_env["PYTHONPATH"] = (
+        f"{knowledge_src_root}{os.pathsep}{knowledge_env['PYTHONPATH']}"
+        if knowledge_env.get("PYTHONPATH")
+        else str(knowledge_src_root)
+    )
 
     logger.info("Frontend dev server URL: http://%s:%s", frontend_host, frontend_port)
     logger.info("Backend dev server URL: http://%s:%s", backend_host, backend_port)
+    logger.info("Knowledge dev server URL: http://%s:%s", knowledge_host, knowledge_port)
     logger.info(
         "dev-run is active. Open http://%s:%s/ and the backend will redirect to the live Vite frontend.",
         backend_host,
@@ -511,6 +576,9 @@ def dev_run_command(args, passthrough_args: list[str] | None = None):
         backend_env=backend_env,
         frontend_env=frontend_env,
         frontend_cwd=str(frontend_dir),
+        knowledge_cmd=knowledge_cmd,
+        knowledge_env=knowledge_env,
+        knowledge_cwd=str(project_root),
     )
 
 

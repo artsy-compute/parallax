@@ -365,6 +365,211 @@ export const deleteAllChatHistory = async (): Promise<{ deleted: number }> => {
   return message.data;
 };
 
+export interface KnowledgeHealth {
+  readonly ok: boolean;
+  readonly workspace_id: string;
+  readonly workspace_root: string;
+  readonly storage_root: string;
+  readonly embeddings: {
+    readonly configured_provider: string;
+    readonly active_provider: string;
+  };
+  readonly vector_backend: string;
+  readonly counts: {
+    readonly sources: number;
+    readonly documents: number;
+    readonly chunks: number;
+    readonly jobs: number;
+  };
+  readonly error?: string;
+}
+
+export interface KnowledgeSourceSummary {
+  readonly id: string;
+  readonly workspace_id: string;
+  readonly source_type: 'workspace_path' | 'url';
+  readonly title: string;
+  readonly canonical_uri: string;
+  readonly root_path: string;
+  readonly status: 'queued' | 'ready' | 'failed';
+  readonly document_count: number;
+  readonly last_error: string;
+  readonly created_at: number;
+  readonly updated_at: number;
+}
+
+export interface KnowledgeDocumentSummary {
+  readonly id: string;
+  readonly source_id: string;
+  readonly document_uri: string;
+  readonly title: string;
+  readonly mime_type: string;
+  readonly sha256: string;
+  readonly byte_size: number;
+  readonly text_length: number;
+  readonly chunk_count: number;
+  readonly created_at: number;
+  readonly updated_at: number;
+}
+
+export interface KnowledgeSourceDetail extends KnowledgeSourceSummary {
+  readonly documents: readonly KnowledgeDocumentSummary[];
+}
+
+export interface KnowledgeJob {
+  readonly id: string;
+  readonly workspace_id: string;
+  readonly job_type: string;
+  readonly status: 'queued' | 'running' | 'completed' | 'failed';
+  readonly progress: number;
+  readonly summary: string;
+  readonly error: string;
+  readonly created_at: number;
+  readonly updated_at: number;
+  readonly completed_at: number | null;
+}
+
+export interface KnowledgeSearchResult {
+  readonly chunk_id: string;
+  readonly document_id: string;
+  readonly document_title: string;
+  readonly document_uri: string;
+  readonly source_id: string;
+  readonly source_title: string;
+  readonly source_type: string;
+  readonly canonical_uri: string;
+  readonly snippet: string;
+  readonly chunk_position: number;
+  readonly fused_rank: number;
+  readonly lexical_rank: number | null;
+  readonly semantic_rank: number | null;
+}
+
+export interface KnowledgeSearchResponse {
+  readonly query: string;
+  readonly items: readonly KnowledgeSearchResult[];
+  readonly total: number;
+}
+
+export interface KnowledgeDocumentDetail extends KnowledgeDocumentSummary {
+  readonly content: string;
+  readonly source_title: string;
+  readonly source_type: string;
+  readonly canonical_uri: string;
+  readonly chunks: readonly {
+    readonly id: string;
+    readonly position: number;
+    readonly text: string;
+    readonly token_estimate: number;
+    readonly char_count: number;
+  }[];
+}
+
+export interface KnowledgeCreateResponse {
+  readonly source: KnowledgeSourceDetail;
+  readonly job: KnowledgeJob;
+  readonly vector_status: {
+    readonly backend: string;
+    readonly provider_name: string;
+    readonly count: number;
+    readonly dim: number;
+  };
+}
+
+export const getKnowledgeHealth = async (): Promise<KnowledgeHealth> => {
+  const response = await fetch(`${API_BASE_URL}/knowledge/health`, { method: 'GET' });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'knowledge_health') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error && !message.data?.ok) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const getKnowledgeSources = async (): Promise<readonly KnowledgeSourceSummary[]> => {
+  const response = await fetch(`${API_BASE_URL}/knowledge/sources`, { method: 'GET' });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'knowledge_sources') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return Array.isArray(message.data?.items) ? message.data.items : [];
+};
+
+export const createKnowledgeLocalSource = async (path: string): Promise<KnowledgeCreateResponse> => {
+  const response = await fetch(`${API_BASE_URL}/knowledge/sources/local`, {
+    method: 'POST',
+    body: JSON.stringify({ path }),
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'knowledge_source_create') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const createKnowledgeUrlSource = async (url: string): Promise<KnowledgeCreateResponse> => {
+  const response = await fetch(`${API_BASE_URL}/knowledge/sources/url`, {
+    method: 'POST',
+    body: JSON.stringify({ url }),
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'knowledge_source_create') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const searchKnowledge = async (query: string, limit = 10): Promise<KnowledgeSearchResponse> => {
+  const response = await fetch(`${API_BASE_URL}/knowledge/search?${new URLSearchParams({ q: query, limit: String(limit) })}`, {
+    method: 'GET',
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'knowledge_search') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const getKnowledgeDocument = async (documentId: string): Promise<KnowledgeDocumentDetail> => {
+  const response = await fetch(`${API_BASE_URL}/knowledge/documents/${encodeURIComponent(documentId)}`, {
+    method: 'GET',
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'knowledge_document_detail') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const getKnowledgeJobs = async (): Promise<readonly KnowledgeJob[]> => {
+  const response = await fetch(`${API_BASE_URL}/knowledge/jobs`, { method: 'GET' });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'knowledge_jobs') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return Array.isArray(message.data?.items) ? message.data.items : [];
+};
+
 export interface ConfiguredNodeInventoryHost {
   readonly id: string;
   readonly display_name: string;

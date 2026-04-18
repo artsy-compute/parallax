@@ -6,11 +6,13 @@ import { useConstCallback, useRefCallback } from '../hooks';
 
 const PATH_SETUP = '/setup';
 const PATH_CHAT = '/chat';
+const PATH_KNOWLEDGE = '/knowledge';
 const PATH_NODES = '/nodes';
 const PATH_SETTINGS = '/settings';
 
 const PageSetup = lazy(() => import('../pages/setup'));
 const PageChat = lazy(() => import('../pages/chat'));
+const PageKnowledge = lazy(() => import('../pages/knowledge'));
 const PageNodes = lazy(() => import('../pages/nodes'));
 const PageSettings = lazy(() => import('../pages/settings'));
 
@@ -47,6 +49,7 @@ export const MainRouter = () => {
     if (
       status === 'available'
       && !pathname.startsWith(PATH_CHAT)
+      && !pathname.startsWith(PATH_KNOWLEDGE)
       && !pathname.startsWith(PATH_NODES)
       && !pathname.startsWith(PATH_SETTINGS)
     ) {
@@ -68,6 +71,14 @@ export const MainRouter = () => {
       element: (
         <Suspense fallback={<div>Loading...</div>}>
           <PageChat />
+        </Suspense>
+      ),
+    },
+    {
+      path: PATH_KNOWLEDGE,
+      element: (
+        <Suspense fallback={<div>Loading...</div>}>
+          <PageKnowledge />
         </Suspense>
       ),
     },

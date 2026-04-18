@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Stre
 from fastapi.staticfiles import StaticFiles
 
 from backend.server.custom_models import CustomModelStore
+from backend.server.knowledge_client import KnowledgeServiceClient, KnowledgeServiceError
 from backend.server.node_management import NodeManagementService
 from backend.server.request_handler import RequestHandler
 from backend.server.scheduler_manage import SchedulerManage
@@ -51,6 +52,7 @@ settings_store = SettingsStore()
 request_handler = RequestHandler()
 tool_runtime = ServerToolRuntime(settings_store=settings_store)
 request_handler.tool_runtime = tool_runtime
+knowledge_client = KnowledgeServiceClient()
 
 
 def _content_encoding_has_token(value: str | None, token: str) -> bool:
@@ -1011,6 +1013,126 @@ async def chat_history_delete_all():
             "type": "chat_history_delete_all",
             "data": {"deleted": deleted},
         },
+        status_code=200,
+    )
+
+
+def _knowledge_error_response(message_type: str, error: KnowledgeServiceError) -> JSONResponse:
+    payload: dict[str, object] = {"type": message_type, "error": str(error)}
+    if message_type == "knowledge_health":
+        payload["data"] = {"ok": False, "error": str(error)}
+    return JSONResponse(
+        content=payload,
+        status_code=max(400, min(int(error.status_code or 500), 599)),
+    )
+
+
+@app.get("/knowledge/health")
+async def knowledge_health() -> JSONResponse:
+    try:
+        payload = await knowledge_client.health()
+    except KnowledgeServiceError as error:
+        return _knowledge_error_response("knowledge_health", error)
+    return JSONResponse(
+        content={"type": "knowledge_health", "data": payload},
+        status_code=200,
+    )
+
+
+@app.get("/knowledge/sources")
+async def knowledge_sources(limit: int = 100) -> JSONResponse:
+    try:
+        payload = await knowledge_client.list_sources(limit=limit)
+    except KnowledgeServiceError as error:
+        return _knowledge_error_response("knowledge_sources", error)
+    return JSONResponse(
+        content={"type": "knowledge_sources", "data": {"items": payload}},
+        status_code=200,
+    )
+
+
+@app.get("/knowledge/sources/{source_id}")
+async def knowledge_source_detail(source_id: str) -> JSONResponse:
+    try:
+        payload = await knowledge_client.get_source(source_id)
+    except KnowledgeServiceError as error:
+        return _knowledge_error_response("knowledge_source_detail", error)
+    return JSONResponse(
+        content={"type": "knowledge_source_detail", "data": payload},
+        status_code=200,
+    )
+
+
+@app.post("/knowledge/sources/local")
+async def knowledge_source_local(raw_request: Request) -> JSONResponse:
+    request_data = await _read_json_request(raw_request)
+    try:
+        payload = await knowledge_client.ingest_local_source(str(request_data.get("path") or ""))
+    except KnowledgeServiceError as error:
+        return _knowledge_error_response("knowledge_source_create", error)
+    return JSONResponse(
+        content={"type": "knowledge_source_create", "data": payload},
+        status_code=200,
+    )
+
+
+@app.post("/knowledge/sources/url")
+async def knowledge_source_url(raw_request: Request) -> JSONResponse:
+    request_data = await _read_json_request(raw_request)
+    try:
+        payload = await knowledge_client.ingest_url_source(str(request_data.get("url") or ""))
+    except KnowledgeServiceError as error:
+        return _knowledge_error_response("knowledge_source_create", error)
+    return JSONResponse(
+        content={"type": "knowledge_source_create", "data": payload},
+        status_code=200,
+    )
+
+
+@app.get("/knowledge/search")
+async def knowledge_search(q: str, limit: int = 10) -> JSONResponse:
+    try:
+        payload = await knowledge_client.search(q, limit=limit)
+    except KnowledgeServiceError as error:
+        return _knowledge_error_response("knowledge_search", error)
+    return JSONResponse(
+        content={"type": "knowledge_search", "data": payload},
+        status_code=200,
+    )
+
+
+@app.get("/knowledge/documents/{document_id}")
+async def knowledge_document_detail(document_id: str) -> JSONResponse:
+    try:
+        payload = await knowledge_client.get_document(document_id)
+    except KnowledgeServiceError as error:
+        return _knowledge_error_response("knowledge_document_detail", error)
+    return JSONResponse(
+        content={"type": "knowledge_document_detail", "data": payload},
+        status_code=200,
+    )
+
+
+@app.get("/knowledge/jobs")
+async def knowledge_jobs(limit: int = 20) -> JSONResponse:
+    try:
+        payload = await knowledge_client.list_jobs(limit=limit)
+    except KnowledgeServiceError as error:
+        return _knowledge_error_response("knowledge_jobs", error)
+    return JSONResponse(
+        content={"type": "knowledge_jobs", "data": {"items": payload}},
+        status_code=200,
+    )
+
+
+@app.get("/knowledge/jobs/{job_id}")
+async def knowledge_job_detail(job_id: str) -> JSONResponse:
+    try:
+        payload = await knowledge_client.get_job(job_id)
+    except KnowledgeServiceError as error:
+        return _knowledge_error_response("knowledge_job_detail", error)
+    return JSONResponse(
+        content={"type": "knowledge_job_detail", "data": payload},
         status_code=200,
     )
 
