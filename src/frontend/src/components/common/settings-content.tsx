@@ -40,7 +40,7 @@ import {
   IconTrash,
   IconX,
 } from '@tabler/icons-react';
-import { useCluster, useHost } from '../../services';
+import { useChat, useCluster, useHost } from '../../services';
 import {
   addCustomModel,
   deleteChatHistoryConversation,
@@ -140,6 +140,7 @@ const getModelCapacityDisabledReason = (requiredGb?: number, availableGb?: numbe
 
 export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 'cluster' }) => {
   const navigate = useNavigate();
+  const [, { loadConversation }] = useChat();
   const [{ type: hostType }] = useHost();
   const { mode, setMode } = useThemeMode();
   const [
@@ -1100,6 +1101,19 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
       setChatHistoryExportingId('');
     }
   };
+
+  const onOpenChatConversation = useRefCallback(async (conversationId: string) => {
+    const normalizedConversationId = String(conversationId || '').trim();
+    if (!normalizedConversationId) {
+      return;
+    }
+    try {
+      await loadConversation(normalizedConversationId);
+    } catch (error) {
+      console.error('open chat conversation error', error);
+    }
+    navigate('/chat');
+  });
 
   const onDeleteChatConversation = async (conversationId: string) => {
     try {
@@ -2612,7 +2626,26 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                         overflow: 'hidden',
                       }}
                     >
-                      <Box component='span' sx={{ fontWeight: 600, flex: 'none' }}>
+                      <Box
+                        component='button'
+                        type='button'
+                        onClick={() => {
+                          void onOpenChatConversation(conversation.conversation_id);
+                        }}
+                        sx={{
+                          fontWeight: 600,
+                          flex: 'none',
+                          p: 0,
+                          m: 0,
+                          border: 0,
+                          bgcolor: 'transparent',
+                          color: 'inherit',
+                          font: 'inherit',
+                          cursor: 'pointer',
+                          textAlign: 'left',
+                          '&:hover': { textDecoration: 'underline' },
+                        }}
+                      >
                         {conversation.title || `Conversation ${conversation.conversation_id.slice(0, 8)}`}
                       </Box>
                       {(conversation.summary || conversation.last_message) && (
@@ -2649,6 +2682,18 @@ export const SettingsContent: FC<{ routeSection?: string }> = ({ routeSection = 
                     </Stack>
                   </Stack>
                   <Stack direction='row' sx={{ gap: 0.25, alignItems: 'center', flex: 'none' }}>
+                    <Tooltip title='Open conversation in chat'>
+                      <span>
+                        <IconButton
+                          size='small'
+                          onClick={() => {
+                            void onOpenChatConversation(conversation.conversation_id);
+                          }}
+                        >
+                          <IconMessageCircle size={16} />
+                        </IconButton>
+                      </span>
+                    </Tooltip>
                     <Tooltip title={chatHistoryExportingId === conversation.conversation_id ? 'Exporting conversation' : 'Export conversation JSON'}>
                       <span>
                         <IconButton
