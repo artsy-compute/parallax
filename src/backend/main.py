@@ -1,13 +1,16 @@
 import asyncio
+import gzip
+import io
 import json
 import os
 import subprocess
 import time
 import uuid
+import zlib
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -50,6 +53,60 @@ tool_runtime = ServerToolRuntime(settings_store=settings_store)
 request_handler.tool_runtime = tool_runtime
 
 
+def _content_encoding_has_token(value: str | None, token: str) -> bool:
+    if not value:
+        return False
+    return any(entry.strip().lower() == token for entry in value.split(","))
+
+
+async def _read_json_request(raw_request: Request) -> dict:
+    body = await raw_request.body()
+    content_encoding = raw_request.headers.get("content-encoding")
+
+    try:
+        if _content_encoding_has_token(content_encoding, "zstd"):
+            try:
+                import zstandard as zstd
+            except ImportError as exc:
+                raise HTTPException(
+                    status_code=415,
+                    detail=(
+                        "Received Content-Encoding: zstd, but Python package "
+                        "`zstandard` is not installed"
+                    ),
+                ) from exc
+            with zstd.ZstdDecompressor().stream_reader(io.BytesIO(body)) as reader:
+                body = reader.read()
+        elif _content_encoding_has_token(content_encoding, "gzip"):
+            body = gzip.decompress(body)
+        elif _content_encoding_has_token(content_encoding, "deflate"):
+            body = zlib.decompress(body)
+        elif content_encoding not in (None, "", "identity"):
+            raise HTTPException(
+                status_code=415,
+                detail=f"Unsupported Content-Encoding: {content_encoding}",
+            )
+
+        return json.loads(body.decode("utf-8"))
+    except HTTPException:
+        raise
+    except UnicodeDecodeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Request body is not valid UTF-8 JSON after decoding: {exc}",
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON body: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Failed to decode request body with Content-Encoding "
+                f"{content_encoding!r}: {exc}"
+            ),
+        ) from exc
+
+
 def _merged_model_list() -> list[dict]:
     static_models = list(get_model_list())
     custom_models = custom_model_store.list_model_entries()
@@ -62,6 +119,21 @@ def _merged_model_list() -> list[dict]:
         seen_names.add(name)
         merged_models.append(item)
     return merged_models
+
+
+def _serialize_openai_model(item: dict) -> dict:
+    name = str(item.get("name") or "").strip()
+    return {
+        "id": name,
+        "object": "model",
+        "created": int(item.get("created") or 0),
+        "owned_by": "parallax",
+        "metadata": {
+            key: value
+            for key, value in item.items()
+            if key not in {"name", "created"}
+        },
+    }
 
 
 tool_runtime.set_context(
@@ -99,6 +171,45 @@ _FRONTEND_BUILD_STATUS = {
     "latest_source_mtime": 0.0,
 }
 FRONTEND_DEV_SERVER_URL = os.environ.get("PARALLAX_FRONTEND_DEV_SERVER_URL", "").strip()
+
+
+@app.middleware("http")
+async def log_openai_api_requests(request: Request, call_next):
+    if not str(request.url.path or "").startswith("/v1/"):
+        return await call_next(request)
+
+    started_at = time.time()
+    client_host = request.client.host if request.client else "unknown"
+    logger.info(
+        "OpenAI API request started method=%s path=%s query=%s client=%s",
+        request.method,
+        request.url.path,
+        request.url.query,
+        client_host,
+    )
+    try:
+        response = await call_next(request)
+    except Exception:
+        elapsed_ms = int((time.time() - started_at) * 1000)
+        logger.exception(
+            "OpenAI API request failed method=%s path=%s client=%s elapsed_ms=%d",
+            request.method,
+            request.url.path,
+            client_host,
+            elapsed_ms,
+        )
+        raise
+
+    elapsed_ms = int((time.time() - started_at) * 1000)
+    logger.info(
+        "OpenAI API request completed method=%s path=%s client=%s status=%s elapsed_ms=%d",
+        request.method,
+        request.url.path,
+        client_host,
+        response.status_code,
+        elapsed_ms,
+    )
+    return response
 PERSISTED_BIND_OVERRIDE = os.environ.get("PARALLAX_USE_PERSISTED_BIND_SETTINGS", "").strip().lower() in {
     "1",
     "true",
@@ -250,6 +361,37 @@ async def model_list():
             "data": merged_models,
         },
         status_code=200,
+    )
+
+
+@app.get("/v1/models")
+async def openai_v1_models():
+    merged_models = _merged_model_list()
+    return JSONResponse(
+        content={
+            "object": "list",
+            "data": [_serialize_openai_model(item) for item in merged_models],
+        },
+        status_code=200,
+    )
+
+
+@app.get("/v1/models/{model_id:path}")
+async def openai_v1_model_detail(model_id: str):
+    normalized_model_id = str(model_id or "").strip()
+    for item in _merged_model_list():
+        if str(item.get("name") or "").strip() == normalized_model_id:
+            return JSONResponse(content=_serialize_openai_model(item), status_code=200)
+    return JSONResponse(
+        content={
+            "error": {
+                "message": f"Model not found: {normalized_model_id}",
+                "type": "invalid_request_error",
+                "param": "model",
+                "code": "not_found",
+            }
+        },
+        status_code=404,
     )
 
 
@@ -745,10 +887,86 @@ async def cluster_rebalance() -> JSONResponse:
 
 @app.post("/v1/chat/completions")
 async def openai_v1_chat_completions(raw_request: Request):
-    request_data = await raw_request.json()
+    request_data = await _read_json_request(raw_request)
+    logger.info(
+        "Handling /v1/chat/completions model=%s stream=%s conversation_id=%s content_encoding=%s",
+        str(request_data.get("model") or ""),
+        bool(request_data.get("stream", False)),
+        str(request_data.get("conversation_id") or ""),
+        str(raw_request.headers.get("content-encoding") or ""),
+    )
     request_id = uuid.uuid4()
     received_ts = time.time()
     return await request_handler.v1_chat_completions(request_data, request_id, received_ts)
+
+
+@app.post("/v1/responses")
+async def openai_v1_responses(raw_request: Request):
+    request_data = await _read_json_request(raw_request)
+    logger.info(
+        "Handling /v1/responses model=%s stream=%s previous_response_id=%s content_encoding=%s",
+        str(request_data.get("model") or ""),
+        bool(request_data.get("stream", False)),
+        str(request_data.get("previous_response_id") or ""),
+        str(raw_request.headers.get("content-encoding") or ""),
+    )
+    request_id = uuid.uuid4()
+    received_ts = time.time()
+    return await request_handler.v1_responses(request_data, request_id, received_ts)
+
+
+@app.get("/v1/responses/{response_id}")
+async def openai_v1_response_detail(response_id: str):
+    payload = request_handler.get_response(response_id)
+    if payload is None:
+        return JSONResponse(
+            content={
+                "error": {
+                    "message": f"Response not found: {response_id}",
+                    "type": "invalid_request_error",
+                    "param": "response_id",
+                    "code": "not_found",
+                }
+            },
+            status_code=404,
+        )
+    return JSONResponse(content=payload, status_code=200)
+
+
+@app.get("/v1/responses/{response_id}/input_items")
+async def openai_v1_response_input_items(response_id: str):
+    payload = request_handler.get_response_input_items(response_id)
+    if payload is None:
+        return JSONResponse(
+            content={
+                "error": {
+                    "message": f"Response not found: {response_id}",
+                    "type": "invalid_request_error",
+                    "param": "response_id",
+                    "code": "not_found",
+                }
+            },
+            status_code=404,
+        )
+    return JSONResponse(content=payload, status_code=200)
+
+
+@app.post("/v1/responses/{response_id}/cancel")
+async def openai_v1_response_cancel(response_id: str):
+    payload = request_handler.cancel_response(response_id)
+    if payload is None:
+        return JSONResponse(
+            content={
+                "error": {
+                    "message": f"Response not found: {response_id}",
+                    "type": "invalid_request_error",
+                    "param": "response_id",
+                    "code": "not_found",
+                }
+            },
+            status_code=404,
+        )
+    return JSONResponse(content=payload, status_code=200)
 
 
 @app.get("/chat/history")
@@ -832,6 +1050,12 @@ async def serve_chat_html():
     if redirect_target:
         return RedirectResponse(url=redirect_target, status_code=307)
     return FileResponse(str(FRONTEND_DIST_DIR / "chat.html"))
+
+
+@app.websocket("/{path:path}")
+async def reject_unhandled_websocket(path: str, websocket: WebSocket):
+    logger.info("Rejecting unsupported websocket path=/%s", path)
+    await websocket.close(code=1003, reason="WebSocket not supported on this endpoint")
 
 
 # mount the frontend

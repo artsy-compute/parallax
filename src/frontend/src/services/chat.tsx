@@ -24,6 +24,8 @@ const debugLog = async (...args: any[]) => {
 const STORAGE_KEY = 'parallax.chat.conversation_id';
 const FIRST_TOKEN_TIMEOUT_MS = 30000;
 const NO_PROGRESS_TIMEOUT_MS = 45000;
+const ERROR_RECOVERY_ATTEMPTS = 5;
+const ERROR_RECOVERY_POLL_INTERVAL_MS = 1500;
 
 const createConversationId = () =>
   globalThis.crypto?.randomUUID?.() || `conv-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -217,6 +219,55 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     }
   });
 
+  const recoverConversationAfterStreamError = useRefCallback(async () => {
+    const expectedUserMessageCount = messages.filter((message) => message.role === 'user').length;
+    if (!conversationId || expectedUserMessageCount <= 0) {
+      return false;
+    }
+
+    for (let attempt = 0; attempt < ERROR_RECOVERY_ATTEMPTS; attempt += 1) {
+      try {
+        const detail = await getChatHistoryDetail(conversationId);
+        const persistedUserMessageCount = detail.messages.filter((message) => message.role === 'user').length;
+        const lastPersistedMessage = detail.messages[detail.messages.length - 1];
+
+        if (
+          persistedUserMessageCount >= expectedUserMessageCount
+          && lastPersistedMessage?.role === 'assistant'
+          && Boolean(lastPersistedMessage.content?.trim())
+        ) {
+          setConversationId(detail.conversation_id || conversationId);
+          setInputTruncationNotice(null);
+          setRequestHealthNotice(null);
+          setPromptBudgetNotice(null);
+          setMessages(
+            detail.messages.map((message) => ({
+              id: message.id,
+              role: message.role,
+              status: 'done' as const,
+              content: message.content,
+              raw: message.content,
+              createdAt: message.created_at,
+            })),
+          );
+          setStatus('closed');
+          refreshHistory();
+          return true;
+        }
+      } catch (error) {
+        console.error('recoverConversationAfterStreamError error', error);
+      }
+
+      if (attempt < ERROR_RECOVERY_ATTEMPTS - 1) {
+        await new Promise((resolve) => {
+          globalThis.setTimeout(resolve, ERROR_RECOVERY_POLL_INTERVAL_MS);
+        });
+      }
+    }
+
+    return false;
+  });
+
   useEffect(() => {
     refreshHistory();
   }, []);
@@ -298,35 +349,41 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
         clearFirstTokenTimeout();
         clearNoProgressTimeout();
         debugLog('SSE ERROR', error);
-        // Set last message to done
-        setMessages((prev) => {
-          const lastMessage = prev[prev.length - 1];
-          if (!lastMessage) {
-            return prev;
+        void (async () => {
+          const recovered = await recoverConversationAfterStreamError();
+          if (recovered) {
+            return;
           }
-          const { id, raw, thinking, content } = lastMessage;
-          debugLog('GENERATING ERROR', 'lastMessage:', lastMessage);
-          debugLog('GENERATING ERROR', 'id:', id);
-          debugLog('GENERATING ERROR', 'raw:', raw);
-          debugLog('GENERATING ERROR', 'thinking:', thinking);
-          debugLog('GENERATING ERROR', 'content:', content);
-          return [
-            ...prev.slice(0, -1),
-            {
-              ...lastMessage,
-              status: 'error',
-            },
-          ];
-        });
-        if (!timedOutBeforeFirstTokenRef.current && !timedOutDuringGenerationRef.current) {
-          setRequestHealthNotice({
-            severity: 'error',
-            message: 'The request ended unexpectedly. You can retry it from the current conversation.',
+
+          setMessages((prev) => {
+            const lastMessage = prev[prev.length - 1];
+            if (!lastMessage) {
+              return prev;
+            }
+            const { id, raw, thinking, content } = lastMessage;
+            debugLog('GENERATING ERROR', 'lastMessage:', lastMessage);
+            debugLog('GENERATING ERROR', 'id:', id);
+            debugLog('GENERATING ERROR', 'raw:', raw);
+            debugLog('GENERATING ERROR', 'thinking:', thinking);
+            debugLog('GENERATING ERROR', 'content:', content);
+            return [
+              ...prev.slice(0, -1),
+              {
+                ...lastMessage,
+                status: 'error',
+              },
+            ];
           });
-        }
-        debugLog('SSE ERROR', error);
-        setStatus('error');
-        refreshHistory();
+          if (!timedOutBeforeFirstTokenRef.current && !timedOutDuringGenerationRef.current) {
+            setRequestHealthNotice({
+              severity: 'error',
+              message: 'The request ended unexpectedly. You can retry it from the current conversation.',
+            });
+          }
+          debugLog('SSE ERROR', error);
+          setStatus('error');
+          refreshHistory();
+        })();
       },
       onMessage: (message) => {
         // debugLog('onMessage', message);
@@ -401,6 +458,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
           if (choices[0].delta.content) {
             timedOutBeforeFirstTokenRef.current = false;
             clearFirstTokenTimeout();
+            armNoProgressTimeout();
             setStatus('generating');
           }
           setMessages((prev) => {

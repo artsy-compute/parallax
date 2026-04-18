@@ -1,4 +1,5 @@
 import asyncio
+from copy import deepcopy
 import json
 import time
 import uuid
@@ -36,6 +37,16 @@ class ActiveRequestRecord:
     last_error: Optional[str] = None
 
 
+@dataclass
+class StoredResponseRecord:
+    response_id: str
+    payload: Dict[str, Any]
+    input_items: list[Any] = field(default_factory=list)
+    chat_messages: list[Dict[str, Any]] = field(default_factory=list)
+    created_at: float = field(default_factory=time.time)
+    status: str = "completed"
+
+
 class RequestHandler:
     """HTTP request forwarder with scheduler-aware routing and retry logic.
 
@@ -57,6 +68,7 @@ class RequestHandler:
         self.tool_runtime = ServerToolRuntime()
         self.active_requests: dict[str, ActiveRequestRecord] = {}
         self.summary_tasks: dict[str, asyncio.Task] = {}
+        self.responses: dict[str, StoredResponseRecord] = {}
 
     def set_scheduler_manage(self, scheduler_manage):
         self.scheduler_manage = scheduler_manage
@@ -251,6 +263,447 @@ class RequestHandler:
         except Exception:
             return {}
         return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _deepcopy_jsonable(value: Any) -> Any:
+        return deepcopy(value)
+
+    @staticmethod
+    def _new_response_id() -> str:
+        return f"resp_{uuid.uuid4().hex}"
+
+    @staticmethod
+    def _new_output_item_id(prefix: str) -> str:
+        return f"{prefix}_{uuid.uuid4().hex}"
+
+    @staticmethod
+    def _normalize_model_role(role: str) -> str:
+        normalized = str(role or "").strip().lower()
+        if normalized == "developer":
+            return "system"
+        if normalized in {"system", "user", "assistant", "tool"}:
+            return normalized
+        return "user"
+
+    @staticmethod
+    def _stringify_tool_output(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except Exception:
+            return str(value)
+
+    def _flatten_response_content(self, content: Any) -> str:
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, dict):
+            return self._flatten_response_content([content])
+        if not isinstance(content, list):
+            return ""
+
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                if item:
+                    parts.append(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "").strip()
+            if item_type in {"input_text", "output_text", "text"}:
+                text = str(item.get("text") or "").strip()
+                if text:
+                    parts.append(text)
+                continue
+            if item_type == "refusal":
+                text = str(item.get("refusal") or "").strip()
+                if text:
+                    parts.append(text)
+        return "".join(parts).strip()
+
+    def _normalize_response_input_items(self, input_value: Any) -> list[Any]:
+        if input_value is None:
+            return []
+        if isinstance(input_value, list):
+            return list(input_value)
+        return [input_value]
+
+    def _response_input_item_to_chat_messages(self, item: Any) -> list[Dict[str, Any]]:
+        if isinstance(item, str):
+            stripped = item.strip()
+            return [{"role": "user", "content": stripped}] if stripped else []
+
+        if not isinstance(item, dict):
+            return []
+
+        item_type = str(item.get("type") or "").strip()
+        role = item.get("role")
+
+        if item_type == "message" or role is not None:
+            normalized_role = self._normalize_model_role(str(role or "user"))
+            content = self._flatten_response_content(item.get("content"))
+            if not content:
+                return []
+            return [{"role": normalized_role, "content": content}]
+
+        if item_type == "function_call":
+            call_id = str(item.get("call_id") or item.get("id") or "").strip()
+            name = str(item.get("name") or "").strip()
+            arguments = item.get("arguments")
+            argument_text = arguments if isinstance(arguments, str) else self._stringify_tool_output(arguments)
+            if not call_id or not name:
+                return []
+            return [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": argument_text or "{}",
+                            },
+                        }
+                    ],
+                }
+            ]
+
+        if item_type.endswith("_call_output"):
+            call_id = str(item.get("call_id") or item.get("tool_call_id") or "").strip()
+            if not call_id:
+                return []
+            output = item.get("output")
+            if output is None and "result" in item:
+                output = item.get("result")
+            content = self._stringify_tool_output(output)
+            status = str(item.get("status") or "").strip().lower()
+            if status and status not in {"completed", "success", "ok"}:
+                content = json.dumps(
+                    {
+                        "ok": False,
+                        "status": status,
+                        "output": output,
+                    },
+                    ensure_ascii=False,
+                )
+            return [{"role": "tool", "tool_call_id": call_id, "content": content}]
+
+        if item_type in {"input_text", "text"}:
+            text = str(item.get("text") or "").strip()
+            return [{"role": "user", "content": text}] if text else []
+
+        return []
+
+    def _response_tool_to_chat_tool(self, tool: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(tool, dict):
+            return None
+        if str(tool.get("type") or "").strip() != "function":
+            return None
+
+        name = str(tool.get("name") or "").strip()
+        if not name:
+            return None
+
+        function_payload = {
+            "name": name,
+            "description": str(tool.get("description") or "").strip(),
+            "parameters": tool.get("parameters") or {"type": "object", "properties": {}},
+        }
+        if "strict" in tool:
+            function_payload["strict"] = bool(tool.get("strict"))
+
+        return {
+            "type": "function",
+            "function": function_payload,
+        }
+
+    def _responses_tools_to_chat_tools(self, tools: Any) -> list[Dict[str, Any]]:
+        converted: list[Dict[str, Any]] = []
+        for tool in tools or []:
+            mapped = self._response_tool_to_chat_tool(tool)
+            if mapped is not None:
+                converted.append(mapped)
+        return converted
+
+    @staticmethod
+    def _response_tool_choice_to_chat_tool_choice(tool_choice: Any) -> Any:
+        if isinstance(tool_choice, str):
+            return tool_choice
+        if not isinstance(tool_choice, dict):
+            return None
+        if str(tool_choice.get("type") or "").strip() != "function":
+            return None
+        name = str(tool_choice.get("name") or "").strip()
+        if not name:
+            return None
+        return {
+            "type": "function",
+            "function": {"name": name},
+        }
+
+    def _build_chat_messages_for_response_request(self, request_data: Dict[str, Any]) -> list[Dict[str, Any]]:
+        previous_response_id = str(request_data.get("previous_response_id") or "").strip()
+        base_messages: list[Dict[str, Any]] = []
+        if previous_response_id:
+            record = self.responses.get(previous_response_id)
+            if record is None:
+                raise KeyError(previous_response_id)
+            base_messages = self._deepcopy_jsonable(record.chat_messages)
+
+        instructions = str(request_data.get("instructions") or "").strip()
+        if instructions:
+            system_message = {"role": "system", "content": instructions}
+            if base_messages and str(base_messages[0].get("role") or "") == "system":
+                base_messages[0] = system_message
+            else:
+                base_messages.insert(0, system_message)
+
+        input_items = self._normalize_response_input_items(request_data.get("input"))
+        for item in input_items:
+            base_messages.extend(self._response_input_item_to_chat_messages(item))
+
+        return base_messages
+
+    def _responses_request_to_chat_request(self, request_data: Dict[str, Any]) -> tuple[Dict[str, Any], list[Any], list[Dict[str, Any]]]:
+        input_items = self._normalize_response_input_items(request_data.get("input"))
+        messages = self._build_chat_messages_for_response_request(request_data)
+
+        chat_request: Dict[str, Any] = {
+            "model": request_data.get("model"),
+            "messages": messages,
+            "stream": False,
+            "_disable_chat_memory": True,
+        }
+        if request_data.get("max_output_tokens") is not None:
+            chat_request["max_tokens"] = request_data.get("max_output_tokens")
+        if request_data.get("temperature") is not None:
+            chat_request["temperature"] = request_data.get("temperature")
+        if request_data.get("top_p") is not None:
+            chat_request["top_p"] = request_data.get("top_p")
+        if request_data.get("stop") is not None:
+            chat_request["stop"] = request_data.get("stop")
+
+        tools = self._responses_tools_to_chat_tools(request_data.get("tools") or [])
+        if tools:
+            chat_request["tools"] = tools
+
+        tool_choice = self._response_tool_choice_to_chat_tool_choice(request_data.get("tool_choice"))
+        if tool_choice is not None:
+            chat_request["tool_choice"] = tool_choice
+        elif isinstance(request_data.get("tool_choice"), str):
+            chat_request["tool_choice"] = request_data.get("tool_choice")
+
+        return chat_request, input_items, messages
+
+    def _chat_payload_to_response_usage(self, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        usage = payload.get("usage")
+        if not isinstance(usage, dict):
+            return None
+
+        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        completion_tokens = int(usage.get("completion_tokens") or 0)
+        total_tokens = int(usage.get("total_tokens") or (prompt_tokens + completion_tokens))
+        prompt_details = usage.get("prompt_tokens_details") or {}
+        completion_details = usage.get("completion_tokens_details") or {}
+
+        return {
+            "input_tokens": prompt_tokens,
+            "input_tokens_details": {
+                "cached_tokens": int(prompt_details.get("cached_tokens") or 0),
+            },
+            "output_tokens": completion_tokens,
+            "output_tokens_details": {
+                "reasoning_tokens": int(completion_details.get("reasoning_tokens") or 0),
+            },
+            "total_tokens": total_tokens,
+        }
+
+    def _chat_payload_to_response_output_items(self, payload: Dict[str, Any]) -> list[Dict[str, Any]]:
+        message = self._extract_completion_message(payload)
+        output_items: list[Dict[str, Any]] = []
+
+        tool_calls = message.get("tool_calls") or []
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            function = tool_call.get("function") or {}
+            call_id = str(tool_call.get("id") or self._new_output_item_id("call")).strip()
+            output_items.append(
+                {
+                    "type": "function_call",
+                    "id": self._new_output_item_id("fc"),
+                    "call_id": call_id,
+                    "name": str(function.get("name") or "").strip(),
+                    "arguments": str(function.get("arguments") or "{}"),
+                    "status": "completed",
+                }
+            )
+
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            output_items.append(
+                {
+                    "type": "message",
+                    "id": self._new_output_item_id("msg"),
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": content,
+                            "annotations": [],
+                        }
+                    ],
+                }
+            )
+
+        return output_items
+
+    def _chat_payload_to_response_payload(
+        self,
+        *,
+        response_id: str,
+        request_data: Dict[str, Any],
+        chat_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        created_at = int(chat_payload.get("created") or time.time())
+        output_items = self._chat_payload_to_response_output_items(chat_payload)
+        reasoning = request_data.get("reasoning") or {}
+
+        payload: Dict[str, Any] = {
+            "id": response_id,
+            "object": "response",
+            "created_at": created_at,
+            "status": "completed",
+            "completed_at": int(time.time()),
+            "error": None,
+            "incomplete_details": None,
+            "instructions": request_data.get("instructions"),
+            "max_output_tokens": request_data.get("max_output_tokens"),
+            "model": request_data.get("model") or chat_payload.get("model"),
+            "output": output_items,
+            "parallel_tool_calls": bool(request_data.get("parallel_tool_calls", True)),
+            "previous_response_id": request_data.get("previous_response_id"),
+            "reasoning": {
+                "effort": reasoning.get("effort"),
+                "summary": reasoning.get("summary"),
+            },
+            "store": bool(request_data.get("store", False)),
+            "temperature": request_data.get("temperature", 1.0),
+            "text": request_data.get("text") or {"format": {"type": "text"}},
+            "tool_choice": request_data.get("tool_choice", "auto"),
+            "tools": request_data.get("tools") or [],
+            "top_p": request_data.get("top_p", 1.0),
+            "truncation": request_data.get("truncation", "disabled"),
+            "usage": self._chat_payload_to_response_usage(chat_payload),
+            "user": request_data.get("user"),
+            "metadata": request_data.get("metadata") or {},
+        }
+        return payload
+
+    def _build_response_chat_history(
+        self,
+        *,
+        request_messages: list[Dict[str, Any]],
+        chat_payload: Dict[str, Any],
+    ) -> list[Dict[str, Any]]:
+        history = self._deepcopy_jsonable(request_messages)
+        assistant_message = self._build_assistant_tool_message(chat_payload)
+        if assistant_message.get("content") or assistant_message.get("tool_calls"):
+            history.append(assistant_message)
+        return history
+
+    def _store_response_record(
+        self,
+        *,
+        response_id: str,
+        payload: Dict[str, Any],
+        input_items: list[Any],
+        chat_messages: list[Dict[str, Any]],
+    ) -> None:
+        self.responses[response_id] = StoredResponseRecord(
+            response_id=response_id,
+            payload=self._deepcopy_jsonable(payload),
+            input_items=self._deepcopy_jsonable(input_items),
+            chat_messages=self._deepcopy_jsonable(chat_messages),
+        )
+
+    def _build_responses_sse_from_payload(self, payload: Dict[str, Any]) -> StreamingResponse:
+        response_snapshot = self._deepcopy_jsonable(payload)
+        response_snapshot["status"] = "in_progress"
+        response_snapshot["completed_at"] = None
+        response_snapshot["output"] = []
+        output_items = list(payload.get("output") or [])
+
+        async def stream_generator():
+            yield f"event: response.created\ndata: {json.dumps({'type': 'response.created', 'response': response_snapshot}, separators=(',', ':'))}\n\n".encode("utf-8")
+            yield f"event: response.in_progress\ndata: {json.dumps({'type': 'response.in_progress', 'response': response_snapshot}, separators=(',', ':'))}\n\n".encode("utf-8")
+
+            for output_index, item in enumerate(output_items):
+                in_progress_item = self._deepcopy_jsonable(item)
+                if isinstance(in_progress_item, dict):
+                    in_progress_item["status"] = "in_progress"
+                    if str(in_progress_item.get("type") or "") == "message":
+                        in_progress_item["content"] = []
+                yield f"event: response.output_item.added\ndata: {json.dumps({'type': 'response.output_item.added', 'output_index': output_index, 'item': in_progress_item}, separators=(',', ':'))}\n\n".encode("utf-8")
+
+                if str(item.get("type") or "") == "message":
+                    content_items = list(item.get("content") or [])
+                    for content_index, content_item in enumerate(content_items):
+                        if str(content_item.get("type") or "") != "output_text":
+                            continue
+                        added_part = {
+                            "type": "output_text",
+                            "text": "",
+                            "annotations": list(content_item.get("annotations") or []),
+                        }
+                        yield f"event: response.content_part.added\ndata: {json.dumps({'type': 'response.content_part.added', 'item_id': item.get('id'), 'output_index': output_index, 'content_index': content_index, 'part': added_part}, separators=(',', ':'))}\n\n".encode('utf-8')
+                        text = str(content_item.get("text") or "")
+                        if text:
+                            yield f"event: response.output_text.delta\ndata: {json.dumps({'type': 'response.output_text.delta', 'item_id': item.get('id'), 'output_index': output_index, 'content_index': content_index, 'delta': text}, separators=(',', ':'))}\n\n".encode('utf-8')
+                        yield f"event: response.output_text.done\ndata: {json.dumps({'type': 'response.output_text.done', 'item_id': item.get('id'), 'output_index': output_index, 'content_index': content_index, 'text': text}, separators=(',', ':'))}\n\n".encode('utf-8')
+                        yield f"event: response.content_part.done\ndata: {json.dumps({'type': 'response.content_part.done', 'item_id': item.get('id'), 'output_index': output_index, 'content_index': content_index, 'part': content_item}, separators=(',', ':'))}\n\n".encode('utf-8')
+
+                yield f"event: response.output_item.done\ndata: {json.dumps({'type': 'response.output_item.done', 'output_index': output_index, 'item': item}, separators=(',', ':'))}\n\n".encode("utf-8")
+
+            yield f"event: response.completed\ndata: {json.dumps({'type': 'response.completed', 'response': payload}, separators=(',', ':'))}\n\n".encode("utf-8")
+
+        return StreamingResponse(
+            stream_generator(),
+            media_type="text/event-stream",
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "no-cache",
+            },
+        )
+
+    def get_response(self, response_id: str) -> Optional[Dict[str, Any]]:
+        record = self.responses.get(str(response_id or "").strip())
+        if record is None:
+            return None
+        return self._deepcopy_jsonable(record.payload)
+
+    def get_response_input_items(self, response_id: str) -> Optional[Dict[str, Any]]:
+        record = self.responses.get(str(response_id or "").strip())
+        if record is None:
+            return None
+        return {
+            "object": "list",
+            "data": self._deepcopy_jsonable(record.input_items),
+        }
+
+    def cancel_response(self, response_id: str) -> Optional[Dict[str, Any]]:
+        record = self.responses.get(str(response_id or "").strip())
+        if record is None:
+            return None
+        record.status = "cancelled"
+        record.payload["status"] = "cancelled"
+        return self._deepcopy_jsonable(record.payload)
 
     @staticmethod
     def _extract_completion_message(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -603,3 +1056,73 @@ class RequestHandler:
 
     async def v1_chat_completions(self, request_data: Dict, request_id: str, received_ts: int):
         return await self._forward_request(request_data, request_id, received_ts)
+
+    async def v1_responses(self, request_data: Dict, request_id: str, received_ts: int):
+        response_id = self._new_response_id()
+        try:
+            chat_request, input_items, request_messages = self._responses_request_to_chat_request(request_data)
+        except KeyError as exc:
+            return JSONResponse(
+                content={
+                    "error": {
+                        "message": f"Unknown previous_response_id: {exc.args[0]}",
+                        "type": "invalid_request_error",
+                        "param": "previous_response_id",
+                        "code": "not_found",
+                    }
+                },
+                status_code=404,
+            )
+
+        response = await self._forward_request(chat_request, response_id, received_ts)
+        if not isinstance(response, Response) or response.status_code != 200:
+            return response
+
+        try:
+            content = response.body.decode()
+        except Exception:
+            return JSONResponse(
+                content={
+                    "error": {
+                        "message": "Failed to decode backend response",
+                        "type": "server_error",
+                    }
+                },
+                status_code=500,
+            )
+
+        chat_payload = self._parse_completion_payload(content)
+        if not chat_payload:
+            return JSONResponse(
+                content={
+                    "error": {
+                        "message": "Backend returned an empty response payload",
+                        "type": "server_error",
+                    }
+                },
+                status_code=500,
+            )
+
+        response_payload = self._chat_payload_to_response_payload(
+            response_id=response_id,
+            request_data=request_data,
+            chat_payload=chat_payload,
+        )
+        response_history = self._build_response_chat_history(
+            request_messages=request_messages,
+            chat_payload=chat_payload,
+        )
+        self._store_response_record(
+            response_id=response_id,
+            payload=response_payload,
+            input_items=input_items,
+            chat_messages=response_history,
+        )
+
+        if bool(request_data.get("stream")):
+            return self._build_responses_sse_from_payload(response_payload)
+
+        return Response(
+            content=json.dumps(response_payload, separators=(",", ":")),
+            media_type="application/json",
+        )

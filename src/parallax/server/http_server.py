@@ -28,7 +28,7 @@ import fastapi
 import uvicorn
 import zmq
 import zmq.asyncio
-from fastapi.responses import ORJSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from mlx_lm.tokenizer_utils import StreamingDetokenizer
 from mlx_lm.utils import load_config
 from pydantic import BaseModel
@@ -537,7 +537,7 @@ def create_error_response(
 ):
     """Creates a json error response for the frontend."""
     error = ErrorResponse(message=message, type=err_type, code=status_code.value)
-    return ORJSONResponse(content=error.model_dump(), status_code=error.code)
+    return JSONResponse(content=error.model_dump(), status_code=error.code)
 
 
 # Fast API
@@ -621,7 +621,7 @@ async def v1_chat_completions(raw_request: fastapi.Request):
 
             response = app.state.http_handler.generate_non_stream_response(request_id)
             app.state.http_handler.release_request(request_id)
-            return ORJSONResponse(status_code=200, content=response)
+            return JSONResponse(status_code=200, content=response)
         except Exception as e:
             # Handle any unexpected errors during processing
             logger.error(f"Error processing non-streaming request {request_id}: {e}")
