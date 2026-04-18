@@ -12,6 +12,7 @@ from starlette.concurrency import iterate_in_threadpool
 
 from backend.server.chat_memory import ChatMemoryService
 from backend.server.constants import NODE_STATUS_AVAILABLE
+from backend.server.run_store import RunStore
 from backend.server.tool_runtime import ServerToolRuntime
 from parallax_utils.logging_config import get_logger
 from parallax_utils.request_metrics import get_request_metrics
@@ -27,10 +28,12 @@ class ActiveRequestRecord:
     request_data: Dict
     received_ts: int
     conversation_id: Optional[str] = None
+    run_id: Optional[str] = None
     routing_table: Optional[list[str]] = None
     first_hop: Optional[str] = None
     emitted_text: str = ""
     emitted_any_bytes: bool = False
+    first_output_recorded: bool = False
     status: str = "pending"
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -65,6 +68,7 @@ class RequestHandler:
         self.scheduler_manage = None
         self.stubs = {}
         self.chat_memory = ChatMemoryService()
+        self.run_store = RunStore()
         self.tool_runtime = ServerToolRuntime()
         self.active_requests: dict[str, ActiveRequestRecord] = {}
         self.summary_tasks: dict[str, asyncio.Task] = {}
@@ -84,12 +88,14 @@ class RequestHandler:
         request_data: Dict,
         received_ts: int,
         conversation_id: Optional[str],
+        run_id: Optional[str] = None,
     ) -> ActiveRequestRecord:
         record = ActiveRequestRecord(
             request_id=str(request_id),
             request_data=dict(request_data),
             received_ts=received_ts,
             conversation_id=conversation_id,
+            run_id=run_id,
         )
         self.active_requests[str(request_id)] = record
         return record
@@ -102,6 +108,19 @@ class RequestHandler:
         record.first_hop = routing_table[0] if routing_table else None
         record.status = 'routed'
         record.updated_at = time.time()
+        if record.run_id:
+            self.run_store.update_run(
+                record.run_id,
+                status='running',
+                current_step='Route resolved and request forwarded to an active node',
+            )
+            self.run_store.append_event(
+                record.run_id,
+                kind='routing.resolved',
+                status='completed',
+                title='Routing resolved',
+                detail=f"Request forwarded to node {record.first_hop or 'unknown'}.",
+            )
 
     def _append_request_output(self, request_id: str, text: str, *, emitted_any_bytes: bool = False) -> None:
         record = self.active_requests.get(str(request_id))
@@ -114,6 +133,20 @@ class RequestHandler:
         if record.status != 'completed':
             record.status = 'streaming'
         record.updated_at = time.time()
+        if record.run_id and (text or emitted_any_bytes) and not record.first_output_recorded:
+            record.first_output_recorded = True
+            self.run_store.update_run(
+                record.run_id,
+                status='running',
+                current_step='Generating answer',
+            )
+            self.run_store.append_event(
+                record.run_id,
+                kind='model.output',
+                status='running',
+                title='First output received',
+                detail='The model moved from prompt processing into visible output generation.',
+            )
 
     def _fail_active_request(self, request_id: str, error: Exception | str) -> None:
         record = self.active_requests.get(str(request_id))
@@ -122,6 +155,20 @@ class RequestHandler:
         record.status = 'failed'
         record.last_error = str(error)
         record.updated_at = time.time()
+        if record.run_id:
+            self.run_store.update_run(
+                record.run_id,
+                status='failed',
+                current_step='Request failed before completion',
+                summary=str(error),
+            )
+            self.run_store.append_event(
+                record.run_id,
+                kind='run.failed',
+                status='completed',
+                title='Run failed',
+                detail=str(error),
+            )
 
     def _complete_active_request(self, request_id: str) -> None:
         record = self.active_requests.get(str(request_id))
@@ -188,6 +235,74 @@ class RequestHandler:
         fallback_summary = self.chat_memory.refresh_summary(conversation_id)
         if fallback_summary:
             logger.info('Stored heuristic fallback summary for conversation %s after model summary failure', conversation_id)
+
+    @staticmethod
+    def _extract_latest_user_prompt(request_data: Dict) -> str:
+        messages = request_data.get('messages') or []
+        if not isinstance(messages, list):
+            return ''
+        for message in reversed(messages):
+            if not isinstance(message, dict):
+                continue
+            if str(message.get('role') or '').strip().lower() != 'user':
+                continue
+            content = message.get('content')
+            if isinstance(content, str):
+                return content.strip()
+        return ''
+
+    @staticmethod
+    def _summarize_run_title(prompt: str) -> str:
+        text = str(prompt or '').strip()
+        if not text:
+            return 'Agent run'
+        collapsed = ' '.join(text.split())
+        return collapsed[:96]
+
+    def _policy_to_run_policy(self, request_data: Dict, policy: Any) -> dict[str, Any]:
+        filesystem_access = 'none'
+        enabled_tools = {name for name, enabled in dict(getattr(policy, 'tool_enabled', {}) or {}).items() if enabled}
+        if 'apply_patch' in enabled_tools or 'exec_command' in enabled_tools:
+            filesystem_access = 'workspace-write'
+        elif enabled_tools:
+            filesystem_access = 'read-only'
+        return {
+            'routing_mode': 'local_first',
+            'remote_provider_used': False,
+            'filesystem_access': filesystem_access,
+            'network_access': 'allowlisted',
+        }
+
+    def _create_run_for_request(
+        self,
+        *,
+        request_id: str,
+        request_data: Dict,
+        conversation_id: Optional[str],
+        policy: Any,
+    ) -> Optional[str]:
+        if not conversation_id:
+            return None
+        prompt = self._extract_latest_user_prompt(request_data)
+        run = self.run_store.create_run(
+            request_id=str(request_id),
+            conversation_id=conversation_id,
+            title=self._summarize_run_title(prompt),
+            model=str(request_data.get('model') or '').strip(),
+            requested_by='local-user',
+            status='queued',
+            current_step='Queued from chat and waiting for route assignment',
+            summary='Run created from the current chat request and linked to the conversation timeline.',
+            policy=self._policy_to_run_policy(request_data, policy),
+        )
+        self.run_store.append_event(
+            run['id'],
+            kind='run.created',
+            status='completed',
+            title='Run created',
+            detail='A persisted run record was created for this chat request.',
+        )
+        return str(run['id'])
 
     async def _resolve_routing_table(self, request_id: str, received_ts: int) -> Optional[list[str]]:
         attempts = 0
@@ -798,9 +913,11 @@ class RequestHandler:
         received_ts: int,
         *,
         conversation_id: Optional[str],
+        run_id: Optional[str] = None,
         save_assistant: bool = True,
+        finalize_run: bool = False,
     ):
-        self._register_active_request(str(request_id), request_data, received_ts, conversation_id)
+        self._register_active_request(str(request_id), request_data, received_ts, conversation_id, run_id=run_id)
         start_time = time.time()
         logger.debug(
             f"Forwarding request {request_id}; stream={request_data.get('stream', False)} conversation_id={conversation_id}"
@@ -869,6 +986,20 @@ class RequestHandler:
                                     self._schedule_summary_refresh(conversation_id, request_data.get('model'))
                                 if assistant_text:
                                     self._append_request_output(str(request_id), assistant_text, emitted_any_bytes=True)
+                                if finalize_run and run_id:
+                                    self.run_store.update_run(
+                                        run_id,
+                                        status='completed',
+                                        current_step='Completed',
+                                        summary=assistant_text[:800] if assistant_text else 'Run completed successfully.',
+                                    )
+                                    self.run_store.append_event(
+                                        run_id,
+                                        kind='run.completed',
+                                        status='completed',
+                                        title='Run completed',
+                                        detail='The streaming request finished successfully.',
+                                    )
                                 self._complete_active_request(str(request_id))
                                 return
                             except Exception as e:
@@ -945,6 +1076,20 @@ class RequestHandler:
                         self._schedule_summary_refresh(conversation_id, request_data.get('model'))
                     if assistant_text:
                         self._append_request_output(str(request_id), assistant_text, emitted_any_bytes=True)
+                    if finalize_run and run_id:
+                        self.run_store.update_run(
+                            run_id,
+                            status='completed',
+                            current_step='Completed',
+                            summary=assistant_text[:800] if assistant_text else 'Run completed successfully.',
+                        )
+                        self.run_store.append_event(
+                            run_id,
+                            kind='run.completed',
+                            status='completed',
+                            title='Run completed',
+                            detail='The non-streaming request finished successfully.',
+                        )
                     self._complete_active_request(str(request_id))
                     logger.debug(f"Non-stream response completed for {request_id}")
                     return Response(content=content, media_type="application/json")
@@ -971,6 +1116,12 @@ class RequestHandler:
         prepared_request, conversation_id = self.chat_memory.prepare_request(request_data)
         policy = self.tool_runtime.resolve_policy(request_data)
         prepared_request = self.tool_runtime.inject_builtin_tools(prepared_request, policy)
+        run_id = self._create_run_for_request(
+            request_id=str(request_id),
+            request_data=prepared_request,
+            conversation_id=conversation_id,
+            policy=policy,
+        )
 
         if not policy.enabled:
             return await self._forward_prepared_request(
@@ -978,6 +1129,8 @@ class RequestHandler:
                 request_id,
                 received_ts,
                 conversation_id=conversation_id,
+                run_id=run_id,
+                finalize_run=True,
             )
 
         original_stream = bool(prepared_request.get("stream", False))
@@ -993,7 +1146,9 @@ class RequestHandler:
                 current_request_id,
                 received_ts,
                 conversation_id=conversation_id,
+                run_id=run_id,
                 save_assistant=False,
+                finalize_run=False,
             )
             if not isinstance(response, Response) or response.status_code != 200:
                 return response
@@ -1013,6 +1168,20 @@ class RequestHandler:
                     )
                     self._schedule_summary_refresh(conversation_id, prepared_request.get("model"))
                 if original_stream:
+                    if run_id:
+                        self.run_store.update_run(
+                            run_id,
+                            status='completed',
+                            current_step='Completed',
+                            summary=assistant_text[:800] if assistant_text else 'Run completed successfully.',
+                        )
+                        self.run_store.append_event(
+                            run_id,
+                            kind='run.completed',
+                            status='completed',
+                            title='Run completed',
+                            detail='The tool loop produced a final assistant response and closed successfully.',
+                        )
                     return self._build_sse_response_from_payload(
                         payload,
                         str(request_id),
@@ -1020,11 +1189,42 @@ class RequestHandler:
                     )
                 if payload:
                     payload["id"] = str(request_id)
+                    if run_id:
+                        self.run_store.update_run(
+                            run_id,
+                            status='completed',
+                            current_step='Completed',
+                            summary=assistant_text[:800] if assistant_text else 'Run completed successfully.',
+                        )
+                        self.run_store.append_event(
+                            run_id,
+                            kind='run.completed',
+                            status='completed',
+                            title='Run completed',
+                            detail='The tool loop produced a final assistant response.',
+                        )
                     return Response(
                         content=json.dumps(payload, separators=(",", ":")),
                         media_type="application/json",
                     )
                 return response
+
+            if run_id:
+                self.run_store.increment_tool_count(run_id, len(tool_calls))
+                self.run_store.update_run(
+                    run_id,
+                    status='running',
+                    current_step='Executing tool calls',
+                    summary='The agent paused model generation to execute tool calls.',
+                )
+                self.run_store.append_event(
+                    run_id,
+                    kind='tool.called',
+                    status='completed',
+                    title='Tool call requested',
+                    detail=f'The model requested {len(tool_calls)} tool call(s).',
+                    metadata={'tool_names': [str((tool_call.get("function") or {}).get("name") or '') for tool_call in tool_calls]},
+                )
 
             try:
                 tool_messages = await self.tool_runtime.execute_tool_calls(tool_calls)
@@ -1041,6 +1241,23 @@ class RequestHandler:
                     }
                     for tool_call in tool_calls
                 ]
+                if run_id:
+                    self.run_store.append_event(
+                        run_id,
+                        kind='tool.failed',
+                        status='completed',
+                        title='Tool execution failed',
+                        detail=str(exc),
+                    )
+            else:
+                if run_id:
+                    self.run_store.append_event(
+                        run_id,
+                        kind='tool.completed',
+                        status='completed',
+                        title='Tool execution completed',
+                        detail=f'Executed {len(tool_messages)} tool result message(s).',
+                    )
 
             payload = self._parse_completion_payload(content)
             next_messages = list(tool_request.get("messages") or [])
@@ -1049,6 +1266,20 @@ class RequestHandler:
             tool_request = dict(tool_request)
             tool_request["messages"] = next_messages
 
+        if run_id:
+            self.run_store.update_run(
+                run_id,
+                status='failed',
+                current_step='Tool loop exceeded maximum iterations',
+                summary='The run hit the configured tool-loop iteration cap before producing a final answer.',
+            )
+            self.run_store.append_event(
+                run_id,
+                kind='run.failed',
+                status='completed',
+                title='Tool loop exceeded limit',
+                detail='The run exceeded the configured maximum number of tool iterations.',
+            )
         return JSONResponse(
             content={"error": "Server tool loop exceeded maximum iterations"},
             status_code=500,

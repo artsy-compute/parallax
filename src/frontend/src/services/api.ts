@@ -365,6 +365,97 @@ export const deleteAllChatHistory = async (): Promise<{ deleted: number }> => {
   return message.data;
 };
 
+export interface AgentRunArtifact {
+  readonly label: string;
+  readonly kind: string;
+  readonly value: string;
+}
+
+export interface AgentRunPolicy {
+  readonly routing_mode: string;
+  readonly remote_provider_used: boolean;
+  readonly filesystem_access: string;
+  readonly network_access: string;
+}
+
+export interface AgentRunEvent {
+  readonly id: string;
+  readonly kind: string;
+  readonly status: string;
+  readonly timestamp: number;
+  readonly title: string;
+  readonly detail: string;
+}
+
+export interface AgentRunSummary {
+  readonly id: string;
+  readonly title: string;
+  readonly agent_name: string;
+  readonly status: string;
+  readonly priority: string;
+  readonly risk_level: string;
+  readonly requested_by: string;
+  readonly started_at: number;
+  readonly updated_at: number;
+  readonly duration_ms: number;
+  readonly current_step: string;
+  readonly summary: string;
+  readonly conversation_id: string;
+  readonly model: string;
+  readonly tool_count: number;
+  readonly approval_count: number;
+}
+
+export interface AgentRunDetail extends AgentRunSummary {
+  readonly artifacts: readonly AgentRunArtifact[];
+  readonly policy: AgentRunPolicy;
+  readonly events: readonly AgentRunEvent[];
+}
+
+export const getAgentRunList = async (): Promise<{
+  counts: {
+    total: number;
+    active: number;
+    waiting_for_approval: number;
+    completed: number;
+  };
+  items: readonly AgentRunSummary[];
+}> => {
+  const response = await fetch(`${API_BASE_URL}/agent/runs`, { method: 'GET' });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'agent_run_list') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const getAgentRunDetail = async (runId: string): Promise<AgentRunDetail> => {
+  const response = await fetch(`${API_BASE_URL}/agent/runs/${encodeURIComponent(runId)}`, { method: 'GET' });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'agent_run_detail') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const getAgentRunDetailByConversation = async (conversationId: string): Promise<AgentRunDetail> => {
+  const response = await fetch(`${API_BASE_URL}/agent/runs/by_conversation/${encodeURIComponent(conversationId)}`, { method: 'GET' });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'agent_run_detail') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
 export interface ConfiguredNodeInventoryHost {
   readonly id: string;
   readonly display_name: string;

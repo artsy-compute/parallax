@@ -10,7 +10,15 @@ import {
   type PropsWithChildren,
   type SetStateAction,
 } from 'react';
-import { API_BASE_URL, deleteChatHistoryConversation, getChatHistoryDetail, getChatHistoryList, type ChatHistorySummary } from './api';
+import {
+  API_BASE_URL,
+  deleteChatHistoryConversation,
+  getAgentRunDetailByConversation,
+  getChatHistoryDetail,
+  getChatHistoryList,
+  type AgentRunSummary,
+  type ChatHistorySummary,
+} from './api';
 import { useConst, useRefCallback } from '../hooks';
 import { useCluster } from './cluster';
 import { parseGenerationGpt, parseGenerationQwen } from './chat-helper';
@@ -65,6 +73,7 @@ export interface ChatStates {
   readonly conversationId: string;
   readonly history: readonly ChatHistorySummary[];
   readonly historyLoading: boolean;
+  readonly activeRun: AgentRunSummary | null;
   readonly inputTruncationNotice: {
     readonly truncated: boolean;
     readonly originalPromptTokens: number;
@@ -133,6 +142,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
   });
   const [history, setHistory] = useState<readonly ChatHistorySummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [activeRun, setActiveRun] = useState<AgentRunSummary | null>(null);
   const [inputTruncationNotice, setInputTruncationNotice] = useState<ChatStates['inputTruncationNotice']>(null);
   const [requestHealthNotice, setRequestHealthNotice] = useState<ChatStates['requestHealthNotice']>(null);
   const [promptBudgetNotice, setPromptBudgetNotice] = useState<ChatStates['promptBudgetNotice']>(null);
@@ -142,6 +152,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
   const timedOutBeforeFirstTokenRef = useConst<{ current: boolean }>(() => ({ current: false }));
   const timedOutDuringGenerationRef = useConst<{ current: boolean }>(() => ({ current: false }));
   const streamEndedWithErrorRef = useConst<{ current: boolean }>(() => ({ current: false }));
+  const firstTokenSeenRef = useConst<{ current: boolean }>(() => ({ current: false }));
 
   const clearFirstTokenTimeout = useRefCallback(() => {
     if (firstTokenTimeoutRef.current) {
@@ -155,6 +166,46 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
       clearTimeout(noProgressTimeoutRef.current);
       noProgressTimeoutRef.current = null;
     }
+  });
+
+  const syncActiveRun = useRefCallback((run: AgentRunSummary | null) => {
+    setActiveRun(run);
+  });
+
+  const refreshActiveRun = useRefCallback(async (targetConversationId?: string, minimumUpdatedAt?: number) => {
+    const nextConversationId = str(targetConversationId || conversationId || '').trim();
+    if (!nextConversationId) {
+      syncActiveRun(null);
+      return null;
+    }
+    try {
+      const run = await getAgentRunDetailByConversation(nextConversationId);
+      if (typeof minimumUpdatedAt === 'number' && Number.isFinite(minimumUpdatedAt) && Number(run.updated_at || 0) < minimumUpdatedAt) {
+        return null;
+      }
+      syncActiveRun(run);
+      return run;
+    } catch (error) {
+      syncActiveRun(null);
+      return null;
+    }
+  });
+
+  const waitForActiveRun = useRefCallback(async (targetConversationId?: string, minimumUpdatedAt?: number) => {
+    const nextConversationId = str(targetConversationId || conversationId || '').trim();
+    if (!nextConversationId) {
+      return null;
+    }
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const run = await refreshActiveRun(nextConversationId, minimumUpdatedAt);
+      if (run) {
+        return run;
+      }
+      await new Promise((resolve) => {
+        globalThis.setTimeout(resolve, 350);
+      });
+    }
+    return null;
   });
 
   const armNoProgressTimeout = useRefCallback(() => {
@@ -212,6 +263,12 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
         })),
       );
       setStatus('closed');
+      try {
+        const run = await getAgentRunDetailByConversation(detail.conversation_id || nextConversationId);
+        syncActiveRun(run);
+      } catch {
+        syncActiveRun(null);
+      }
     } catch (error) {
       console.error('getChatHistoryDetail error', error);
     } finally {
@@ -251,6 +308,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
             })),
           );
           setStatus('closed');
+          await refreshActiveRun(detail.conversation_id || conversationId);
           refreshHistory();
           return true;
         }
@@ -293,6 +351,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
         timedOutBeforeFirstTokenRef.current = false;
         timedOutDuringGenerationRef.current = false;
         streamEndedWithErrorRef.current = false;
+        firstTokenSeenRef.current = false;
         clearFirstTokenTimeout();
         clearNoProgressTimeout();
         firstTokenTimeoutRef.current = setTimeout(() => {
@@ -301,6 +360,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
           sse.disconnect();
         }, FIRST_TOKEN_TIMEOUT_MS);
         setStatus('opened');
+        void refreshActiveRun();
       },
       onClose: () => {
         debugLog('SSE CLOSE');
@@ -340,6 +400,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
           });
         }
         setStatus(timedOutBeforeFirstToken || timedOutDuringGeneration || streamEndedWithError ? 'error' : 'closed');
+        void refreshActiveRun();
         timedOutBeforeFirstTokenRef.current = false;
         timedOutDuringGenerationRef.current = false;
         streamEndedWithErrorRef.current = false;
@@ -382,6 +443,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
           }
           debugLog('SSE ERROR', error);
           setStatus('error');
+          await refreshActiveRun();
           refreshHistory();
         })();
       },
@@ -460,6 +522,10 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
             clearFirstTokenTimeout();
             armNoProgressTimeout();
             setStatus('generating');
+            if (!firstTokenSeenRef.current) {
+              firstTokenSeenRef.current = true;
+              void refreshActiveRun();
+            }
           }
           setMessages((prev) => {
             let next = prev;
@@ -564,12 +630,13 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     }
     setMessages(nextMessages);
     refreshHistory();
-
+    const requestStartedAt = Date.now() / 1000;
     sse.connect(
       modelName,
       conversationId,
       nextMessages.map(({ id, role, content }) => ({ id, role, content })),
     );
+    void waitForActiveRun(conversationId, requestStartedAt - 1);
   });
 
   const stop = useRefCallback<ChatActions['stop']>(() => {
@@ -594,6 +661,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
       setInputTruncationNotice(null);
       setRequestHealthNotice(null);
       setPromptBudgetNotice(null);
+      syncActiveRun(null);
       setMessages([]);
       setStatus('closed');
       setConversationId(createConversationId());
@@ -606,6 +674,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     setInputTruncationNotice(null);
     setRequestHealthNotice(null);
     setPromptBudgetNotice(null);
+    syncActiveRun(null);
     setMessages([]);
     setStatus('closed');
     setConversationId(createConversationId());
@@ -624,6 +693,7 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
     setInputTruncationNotice(null);
     setRequestHealthNotice(null);
     setPromptBudgetNotice(null);
+    syncActiveRun(null);
     setMessages([]);
     setConversationId(createConversationId());
     refreshHistory();
@@ -651,13 +721,14 @@ export const ChatProvider: FC<PropsWithChildren> = ({ children }) => {
         conversationId,
         history,
         historyLoading,
+        activeRun,
         inputTruncationNotice,
         requestHealthNotice,
         promptBudgetNotice,
       },
       actions,
     ],
-    [input, status, messages, conversationId, history, historyLoading, inputTruncationNotice, requestHealthNotice, promptBudgetNotice, actions],
+    [input, status, messages, conversationId, history, historyLoading, activeRun, inputTruncationNotice, requestHealthNotice, promptBudgetNotice, actions],
   );
 
   return <context.Provider value={value}>{children}</context.Provider>;

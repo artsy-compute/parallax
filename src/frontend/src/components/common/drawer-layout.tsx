@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FC, type PropsWithChildren } from 'react';
-import { Link as RouterLink } from 'react-router-dom';
+import { Link as RouterLink, useLocation } from 'react-router-dom';
 import {
   Alert,
   Box,
@@ -22,6 +22,7 @@ import {
   IconLayoutSidebarLeftCollapse,
   IconLayoutSidebarLeftExpand,
   IconMoonStars,
+  IconStack3,
   IconSettings,
   IconSunHigh,
 } from '@tabler/icons-react';
@@ -95,6 +96,7 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
   contentWidth = 'default',
   hideConversationHistory = false,
 }) => {
+  const { pathname } = useLocation();
   const [{ type: hostType }] = useHost();
   const theme = useTheme();
   const narrowWindow = useMediaQuery(theme.breakpoints.down('lg'));
@@ -215,6 +217,8 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
   const activeNodes = nodeInfoList.filter((node) => node.status === 'available').length;
   const inactiveNodes = nodeInfoList.length - activeNodes;
   const [rebalancingTopology, setRebalancingTopology] = useState(false);
+  const runsSelected = pathname.startsWith('/runs');
+  const settingsSelected = pathname.startsWith('/settings');
 
   const getClusterStatusCounts = (clusterId: string) => {
     if (clusterId === activeClusterId) {
@@ -371,6 +375,24 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
             {hideConversationHistory && <Box sx={{ flex: 1 }} />}
             <Button
               component={RouterLink}
+              to='/runs'
+              color='inherit'
+              variant='text'
+              startIcon={<IconStack3 size={18} />}
+              sx={{
+                justifyContent: 'flex-start',
+                color: runsSelected ? 'brand.main' : 'text.secondary',
+                bgcolor: runsSelected ? 'brand.lighter' : 'transparent',
+                borderRadius: 2,
+                px: 1,
+                py: 0.75,
+                '&:hover': { bgcolor: runsSelected ? 'brand.lighter' : 'action.hover' },
+              }}
+            >
+              Runs
+            </Button>
+            <Button
+              component={RouterLink}
               to='/settings'
               color='inherit'
               variant='text'
@@ -378,11 +400,12 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
               sx={{
                 mt: 'auto',
                 justifyContent: 'flex-start',
-                color: 'text.secondary',
+                color: settingsSelected ? 'brand.main' : 'text.secondary',
+                bgcolor: settingsSelected ? 'brand.lighter' : 'transparent',
                 borderRadius: 2,
                 px: 1,
                 py: 0.75,
-                '&:hover': { bgcolor: 'action.hover' },
+                '&:hover': { bgcolor: settingsSelected ? 'brand.lighter' : 'action.hover' },
               }}
             >
               Settings
@@ -391,24 +414,44 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
         )}
 
         {!sidebarExpanded && (
-          <Tooltip
-            title='Settings'
-            placement='right'
-            slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
-          >
-            <IconButton
-              component={RouterLink}
-              to='/settings'
-              sx={{
-                mt: 'auto',
-                color: 'text.secondary',
-                borderRadius: '10px',
-                '&:hover': { bgcolor: 'action.hover' },
-              }}
+          <Stack sx={{ mt: 'auto', gap: 1 }}>
+            <Tooltip
+              title='Runs'
+              placement='right'
+              slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
             >
-              <IconSettings size={18} />
-            </IconButton>
-          </Tooltip>
+              <IconButton
+                component={RouterLink}
+                to='/runs'
+                sx={{
+                  color: runsSelected ? 'brand.main' : 'text.secondary',
+                  bgcolor: runsSelected ? 'brand.lighter' : 'transparent',
+                  borderRadius: '10px',
+                  '&:hover': { bgcolor: runsSelected ? 'brand.lighter' : 'action.hover' },
+                }}
+              >
+                <IconStack3 size={18} />
+              </IconButton>
+            </Tooltip>
+            <Tooltip
+              title='Settings'
+              placement='right'
+              slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
+            >
+              <IconButton
+                component={RouterLink}
+                to='/settings'
+                sx={{
+                  color: settingsSelected ? 'brand.main' : 'text.secondary',
+                  bgcolor: settingsSelected ? 'brand.lighter' : 'transparent',
+                  borderRadius: '10px',
+                  '&:hover': { bgcolor: settingsSelected ? 'brand.lighter' : 'action.hover' },
+                }}
+              >
+                <IconSettings size={18} />
+              </IconButton>
+            </Tooltip>
+          </Stack>
         )}
         </DrawerLayoutSide>
       )}

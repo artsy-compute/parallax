@@ -1,4 +1,4 @@
-import { Alert, Box, Button, Stack, TextField, Tooltip } from '@mui/material';
+import { Alert, Box, Button, Chip, Stack, TextField, Tooltip } from '@mui/material';
 import { Link as RouterLink } from 'react-router-dom';
 import {
   useEffect,
@@ -38,7 +38,7 @@ export const ChatInput: FC = () => {
       nodeInfoList,
     },
   ] = useCluster();
-  const [{ input, status, inputTruncationNotice, requestHealthNotice, promptBudgetNotice }, { setInput, generate, stop, clear, registerInputFocus, startNewConversation }] = useChat();
+  const [{ input, status, activeRun, inputTruncationNotice, requestHealthNotice, promptBudgetNotice }, { setInput, generate, stop, clear, registerInputFocus, startNewConversation }] = useChat();
 
   const compositionRef = useRef(false);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -173,6 +173,27 @@ export const ChatInput: FC = () => {
       {requestHealthNotice && (
         <Alert severity={requestHealthNotice.severity} sx={{ '& .MuiAlert-message': { fontSize: '0.8125rem', lineHeight: 1.45 } }}>
           {requestHealthNotice.message}
+        </Alert>
+      )}
+      {activeRun && (
+        <Alert
+          severity={activeRun.status === 'completed' ? 'success' : activeRun.status === 'waiting_for_approval' ? 'warning' : 'info'}
+          action={(
+            <Button component={RouterLink} to={`/runs/${activeRun.id}`} color='inherit' size='small'>
+              Open run
+            </Button>
+          )}
+          sx={{ '& .MuiAlert-message': { width: '100%' } }}
+        >
+          <Stack direction='row' sx={{ gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
+            <Chip size='small' label={activeRun.status.replaceAll('_', ' ')} />
+            <Box component='span' sx={{ fontWeight: 600 }}>
+              {activeRun.title}
+            </Box>
+            <Box component='span' sx={{ color: 'text.secondary' }}>
+              {activeRun.current_step}
+            </Box>
+          </Stack>
         </Alert>
       )}
       {/* <Stack direction='row' sx={{ gap: 1, p: 1 }}>

@@ -395,6 +395,80 @@ async def openai_v1_model_detail(model_id: str):
     )
 
 
+@app.get("/agent/runs")
+async def agent_run_list():
+    data = request_handler.run_store.list_runs()
+    return JSONResponse(
+        content={
+            "type": "agent_run_list",
+            "data": data,
+        },
+        status_code=200,
+    )
+
+
+@app.get("/agent/runs/{run_id}")
+async def agent_run_detail(run_id: str):
+    item = request_handler.run_store.get_run(run_id)
+    if item is None:
+        return JSONResponse(
+            content={
+                "type": "agent_run_detail",
+                "error": f"Run not found: {run_id}",
+            },
+            status_code=404,
+        )
+    return JSONResponse(
+        content={
+            "type": "agent_run_detail",
+            "data": item,
+        },
+        status_code=200,
+    )
+
+
+@app.get("/agent/runs/by_conversation/{conversation_id}")
+async def agent_run_detail_by_conversation(conversation_id: str):
+    item = request_handler.run_store.get_latest_run_for_conversation(conversation_id)
+    if item is None:
+        return JSONResponse(
+            content={
+                "type": "agent_run_detail",
+                "error": f"Run not found for conversation: {conversation_id}",
+            },
+            status_code=404,
+        )
+    return JSONResponse(
+        content={
+            "type": "agent_run_detail",
+            "data": item,
+        },
+        status_code=200,
+    )
+
+
+@app.get("/agent/runs/{run_id}/events")
+async def agent_run_events(run_id: str):
+    item = request_handler.run_store.get_run(run_id)
+    if item is None:
+        return JSONResponse(
+            content={
+                "type": "agent_run_events",
+                "error": f"Run not found: {run_id}",
+            },
+            status_code=404,
+        )
+    return JSONResponse(
+        content={
+            "type": "agent_run_events",
+            "data": {
+                "items": item.get("events", []),
+            },
+        },
+        status_code=200,
+    )
+
+
 @app.get("/model/custom")
 async def custom_model_list():
     return JSONResponse(
