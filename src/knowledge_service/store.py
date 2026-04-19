@@ -1983,6 +1983,63 @@ class KnowledgeStore:
                 "content": row["content"] or "",
             }
 
+    def delete_pages(self, workspace_root: str | Path | None = None) -> dict[str, Any]:
+        context = self.workspace_context(workspace_root)
+        with self._lock, self._connect(context) as connection:
+            deleted_page_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) AS count FROM pages WHERE workspace_id=?",
+                    (context.workspace_id,),
+                ).fetchone()["count"]
+            )
+            deleted_log_entry_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) AS count FROM wiki_log_entries WHERE workspace_id=?",
+                    (context.workspace_id,),
+                ).fetchone()["count"]
+            )
+            job_id = self._create_job(
+                connection,
+                workspace_id=context.workspace_id,
+                job_type="delete_wiki_pages",
+                summary="Deleting generated wiki pages",
+            )
+            self._update_job(
+                connection,
+                job_id,
+                status="running",
+                progress=0.2,
+                summary="Deleting generated wiki pages and maintenance log entries",
+            )
+            connection.execute(
+                "DELETE FROM wiki_log_entries WHERE workspace_id=?",
+                (context.workspace_id,),
+            )
+            connection.execute(
+                "DELETE FROM pages WHERE workspace_id=?",
+                (context.workspace_id,),
+            )
+            self._update_job(
+                connection,
+                job_id,
+                status="completed",
+                progress=1.0,
+                summary=(
+                    f"Deleted {deleted_page_count} wiki pages and "
+                    f"{deleted_log_entry_count} wiki log entries"
+                ),
+                error="",
+                completed=True,
+            )
+            connection.commit()
+
+        return {
+            "deleted_pages": deleted_page_count,
+            "deleted_log_entries": deleted_log_entry_count,
+            "job": self.get_job(context.workspace_root, job_id),
+            "pages": self.list_pages(context.workspace_root),
+        }
+
     def generate_wiki(
         self,
         workspace_root: str | Path | None,

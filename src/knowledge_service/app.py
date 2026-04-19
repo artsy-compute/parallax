@@ -148,6 +148,10 @@ def create_app(config: KnowledgeServiceConfig | None = None) -> FastAPI:
     async def pages(workspace_root: str | None = None) -> dict[str, Any]:
         return await run_in_threadpool(_service_store().list_pages, workspace_root)
 
+    @app.delete("/pages")
+    async def delete_pages(workspace_root: str | None = None) -> dict[str, Any]:
+        return await run_in_threadpool(_service_store().delete_pages, workspace_root)
+
     @app.get("/pages/{page_id}")
     async def page_detail(page_id: str, workspace_root: str | None = None) -> dict[str, Any]:
         item = await run_in_threadpool(_service_store().get_page, workspace_root, page_id)

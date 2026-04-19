@@ -177,6 +177,13 @@ class KnowledgeServiceClient:
             params=self._workspace_params(),
         )
 
+    async def delete_pages(self) -> dict[str, Any]:
+        return await self._request(
+            "DELETE",
+            "/pages",
+            params=self._workspace_params(),
+        )
+
     async def generate_pages(
         self,
         *,

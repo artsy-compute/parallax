@@ -38,6 +38,7 @@ import { AlertDialog } from '../components/mui';
 import { useCluster } from '../services';
 import {
   createKnowledgeLocalSource,
+  deleteKnowledgePages,
   createKnowledgeUploadedSource,
   createKnowledgeUrlSource,
   deleteKnowledgeSource,
@@ -208,11 +209,13 @@ export default function PageKnowledge() {
   const [pageLoading, setPageLoading] = useState(false);
   const [generatingWiki, setGeneratingWiki] = useState(false);
   const [lintingWiki, setLintingWiki] = useState(false);
+  const [deletingWikiPages, setDeletingWikiPages] = useState(false);
   const [lintReportMarkdown, setLintReportMarkdown] = useState('');
   const [regeneratingPage, setRegeneratingPage] = useState(false);
   const [wikiViewMode, setWikiViewMode] = useState<WikiViewMode>('rendered');
   const [deletingSourceId, setDeletingSourceId] = useState('');
   const [pendingDeleteSource, setPendingDeleteSource] = useState<null | { id: string; label: string }>(null);
+  const [confirmDeleteWikiPages, setConfirmDeleteWikiPages] = useState(false);
   const [llmProviders, setLlmProviders] = useState<Record<LlmProviderId, LlmProviderConfig>>(
     parseLlmProviderConfigs(undefined),
   );
@@ -515,6 +518,27 @@ export default function PageKnowledge() {
       setError(nextError instanceof Error ? nextError.message : String(nextError));
     } finally {
       setLintingWiki(false);
+    }
+  });
+
+  const onDeleteWikiPages = useRefCallback(async () => {
+    setDeletingWikiPages(true);
+    try {
+      const result = await deleteKnowledgePages();
+      setLintReportMarkdown('');
+      setSelectedPage(null);
+      setPages(result.pages?.items || []);
+      setHomePageId(String(result.pages?.home_page_id || ''));
+      void loadPageData();
+      setError('');
+      if (activeSection === 'wiki') {
+        navigate('/knowledge', { replace: true });
+      }
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+      return { closeDialog: false };
+    } finally {
+      setDeletingWikiPages(false);
     }
   });
 
@@ -1428,6 +1452,47 @@ export default function PageKnowledge() {
                     </Paper>
                   ))}
                 </Box>
+
+                <Paper
+                  variant='outlined'
+                  sx={{
+                    p: 2,
+                    borderRadius: 3,
+                    borderColor: 'divider',
+                    bgcolor: 'rgba(120, 53, 15, 0.04)',
+                  }}
+                >
+                  <Stack direction={{ xs: 'column', md: 'row' }} sx={{ gap: 1.5, alignItems: { md: 'center' }, justifyContent: 'space-between' }}>
+                    <Stack sx={{ gap: 0.35 }}>
+                      <Typography variant='body1' sx={{ fontWeight: 700, color: 'text.primary' }}>
+                        Delete wiki
+                      </Typography>
+                      <Typography variant='body2' color='text.secondary'>
+                        Remove generated wiki pages and wiki log entries. Sources and ingested knowledge documents stay intact.
+                      </Typography>
+                    </Stack>
+                    <Button
+                      color='error'
+                      variant='contained'
+                      startIcon={<IconTrash size={16} />}
+                      disabled={deletingWikiPages || pages.length === 0}
+                      sx={{
+                        bgcolor: 'transparent',
+                        color: 'error.main',
+                        boxShadow: 'none',
+                        '&:hover': {
+                          bgcolor: 'rgba(211, 47, 47, 0.06)',
+                          boxShadow: 'none',
+                        },
+                      }}
+                      onClick={() => {
+                        setConfirmDeleteWikiPages(true);
+                      }}
+                    >
+                      {deletingWikiPages ? 'Deleting...' : 'Delete wiki'}
+                    </Button>
+                  </Stack>
+                </Paper>
               </Stack>
               )}
               {activeSection === 'ingest' && renderIngestSection()}
@@ -1489,6 +1554,21 @@ export default function PageKnowledge() {
           confirmLabel='Delete'
           autoFocusAction='cancel'
           onConfirm={confirmDeleteSource}
+        />
+        <AlertDialog
+          open={confirmDeleteWikiPages}
+          onClose={() => setConfirmDeleteWikiPages(false)}
+          color='error'
+          title='Delete wiki'
+          content={(
+            <Typography variant='body2'>
+              Delete generated wiki pages and wiki log entries? Sources and ingested knowledge documents will remain.
+            </Typography>
+          )}
+          cancelLabel='Cancel'
+          confirmLabel='Delete wiki'
+          autoFocusAction='cancel'
+          onConfirm={onDeleteWikiPages}
         />
       </Stack>
     </DrawerLayout>

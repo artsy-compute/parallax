@@ -48,6 +48,13 @@ STRUCTURED_DOCUMENT_EXTENSIONS = {
     ".odp",
     ".pdf",
 }
+STRUCTURED_DOCUMENT_MIME_TYPES = {
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.oasis.opendocument.text": ".odt",
+    "application/vnd.oasis.opendocument.spreadsheet": ".ods",
+    "application/vnd.oasis.opendocument.presentation": ".odp",
+}
 
 SKIP_DIR_NAMES = {
     ".cache",
@@ -173,6 +180,14 @@ def _extract_structured_document_text(path: Path, data: bytes) -> str:
     return ""
 
 
+def resolve_structured_document_suffix(path: Path, mime_type: str | None = None) -> str:
+    suffix = path.suffix.lower()
+    if suffix in STRUCTURED_DOCUMENT_EXTENSIONS:
+        return suffix
+    normalized_mime_type = str(mime_type or "").split(";")[0].strip().lower()
+    return STRUCTURED_DOCUMENT_MIME_TYPES.get(normalized_mime_type, "")
+
+
 def _extract_document_from_bytes(
     *,
     path: Path,
@@ -181,9 +196,18 @@ def _extract_document_from_bytes(
     document_uri: str | None = None,
     title: str | None = None,
 ) -> ExtractedDocument | None:
-    suffix = path.suffix.lower()
-    if suffix in STRUCTURED_DOCUMENT_EXTENSIONS:
-        text = _extract_structured_document_text(path, data)
+    normalized_mime_type = str(mime_type or "").split(";")[0].strip() or None
+    structured_suffix = resolve_structured_document_suffix(path, normalized_mime_type)
+    if structured_suffix:
+        structured_path = path if path.suffix.lower() == structured_suffix else path.with_suffix(structured_suffix)
+        try:
+            text = _extract_structured_document_text(structured_path, data)
+        except ValueError:
+            raise
+        except Exception as error:
+            raise ValueError(
+                f"Failed to read structured document {structured_path.name}: {error}"
+            ) from error
     else:
         if len(data) > MAX_TEXT_FILE_BYTES:
             return None
@@ -193,7 +217,7 @@ def _extract_document_from_bytes(
     normalized_text = _normalize_text(text)
     if not normalized_text:
         return None
-    resolved_mime_type = mime_type or mimetypes.guess_type(str(path))[0] or "text/plain"
+    resolved_mime_type = normalized_mime_type or mimetypes.guess_type(str(path))[0] or "text/plain"
     return ExtractedDocument(
         document_uri=document_uri or str(path),
         title=title or path.name,

@@ -524,6 +524,13 @@ export interface KnowledgeLintWikiResponse {
   readonly pages: KnowledgePageListResponse;
 }
 
+export interface KnowledgeDeletePagesResponse {
+  readonly deleted_pages: number;
+  readonly deleted_log_entries: number;
+  readonly job: KnowledgeJob | null;
+  readonly pages: KnowledgePageListResponse;
+}
+
 export interface KnowledgeDeleteSourceResponse {
   readonly source_id: string;
   readonly deleted_documents: number;
@@ -653,6 +660,18 @@ export const getKnowledgePages = async (): Promise<KnowledgePageListResponse> =>
   const response = await fetch(`${API_BASE_URL}/knowledge/pages`, { method: 'GET' });
   const message = await parseJsonResponse(response);
   if (message.type !== 'knowledge_pages') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const deleteKnowledgePages = async (): Promise<KnowledgeDeletePagesResponse> => {
+  const response = await fetch(`${API_BASE_URL}/knowledge/pages`, { method: 'DELETE' });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'knowledge_pages_delete') {
     throw new Error(`Invalid message type: ${message.type}.`);
   }
   if (message.error) {

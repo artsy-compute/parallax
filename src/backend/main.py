@@ -1155,6 +1155,18 @@ async def knowledge_pages() -> JSONResponse:
     )
 
 
+@app.delete("/knowledge/pages")
+async def knowledge_pages_delete() -> JSONResponse:
+    try:
+        payload = await knowledge_client.delete_pages()
+    except KnowledgeServiceError as error:
+        return _knowledge_error_response("knowledge_pages_delete", error)
+    return JSONResponse(
+        content={"type": "knowledge_pages_delete", "data": payload},
+        status_code=200,
+    )
+
+
 @app.get("/knowledge/pages/{page_id}")
 async def knowledge_page_detail(page_id: str) -> JSONResponse:
     try:
