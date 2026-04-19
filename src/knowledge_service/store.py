@@ -1135,7 +1135,7 @@ class KnowledgeStore:
         else:
             for page in child_pages:
                 lines.append(
-                    f"- [{page['title']}](/knowledge?page={page['id']})"
+                    f"- [{page['title']}](/knowledge/{page['id']})"
                     + (f" - {page.get('summary')}" if str(page.get("summary") or "").strip() else "")
                 )
         return "\n".join(lines).strip()
@@ -1156,7 +1156,7 @@ class KnowledgeStore:
                 continue
             sections.extend([f"## {section_title}", ""])
             for page in items:
-                line = f"- [{page['title']}](/knowledge?page={page['id']})"
+                line = f"- [{page['title']}](/knowledge/{page['id']})"
                 if str(page.get("summary") or "").strip():
                     line += f" - {page['summary']}"
                 sections.append(line)
@@ -1242,9 +1242,9 @@ class KnowledgeStore:
                     if not page_id or not title or page_id == self_page_id:
                         continue
                     pattern = re.compile(
-                        rf"(?<!\[)(?<!\]\()(?<!/knowledge\?page=)(?<![\w/]){re.escape(title)}(?![\w])(?!\]\()"
+                        rf"(?<!\[)(?<!\]\()(?<!/knowledge/)(?<![\w/]){re.escape(title)}(?![\w])(?!\]\()"
                     )
-                    next_line = pattern.sub(f"[{title}](/knowledge?page={page_id})", next_line)
+                    next_line = pattern.sub(f"[{title}](/knowledge/{page_id})", next_line)
                 lines[line_index] = next_line
             sections[index] = "\n".join(lines)
         return "```".join(sections)
@@ -1600,7 +1600,7 @@ class KnowledgeStore:
     def _extract_internal_link_targets(content: str) -> list[str]:
         return [
             unquote(match.group(1)).strip()
-            for match in re.finditer(r"/knowledge\?page=([^)\s&#]+)", str(content or ""))
+            for match in re.finditer(r"/knowledge(?:\?page=|/)([^)\s&#/]+)", str(content or ""))
             if unquote(match.group(1)).strip()
         ]
 
@@ -1908,7 +1908,7 @@ class KnowledgeStore:
             f"- Source: [{source_row['title'] or source_row['canonical_uri'] or 'Source'}]({source_row['canonical_uri'] or ''})",
             "- Pages touched:",
             *[
-                f"  - [{page['title']}](/knowledge?page={page['id']})"
+                f"  - [{page['title']}](/knowledge/{page['id']})"
                 for page in touched_pages
             ],
         ]

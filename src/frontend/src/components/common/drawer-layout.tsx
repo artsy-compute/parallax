@@ -231,7 +231,17 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
     ? new URLSearchParams(search).get('section') || 'wiki'
     : '';
   const knowledgePageId = knowledgeSelected
-    ? new URLSearchParams(search).get('page') || ''
+    ? (() => {
+        const pathSuffix = pathname.startsWith('/knowledge/') ? pathname.slice('/knowledge/'.length) : '';
+        if (pathSuffix) {
+          try {
+            return decodeURIComponent(pathSuffix.split('/')[0] || '');
+          } catch {
+            return pathSuffix.split('/')[0] || '';
+          }
+        }
+        return new URLSearchParams(search).get('page') || '';
+      })()
     : '';
   const [knowledgePages, setKnowledgePages] = useState<readonly KnowledgePageSummary[]>([]);
   const [collapsedKnowledgePageIds, setCollapsedKnowledgePageIds] = useState<readonly string[]>([]);
@@ -352,7 +362,7 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
                     >
                       <Button
                         component={RouterLink}
-                        to={`/knowledge?page=${encodeURIComponent(page.id)}`}
+                        to={`/knowledge/${encodeURIComponent(page.id)}`}
                         color='inherit'
                         variant='text'
                         sx={{ ...secondaryNavButtonSx(knowledgePageId === page.id), flex: 1, minWidth: 0 }}

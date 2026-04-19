@@ -31,7 +31,7 @@ import {
   IconTrash,
   IconUpload,
 } from '@tabler/icons-react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { DrawerLayout } from '../components/common';
 import ChatMarkdown from '../components/inputs/chat-markdown';
 import { AlertDialog } from '../components/mui';
@@ -179,8 +179,10 @@ const normalizeWikiMarkdown = (content: string, title?: string, summary?: string
 export default function PageKnowledge() {
   const location = useLocation();
   const navigate = useNavigate();
+  const { pageId: pageIdParam = '' } = useParams<{ pageId?: string }>();
   const activeSection = normalizeSection(location.search);
-  const selectedPageParam = new URLSearchParams(location.search).get('page') || '';
+  const legacySelectedPageParam = new URLSearchParams(location.search).get('page') || '';
+  const selectedPageParam = String(pageIdParam || legacySelectedPageParam || '').trim();
   const [{ config: { clusterProfiles } }] = useCluster();
 
   const [health, setHealth] = useState<KnowledgeHealth | null>(null);
@@ -254,6 +256,12 @@ export default function PageKnowledge() {
   }, [loadPageData]);
 
   useEffect(() => {
+    if (!pageIdParam && legacySelectedPageParam && activeSection === 'wiki') {
+      navigate(`/knowledge/${encodeURIComponent(legacySelectedPageParam)}`, { replace: true });
+    }
+  }, [activeSection, legacySelectedPageParam, navigate, pageIdParam]);
+
+  useEffect(() => {
     if (activeSection !== 'wiki') {
       return;
     }
@@ -266,7 +274,7 @@ export default function PageKnowledge() {
       setSelectedPage(null);
       return;
     }
-    navigate(`/knowledge?page=${encodeURIComponent(nextPageId)}`, { replace: true });
+    navigate(`/knowledge/${encodeURIComponent(nextPageId)}`, { replace: true });
   }, [activeSection, homePageId, navigate, pages, selectedPageParam]);
 
   useEffect(() => {
@@ -464,7 +472,7 @@ export default function PageKnowledge() {
       await loadPageData();
       const nextHomePageId = String(result.home_page_id || result.pages?.home_page_id || '');
       if (nextHomePageId) {
-        navigate(`/knowledge?page=${encodeURIComponent(nextHomePageId)}`);
+        navigate(`/knowledge/${encodeURIComponent(nextHomePageId)}`);
         return;
       }
       navigate('/knowledge');
@@ -486,7 +494,7 @@ export default function PageKnowledge() {
       const result = await regenerateKnowledgePage(normalizedPageId);
       await loadPageData();
       if (result.page?.id) {
-        navigate(`/knowledge?page=${encodeURIComponent(result.page.id)}`, { replace: true });
+        navigate(`/knowledge/${encodeURIComponent(result.page.id)}`, { replace: true });
       }
       setError('');
     } catch (nextError) {

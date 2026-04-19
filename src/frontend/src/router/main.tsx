@@ -83,6 +83,14 @@ export const MainRouter = () => {
       ),
     },
     {
+      path: `${PATH_KNOWLEDGE}/:pageId`,
+      element: (
+        <Suspense fallback={<div>Loading...</div>}>
+          <PageKnowledge />
+        </Suspense>
+      ),
+    },
+    {
       path: PATH_NODES,
       element: (
         <Suspense fallback={<div>Loading...</div>}>
