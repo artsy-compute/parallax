@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from dataclasses import dataclass
 from html import unescape
 from pathlib import Path
 from urllib.parse import urlparse
@@ -20,6 +21,15 @@ _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 _TAG_RE = re.compile(r"<[^>]+>")
 
 
+@dataclass(frozen=True)
+class FetchedUrlContent:
+    url: str
+    raw_bytes: bytes
+    content_type: str
+    encoding: str | None
+    filename_hint: str
+
+
 def _html_to_text(content: str) -> tuple[str, str]:
     title_match = _TITLE_RE.search(content or "")
     title = " ".join(unescape(title_match.group(1)).split()).strip() if title_match else ""
@@ -29,12 +39,7 @@ def _html_to_text(content: str) -> tuple[str, str]:
     return title, normalized
 
 
-async def extract_url_document(
-    url: str,
-    *,
-    timeout_sec: float,
-    max_chars: int,
-) -> ExtractedDocument:
+async def fetch_url_content(url: str, *, timeout_sec: float) -> FetchedUrlContent:
     parsed = urlparse(str(url or "").strip())
     if parsed.scheme not in {"http", "https"}:
         raise ValueError("URL ingest only supports http and https")
@@ -43,8 +48,14 @@ async def extract_url_document(
         async with httpx.AsyncClient(timeout=timeout_sec, follow_redirects=True, trust_env=False) as client:
             response = await client.get(url)
             response.raise_for_status()
-            raw_bytes = response.content
-            content_type = str(response.headers.get("content-type") or "").split(";")[0].strip()
+            filename_hint = Path(parsed.path or "").name or parsed.netloc or "downloaded-url"
+            return FetchedUrlContent(
+                url=str(url),
+                raw_bytes=response.content,
+                content_type=str(response.headers.get("content-type") or "").split(";")[0].strip(),
+                encoding=response.encoding,
+                filename_hint=filename_hint,
+            )
     except httpx.TimeoutException as error:
         raise ValueError(f"Timed out fetching URL: {url}") from error
     except httpx.HTTPStatusError as error:
@@ -53,7 +64,15 @@ async def extract_url_document(
     except httpx.RequestError as error:
         raise ValueError(f"Failed to fetch URL {url}: {error}") from error
 
-    filename_hint = Path(parsed.path or "").name or parsed.netloc or "downloaded-url"
+def extract_fetched_url_document(
+    fetched: FetchedUrlContent,
+    *,
+    max_chars: int,
+) -> ExtractedDocument:
+    url = str(fetched.url)
+    raw_bytes = fetched.raw_bytes
+    content_type = fetched.content_type
+    filename_hint = fetched.filename_hint
     structured_suffix = resolve_structured_document_suffix(Path(filename_hint), content_type or None)
     if structured_suffix:
         if len(raw_bytes) > MAX_BINARY_DOCUMENT_BYTES:
@@ -80,7 +99,7 @@ async def extract_url_document(
         )
 
     truncated_bytes = raw_bytes[:max_chars]
-    decoded = truncated_bytes.decode(response.encoding or "utf-8", errors="ignore")
+    decoded = truncated_bytes.decode(fetched.encoding or "utf-8", errors="ignore")
     if "html" in content_type or "<html" in decoded.lower():
         title, text = _html_to_text(decoded)
         mime_type = content_type or "text/html"
@@ -126,3 +145,13 @@ async def extract_url_document(
         byte_size=len(raw_bytes),
         text=text,
     )
+
+
+async def extract_url_document(
+    url: str,
+    *,
+    timeout_sec: float,
+    max_chars: int,
+) -> ExtractedDocument:
+    fetched = await fetch_url_content(url, timeout_sec=timeout_sec)
+    return extract_fetched_url_document(fetched, max_chars=max_chars)

@@ -13,6 +13,15 @@ class UrlSourceCreateRequest(BaseModel):
     workspace_root: str | None = None
 
 
-class WorkspaceScopedRequest(BaseModel):
+class LibraryUrlImportRequest(BaseModel):
+    url: str = Field(min_length=1)
     workspace_root: str | None = None
 
+
+class LibraryPathRequest(BaseModel):
+    path: str = ""
+    workspace_root: str | None = None
+
+
+class WorkspaceScopedRequest(BaseModel):
+    workspace_root: str | None = None

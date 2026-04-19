@@ -15,9 +15,9 @@ from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
 
 from knowledge_service.config import KnowledgeServiceConfig, load_config
-from knowledge_service.ingest.local_files import extract_uploaded_document
-from knowledge_service.ingest.urls import extract_url_document
-from knowledge_service.models import LocalSourceCreateRequest, UrlSourceCreateRequest
+from knowledge_service.ingest.local_files import extract_uploaded_document, resolve_structured_document_suffix
+from knowledge_service.ingest.urls import extract_fetched_url_document, extract_url_document, fetch_url_content
+from knowledge_service.models import LibraryPathRequest, LibraryUrlImportRequest, LocalSourceCreateRequest, UrlSourceCreateRequest
 from knowledge_service.store import KnowledgeStore
 
 
@@ -143,6 +143,110 @@ def create_app(config: KnowledgeServiceConfig | None = None) -> FastAPI:
         if item is None:
             raise HTTPException(status_code=404, detail=f"Document not found: {document_id}")
         return item
+
+    @app.get("/library")
+    async def library(
+        workspace_root: str | None = None,
+        path: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return await run_in_threadpool(_service_store().list_library, workspace_root, path)
+        except Exception as error:
+            raise _as_http_exception(error) from error
+
+    @app.get("/library/file")
+    async def library_file(
+        path: str = Query(min_length=1),
+        workspace_root: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return await run_in_threadpool(_service_store().get_library_file, workspace_root, path)
+        except Exception as error:
+            raise _as_http_exception(error) from error
+
+    @app.delete("/library/file")
+    async def delete_library_file(
+        path: str = Query(min_length=1),
+        workspace_root: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return await run_in_threadpool(_service_store().delete_library_file, workspace_root, path)
+        except Exception as error:
+            raise _as_http_exception(error) from error
+
+    @app.post("/library/file/delete")
+    async def delete_library_file_post(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return await run_in_threadpool(
+                _service_store().delete_library_file,
+                payload.get("workspace_root"),
+                str(payload.get("path") or ""),
+            )
+        except Exception as error:
+            raise _as_http_exception(error) from error
+
+    @app.post("/library/upload")
+    async def library_upload(
+        file: UploadFile = File(...),
+        directory: str | None = Form(default=None),
+        workspace_root: str | None = Form(default=None),
+    ) -> dict[str, Any]:
+        try:
+            return await run_in_threadpool(
+                _service_store().upload_library_file,
+                workspace_root,
+                directory=directory,
+                filename=file.filename or "uploaded-file",
+                data=await file.read(),
+            )
+        except Exception as error:
+            raise _as_http_exception(error) from error
+        finally:
+            await file.close()
+
+    @app.post("/library/url")
+    async def library_url(request: LibraryUrlImportRequest) -> dict[str, Any]:
+        try:
+            fetched = await fetch_url_content(
+                request.url,
+                timeout_sec=config.fetch_timeout_sec,
+            )
+            extracted_text: str | None = None
+            title: str | None = None
+            structured_suffix = resolve_structured_document_suffix(
+                Path(fetched.filename_hint),
+                fetched.content_type or None,
+            )
+            if not structured_suffix:
+                extracted = extract_fetched_url_document(
+                    fetched,
+                    max_chars=config.max_url_chars,
+                )
+                extracted_text = extracted.text
+                title = extracted.title
+            return await run_in_threadpool(
+                _service_store().import_url_to_library,
+                request.workspace_root,
+                url=request.url,
+                raw_bytes=fetched.raw_bytes,
+                content_type=fetched.content_type,
+                filename_hint=fetched.filename_hint,
+                extracted_text=extracted_text,
+                title=title,
+            )
+        except Exception as error:
+            raise _as_http_exception(error) from error
+
+    @app.post("/library/ingest")
+    async def library_ingest(request: LibraryPathRequest) -> dict[str, Any]:
+        try:
+            return await run_in_threadpool(
+                _service_store().ingest_library_path,
+                request.workspace_root,
+                request.path,
+            )
+        except Exception as error:
+            raise _as_http_exception(error) from error
 
     @app.get("/pages")
     async def pages(workspace_root: str | None = None) -> dict[str, Any]:

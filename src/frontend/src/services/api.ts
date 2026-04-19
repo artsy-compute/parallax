@@ -387,7 +387,7 @@ export interface KnowledgeHealth {
 export interface KnowledgeSourceSummary {
   readonly id: string;
   readonly workspace_id: string;
-  readonly source_type: 'workspace_path' | 'url';
+  readonly source_type: 'workspace_path' | 'url' | 'uploaded_file' | 'library_path';
   readonly title: string;
   readonly canonical_uri: string;
   readonly root_path: string;
@@ -531,6 +531,60 @@ export interface KnowledgeDeletePagesResponse {
   readonly pages: KnowledgePageListResponse;
 }
 
+export interface KnowledgeLibraryItem {
+  readonly path: string;
+  readonly name: string;
+  readonly kind: 'directory' | 'file';
+  readonly size: number | null;
+  readonly modified_at: number;
+  readonly mime_type: string;
+  readonly extension: string;
+  readonly child_count: number | null;
+  readonly preview_supported: boolean;
+  readonly ingest_supported: boolean;
+}
+
+export interface KnowledgeLibraryTreeNode {
+  readonly id: string;
+  readonly path: string;
+  readonly name: string;
+  readonly children: readonly KnowledgeLibraryTreeNode[];
+}
+
+export interface KnowledgeLibraryListingResponse {
+  readonly storage_backend: string;
+  readonly root_path: string;
+  readonly current_path: string;
+  readonly parent_path: string | null;
+  readonly imports_path: string;
+  readonly items: readonly KnowledgeLibraryItem[];
+  readonly tree: KnowledgeLibraryTreeNode;
+}
+
+export interface KnowledgeLibraryFileResponse {
+  readonly item: KnowledgeLibraryItem;
+  readonly preview_text: string;
+  readonly preview_truncated: boolean;
+  readonly metadata: Record<string, unknown> | null;
+}
+
+export interface KnowledgeLibraryDeleteResponse {
+  readonly deleted_path: string;
+  readonly current_path: string;
+}
+
+export interface KnowledgeLibraryUploadResponse {
+  readonly item: KnowledgeLibraryItem;
+  readonly directory: string;
+}
+
+export interface KnowledgeLibraryUrlImportResponse {
+  readonly directory: KnowledgeLibraryItem;
+  readonly stored_file: KnowledgeLibraryItem;
+  readonly metadata: Record<string, unknown>;
+  readonly current_path: string;
+}
+
 export interface KnowledgeDeleteSourceResponse {
   readonly source_id: string;
   readonly deleted_documents: number;
@@ -660,6 +714,102 @@ export const getKnowledgePages = async (): Promise<KnowledgePageListResponse> =>
   const response = await fetch(`${API_BASE_URL}/knowledge/pages`, { method: 'GET' });
   const message = await parseJsonResponse(response);
   if (message.type !== 'knowledge_pages') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const getKnowledgeLibrary = async (path = ''): Promise<KnowledgeLibraryListingResponse> => {
+  const params = new URLSearchParams();
+  if (path) {
+    params.set('path', path);
+  }
+  const response = await fetch(`${API_BASE_URL}/knowledge/library${params.size ? `?${params}` : ''}`, { method: 'GET' });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'knowledge_library') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const getKnowledgeLibraryFile = async (path: string): Promise<KnowledgeLibraryFileResponse> => {
+  const response = await fetch(`${API_BASE_URL}/knowledge/library/file?${new URLSearchParams({ path })}`, { method: 'GET' });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'knowledge_library_file') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const deleteKnowledgeLibraryFile = async (path: string): Promise<KnowledgeLibraryDeleteResponse> => {
+  const response = await fetch(`${API_BASE_URL}/knowledge/library/file/delete`, {
+    method: 'POST',
+    body: JSON.stringify({ path }),
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'knowledge_library_file_delete') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const uploadKnowledgeLibraryFile = async (
+  file: File,
+  directory = '',
+): Promise<KnowledgeLibraryUploadResponse> => {
+  const formData = new FormData();
+  formData.append('file', file);
+  if (directory) {
+    formData.append('directory', directory);
+  }
+  const response = await fetch(`${API_BASE_URL}/knowledge/library/upload`, {
+    method: 'POST',
+    body: formData,
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'knowledge_library_upload') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const importKnowledgeLibraryUrl = async (url: string): Promise<KnowledgeLibraryUrlImportResponse> => {
+  const response = await fetch(`${API_BASE_URL}/knowledge/library/url`, {
+    method: 'POST',
+    body: JSON.stringify({ url }),
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'knowledge_library_url') {
+    throw new Error(`Invalid message type: ${message.type}.`);
+  }
+  if (message.error) {
+    throw new Error(String(message.error));
+  }
+  return message.data;
+};
+
+export const ingestKnowledgeLibraryPath = async (path: string): Promise<KnowledgeCreateResponse> => {
+  const response = await fetch(`${API_BASE_URL}/knowledge/library/ingest`, {
+    method: 'POST',
+    body: JSON.stringify({ path }),
+  });
+  const message = await parseJsonResponse(response);
+  if (message.type !== 'knowledge_library_ingest') {
     throw new Error(`Invalid message type: ${message.type}.`);
   }
   if (message.error) {

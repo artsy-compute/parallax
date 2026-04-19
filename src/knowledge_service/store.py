@@ -20,6 +20,7 @@ from knowledge_service.config import KnowledgeServiceConfig
 from knowledge_service.embedding import EmbeddingService
 from knowledge_service.ingest.local_files import ExtractedDocument, extract_local_documents
 from knowledge_service.search import fts_query_from_text, reciprocal_rank_fusion
+from knowledge_service.source_storage import LocalSourceStorage
 from parallax_utils.logging_config import get_logger
 
 try:
@@ -63,6 +64,7 @@ class WorkspaceContext:
     metadata_path: Path
     vectors_dir: Path
     raw_dir: Path
+    library_dir: Path
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,7 @@ class KnowledgeStore:
             config.embedding_model_name,
             fallback_dim=config.hashing_fallback_dim,
         )
+        self.source_storage = LocalSourceStorage()
         self._lock = threading.RLock()
 
     def workspace_context(self, workspace_root: str | Path | None = None) -> WorkspaceContext:
@@ -90,9 +93,11 @@ class KnowledgeStore:
         workspace_dir = (self.config.storage_root / workspace_hash).resolve()
         vectors_dir = workspace_dir / "vectors"
         raw_dir = workspace_dir / "raw" / "normalized_documents"
+        library_dir = workspace_dir / "library"
         workspace_dir.mkdir(parents=True, exist_ok=True)
         vectors_dir.mkdir(parents=True, exist_ok=True)
         raw_dir.mkdir(parents=True, exist_ok=True)
+        library_dir.mkdir(parents=True, exist_ok=True)
         return WorkspaceContext(
             workspace_root=root,
             workspace_id=workspace_hash,
@@ -100,6 +105,7 @@ class KnowledgeStore:
             metadata_path=workspace_dir / "metadata.sqlite3",
             vectors_dir=vectors_dir,
             raw_dir=raw_dir,
+            library_dir=library_dir,
         )
 
     def _connect(self, context: WorkspaceContext) -> sqlite3.Connection:
@@ -3016,6 +3022,87 @@ class KnowledgeStore:
                     for chunk in chunks
                 ],
             }
+
+    def list_library(self, workspace_root: str | Path | None = None, path: str | None = None) -> dict[str, Any]:
+        context = self.workspace_context(workspace_root)
+        return self.source_storage.list_directory(context, path)
+
+    def get_library_file(
+        self,
+        workspace_root: str | Path | None,
+        path: str,
+        *,
+        max_chars: int = 12000,
+    ) -> dict[str, Any]:
+        context = self.workspace_context(workspace_root)
+        return self.source_storage.read_file_preview(context, path, max_chars=max_chars)
+
+    def delete_library_file(
+        self,
+        workspace_root: str | Path | None,
+        path: str,
+    ) -> dict[str, Any]:
+        context = self.workspace_context(workspace_root)
+        return self.source_storage.delete_file(context, path)
+
+    def upload_library_file(
+        self,
+        workspace_root: str | Path | None,
+        *,
+        directory: str | None,
+        filename: str,
+        data: bytes,
+    ) -> dict[str, Any]:
+        context = self.workspace_context(workspace_root)
+        return self.source_storage.write_uploaded_file(
+            context,
+            directory=directory,
+            filename=filename,
+            data=data,
+        )
+
+    def import_url_to_library(
+        self,
+        workspace_root: str | Path | None,
+        *,
+        url: str,
+        raw_bytes: bytes,
+        content_type: str,
+        filename_hint: str,
+        extracted_text: str | None = None,
+        title: str | None = None,
+    ) -> dict[str, Any]:
+        context = self.workspace_context(workspace_root)
+        return self.source_storage.store_url_import(
+            context,
+            url=url,
+            raw_bytes=raw_bytes,
+            content_type=content_type,
+            filename_hint=filename_hint,
+            extracted_text=extracted_text,
+            title=title,
+        )
+
+    def ingest_library_path(
+        self,
+        workspace_root: str | Path | None,
+        raw_path: str,
+    ) -> dict[str, Any]:
+        context = self.workspace_context(workspace_root)
+        resolved_path, documents = self.source_storage.collect_documents_for_ingest(context, raw_path)
+        relative_path = self.source_storage.relative_path(context, resolved_path)
+        canonical_uri = f"library://{relative_path}" if relative_path else "library://"
+        title = resolved_path.name or "Library"
+        return self._ingest_documents(
+            context=context,
+            source_type="library_path",
+            title=title,
+            canonical_uri=canonical_uri,
+            root_path=str(resolved_path),
+            documents=documents,
+            job_type="ingest_library",
+            job_summary=f"Ingesting library path {canonical_uri}",
+        )
 
     def ingest_local_source(
         self,

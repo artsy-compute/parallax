@@ -24,6 +24,7 @@ import {
   IconChevronDown,
   IconChevronRight,
   IconDatabaseSearch,
+  IconFolder,
   IconInfoCircle,
   IconLayoutSidebarLeftCollapse,
   IconLayoutSidebarLeftExpand,
@@ -224,9 +225,10 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
   const inactiveNodes = nodeInfoList.length - activeNodes;
   const [rebalancingTopology, setRebalancingTopology] = useState(false);
   const chatSelected = pathname.startsWith('/chat');
+  const librarySelected = pathname.startsWith('/library');
   const knowledgeSelected = pathname.startsWith('/knowledge');
   const settingsSelected = pathname.startsWith('/settings');
-  const showConversationList = !hideConversationHistory && !knowledgeSelected;
+  const showConversationList = !hideConversationHistory && !knowledgeSelected && !librarySelected;
   const knowledgeSection = knowledgeSelected
     ? new URLSearchParams(search).get('section') || 'wiki'
     : '';
@@ -564,6 +566,38 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
                   <Stack direction='row' sx={{ alignItems: 'center', gap: 0.5 }}>
                     <Button
                       component={RouterLink}
+                      to='/library'
+                      color='inherit'
+                      variant='text'
+                      startIcon={<IconFolder size={18} />}
+                      sx={{ ...primaryNavButtonSx(librarySelected), flex: 1 }}
+                    >
+                      Library
+                    </Button>
+                    <Tooltip
+                      title='Library settings'
+                      placement='right'
+                      slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
+                    >
+                      <IconButton
+                        component={RouterLink}
+                        to='/library?panel=settings'
+                        sx={{
+                          color: librarySelected ? 'primary.main' : 'text.secondary',
+                          bgcolor: librarySelected ? 'action.selected' : 'transparent',
+                          borderRadius: '10px',
+                          '&:hover': {
+                            bgcolor: librarySelected ? 'action.selected' : 'action.hover',
+                          },
+                        }}
+                      >
+                        <IconAdjustments size={18} />
+                      </IconButton>
+                    </Tooltip>
+                  </Stack>
+                  <Stack direction='row' sx={{ alignItems: 'center', gap: 0.5 }}>
+                    <Button
+                      component={RouterLink}
                       to='/knowledge'
                       color='inherit'
                       variant='text'
@@ -634,6 +668,42 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
                 }}
               >
                 <IconMessageCircle size={18} />
+              </IconButton>
+            </Tooltip>
+            <Tooltip
+              title='Library'
+              placement='right'
+              slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
+            >
+              <IconButton
+                component={RouterLink}
+                to='/library'
+                sx={{
+                  color: librarySelected ? 'primary.main' : 'text.secondary',
+                  bgcolor: librarySelected ? 'action.selected' : 'transparent',
+                  borderRadius: '10px',
+                  '&:hover': { bgcolor: librarySelected ? 'action.selected' : 'action.hover' },
+                }}
+              >
+                <IconFolder size={18} />
+              </IconButton>
+            </Tooltip>
+            <Tooltip
+              title='Library settings'
+              placement='right'
+              slotProps={{ tooltip: { sx: { bgcolor: 'primary.main', color: 'common.white' } } }}
+            >
+              <IconButton
+                component={RouterLink}
+                to='/library?panel=settings'
+                sx={{
+                  color: librarySelected ? 'primary.main' : 'text.secondary',
+                  bgcolor: librarySelected ? 'action.selected' : 'transparent',
+                  borderRadius: '10px',
+                  '&:hover': { bgcolor: librarySelected ? 'action.selected' : 'action.hover' },
+                }}
+              >
+                <IconAdjustments size={18} />
               </IconButton>
             </Tooltip>
             <Tooltip
@@ -712,6 +782,13 @@ export const DrawerLayout: FC<PropsWithChildren<{ contentWidth?: 'default' | 'wi
                 <Typography variant='caption' color='text.secondary'>Knowledge</Typography>
                 <Typography variant='body2' sx={{ fontWeight: 600 }} noWrap>
                   Knowledge workspace
+                </Typography>
+              </Stack>
+            ) : librarySelected ? (
+              <Stack sx={{ minWidth: 0, flex: 1 }}>
+                <Typography variant='caption' color='text.secondary'>Library</Typography>
+                <Typography variant='body2' sx={{ fontWeight: 600 }} noWrap>
+                  Source library
                 </Typography>
               </Stack>
             ) : (

@@ -6,6 +6,7 @@ import { useConstCallback, useRefCallback } from '../hooks';
 
 const PATH_SETUP = '/setup';
 const PATH_CHAT = '/chat';
+const PATH_LIBRARY = '/library';
 const PATH_KNOWLEDGE = '/knowledge';
 const PATH_NODES = '/nodes';
 const PATH_SETTINGS = '/settings';
@@ -49,6 +50,7 @@ export const MainRouter = () => {
     if (
       status === 'available'
       && !pathname.startsWith(PATH_CHAT)
+      && !pathname.startsWith(PATH_LIBRARY)
       && !pathname.startsWith(PATH_KNOWLEDGE)
       && !pathname.startsWith(PATH_NODES)
       && !pathname.startsWith(PATH_SETTINGS)
@@ -71,6 +73,14 @@ export const MainRouter = () => {
       element: (
         <Suspense fallback={<div>Loading...</div>}>
           <PageChat />
+        </Suspense>
+      ),
+    },
+    {
+      path: PATH_LIBRARY,
+      element: (
+        <Suspense fallback={<div>Loading...</div>}>
+          <PageKnowledge />
         </Suspense>
       ),
     },

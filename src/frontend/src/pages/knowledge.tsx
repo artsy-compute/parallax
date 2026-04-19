@@ -7,6 +7,7 @@ import {
   Dialog,
   DialogContent,
   DialogTitle,
+  Drawer,
   IconButton,
   MenuItem,
   Paper,
@@ -18,11 +19,17 @@ import {
   ToggleButtonGroup,
   Tooltip,
   Typography,
+  useMediaQuery,
+  useTheme,
 } from '@mui/material';
 import {
   IconDatabaseSearch,
+  IconFile,
   IconEye,
   IconFilePlus,
+  IconFolder,
+  IconFolderOpen,
+  IconInfoCircle,
   IconLink,
   IconX,
   IconSourceCode,
@@ -38,6 +45,7 @@ import { AlertDialog } from '../components/mui';
 import { useCluster } from '../services';
 import {
   createKnowledgeLocalSource,
+  deleteKnowledgeLibraryFile,
   deleteKnowledgePages,
   createKnowledgeUploadedSource,
   createKnowledgeUrlSource,
@@ -45,18 +53,26 @@ import {
   getAppSettings,
   getKnowledgeDocument,
   getKnowledgeHealth,
+  getKnowledgeLibrary,
+  getKnowledgeLibraryFile,
   getKnowledgeJobs,
   getKnowledgePage,
   getKnowledgePages,
   getKnowledgeSources,
   generateKnowledgePages,
+  importKnowledgeLibraryUrl,
+  ingestKnowledgeLibraryPath,
   lintKnowledgeWiki,
   regenerateKnowledgePage,
   searchKnowledge,
+  uploadKnowledgeLibraryFile,
   updateAppSettings,
   type KnowledgeDocumentDetail,
   type KnowledgeHealth,
   type KnowledgeJob,
+  type KnowledgeLibraryFileResponse,
+  type KnowledgeLibraryListingResponse,
+  type KnowledgeLibraryTreeNode,
   type KnowledgePageDetail,
   type KnowledgePageSummary,
   type KnowledgeSearchResponse,
@@ -74,8 +90,9 @@ import {
   type LlmProviderId,
 } from '../services/llm-providers';
 
-type KnowledgeSection = 'wiki' | 'overview' | 'ingest' | 'search' | 'sources' | 'jobs' | 'settings';
+type KnowledgeSection = 'wiki' | 'overview' | 'library' | 'ingest' | 'search' | 'sources' | 'jobs' | 'settings';
 type WikiViewMode = 'rendered' | 'source';
+type LibraryPane = 'folders' | 'items' | 'preview';
 type PendingUploadFile = {
   id: string;
   file: File;
@@ -147,6 +164,24 @@ const formatFileSize = (value: number) => {
   return `${size >= 10 || index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}`;
 };
 
+const formatSourceTypeLabel = (value: string) => {
+  switch (String(value || '').trim()) {
+    case 'url':
+      return 'URL';
+    case 'uploaded_file':
+      return 'Upload';
+    case 'library_path':
+      return 'Library';
+    default:
+      return 'Workspace';
+  }
+};
+
+const formatLibraryPathLabel = (value: string) => {
+  const normalized = String(value || '').trim().replace(/^\/+|\/+$/g, '');
+  return normalized || '/';
+};
+
 const normalizeWikiMarkdown = (content: string, title?: string, summary?: string) => {
   let normalized = String(content || '').replace(/\r\n/g, '\n');
   const normalizedTitle = String(title || '').trim();
@@ -180,8 +215,13 @@ const normalizeWikiMarkdown = (content: string, title?: string, summary?: string
 export default function PageKnowledge() {
   const location = useLocation();
   const navigate = useNavigate();
+  const theme = useTheme();
+  const narrowLibraryLayout = useMediaQuery(theme.breakpoints.down('lg'));
   const { pageId: pageIdParam = '' } = useParams<{ pageId?: string }>();
-  const activeSection = normalizeSection(location.search);
+  const libraryRouteSelected = location.pathname.startsWith('/library');
+  const libraryPanel = new URLSearchParams(location.search).get('panel') || '';
+  const activeSection = libraryRouteSelected ? 'library' : normalizeSection(location.search);
+  const librarySettingsOpen = libraryRouteSelected && libraryPanel === 'settings';
   const legacySelectedPageParam = new URLSearchParams(location.search).get('page') || '';
   const selectedPageParam = String(pageIdParam || legacySelectedPageParam || '').trim();
   const [{ config: { clusterProfiles } }] = useCluster();
@@ -194,12 +234,27 @@ export default function PageKnowledge() {
   const [selectedPage, setSelectedPage] = useState<KnowledgePageDetail | null>(null);
   const [searchResults, setSearchResults] = useState<KnowledgeSearchResponse | null>(null);
   const [selectedDocument, setSelectedDocument] = useState<KnowledgeDocumentDetail | null>(null);
+  const [libraryListing, setLibraryListing] = useState<KnowledgeLibraryListingResponse | null>(null);
+  const [libraryPreview, setLibraryPreview] = useState<KnowledgeLibraryFileResponse | null>(null);
+  const [libraryBackendMode, setLibraryBackendMode] = useState<'local'>('local');
+  const [libraryImportModalOpen, setLibraryImportModalOpen] = useState(false);
+  const [libraryPane, setLibraryPane] = useState<LibraryPane>('items');
   const [localPath, setLocalPath] = useState('');
   const [urlValue, setUrlValue] = useState('');
+  const [libraryUrlValue, setLibraryUrlValue] = useState('');
+  const [libraryWebdavEndpoint, setLibraryWebdavEndpoint] = useState('');
+  const [libraryWebdavUsername, setLibraryWebdavUsername] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
+  const [libraryPath, setLibraryPath] = useState('');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [searching, setSearching] = useState(false);
+  const [libraryLoading, setLibraryLoading] = useState(false);
+  const [libraryPreviewLoading, setLibraryPreviewLoading] = useState(false);
+  const [libraryUploading, setLibraryUploading] = useState(false);
+  const [libraryImportingUrl, setLibraryImportingUrl] = useState(false);
+  const [libraryIngestingPath, setLibraryIngestingPath] = useState('');
+  const [deletingLibraryFilePath, setDeletingLibraryFilePath] = useState('');
   const [ingestingLocal, setIngestingLocal] = useState(false);
   const [ingestingUrl, setIngestingUrl] = useState(false);
   const [uploadingDocuments, setUploadingDocuments] = useState(false);
@@ -215,6 +270,7 @@ export default function PageKnowledge() {
   const [wikiViewMode, setWikiViewMode] = useState<WikiViewMode>('rendered');
   const [deletingSourceId, setDeletingSourceId] = useState('');
   const [pendingDeleteSource, setPendingDeleteSource] = useState<null | { id: string; label: string }>(null);
+  const [pendingDeleteLibraryFile, setPendingDeleteLibraryFile] = useState<null | { path: string; label: string }>(null);
   const [confirmDeleteWikiPages, setConfirmDeleteWikiPages] = useState(false);
   const [llmProviders, setLlmProviders] = useState<Record<LlmProviderId, LlmProviderConfig>>(
     parseLlmProviderConfigs(undefined),
@@ -225,6 +281,7 @@ export default function PageKnowledge() {
   const [savingGenerationConfig, setSavingGenerationConfig] = useState(false);
   const [error, setError] = useState('');
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
+  const libraryUploadInputRef = useRef<HTMLInputElement | null>(null);
 
   const loadPageData = useRefCallback(async () => {
     setRefreshing(true);
@@ -258,11 +315,38 @@ export default function PageKnowledge() {
     void loadPageData();
   }, [loadPageData]);
 
+  const loadLibrary = useRefCallback(async (nextPath?: string) => {
+    const targetPath = String(nextPath ?? libraryPath ?? '').trim();
+    setLibraryLoading(true);
+    try {
+      const listing = await getKnowledgeLibrary(targetPath);
+      setLibraryListing(listing);
+      setLibraryPath(String(listing.current_path || ''));
+      setError('');
+      return listing;
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+      return null;
+    } finally {
+      setLibraryLoading(false);
+    }
+  });
+
   useEffect(() => {
     if (!pageIdParam && legacySelectedPageParam && activeSection === 'wiki') {
       navigate(`/knowledge/${encodeURIComponent(legacySelectedPageParam)}`, { replace: true });
     }
   }, [activeSection, legacySelectedPageParam, navigate, pageIdParam]);
+
+  useEffect(() => {
+    if (activeSection !== 'library') {
+      return;
+    }
+    if (libraryListing || libraryLoading) {
+      return;
+    }
+    void loadLibrary('');
+  }, [activeSection, libraryListing, libraryLoading, loadLibrary]);
 
   useEffect(() => {
     if (activeSection !== 'wiki') {
@@ -542,6 +626,123 @@ export default function PageKnowledge() {
     }
   });
 
+  const onOpenLibraryDirectory = useRefCallback(async (nextPath: string) => {
+    const listing = await loadLibrary(nextPath);
+    if (listing) {
+      setLibraryPreview(null);
+      setLibraryPane('items');
+    }
+  });
+
+  const onOpenLibraryFile = useRefCallback(async (path: string) => {
+    const normalizedPath = String(path || '').trim();
+    if (!normalizedPath) {
+      return;
+    }
+    setLibraryPreviewLoading(true);
+    try {
+      const result = await getKnowledgeLibraryFile(normalizedPath);
+      setLibraryPreview(result);
+      setLibraryPane('preview');
+      setError('');
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    } finally {
+      setLibraryPreviewLoading(false);
+    }
+  });
+
+  const onUploadLibraryFiles = useRefCallback(async (files: FileList | File[] | null) => {
+    const nextFiles = files ? Array.from(files) : [];
+    if (nextFiles.length === 0) {
+      return;
+    }
+    setLibraryUploading(true);
+    try {
+      for (const file of nextFiles) {
+        await uploadKnowledgeLibraryFile(file, libraryPath);
+      }
+      await loadLibrary(libraryPath);
+      setLibraryImportModalOpen(false);
+      setError('');
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    } finally {
+      setLibraryUploading(false);
+      if (libraryUploadInputRef.current) {
+        libraryUploadInputRef.current.value = '';
+      }
+    }
+  });
+
+  const onImportLibraryUrl = useRefCallback(async () => {
+    const normalizedUrl = libraryUrlValue.trim();
+    if (!normalizedUrl) {
+      return;
+    }
+    setLibraryImportingUrl(true);
+    try {
+      const result = await importKnowledgeLibraryUrl(normalizedUrl);
+      setLibraryUrlValue('');
+      await loadLibrary(result.current_path || libraryPath);
+      if (result.stored_file?.preview_supported) {
+        void onOpenLibraryFile(result.stored_file.path);
+      } else {
+        setLibraryPreview(null);
+        setLibraryPane('items');
+      }
+      setLibraryImportModalOpen(false);
+      setError('');
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    } finally {
+      setLibraryImportingUrl(false);
+    }
+  });
+
+  const onIngestLibrary = useRefCallback(async (path: string) => {
+    const normalizedPath = String(path || '').trim();
+    setLibraryIngestingPath(normalizedPath || '__root__');
+    try {
+      await ingestKnowledgeLibraryPath(normalizedPath);
+      await Promise.all([loadPageData(), loadLibrary(libraryPath)]);
+      setError('');
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    } finally {
+      setLibraryIngestingPath('');
+    }
+  });
+
+  const onDeleteLibraryFile = useRefCallback(async (path: string) => {
+    const normalizedPath = String(path || '').trim();
+    if (!normalizedPath) {
+      return;
+    }
+    setDeletingLibraryFilePath(normalizedPath);
+    try {
+      const result = await deleteKnowledgeLibraryFile(normalizedPath);
+      if (libraryPreview?.item.path === normalizedPath) {
+        setLibraryPreview(null);
+        setLibraryPane('items');
+      }
+      setPendingDeleteLibraryFile(null);
+      await loadLibrary(result.current_path || libraryPath);
+      setError('');
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    } finally {
+      setDeletingLibraryFilePath('');
+    }
+  });
+
+  const confirmDeleteLibraryFile = useRefCallback(async () => {
+    if (!pendingDeleteLibraryFile) {
+      return;
+    }
+    await onDeleteLibraryFile(pendingDeleteLibraryFile.path);
+  });
+
   const onSectionChange = useRefCallback((_event: SyntheticEvent, value: string) => {
     if (!KNOWLEDGE_SECTIONS.includes(value as KnowledgeSection)) {
       return;
@@ -818,8 +1019,8 @@ export default function PageKnowledge() {
                       {item.source_title || item.canonical_uri}
                     </Typography>
                   </Stack>
-                  <Stack direction='row' sx={{ gap: 0.75, alignItems: 'center', flexWrap: 'wrap' }}>
-                    <Chip size='small' label={item.source_type === 'url' ? 'URL' : 'Workspace'} />
+                    <Stack direction='row' sx={{ gap: 0.75, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <Chip size='small' label={formatSourceTypeLabel(item.source_type)} />
                     <Button
                       size='small'
                       variant='text'
@@ -914,7 +1115,7 @@ export default function PageKnowledge() {
                   </Stack>
                 </Stack>
                 <Typography variant='body2' color='text.secondary'>
-                  {source.document_count} document{source.document_count === 1 ? '' : 's'} indexed
+                  {formatSourceTypeLabel(source.source_type)} source · {source.document_count} document{source.document_count === 1 ? '' : 's'} indexed
                 </Typography>
                 {source.last_error && (
                   <Typography variant='caption' color='error.main'>
@@ -974,6 +1175,508 @@ export default function PageKnowledge() {
       </Stack>
     </Paper>
   );
+
+  const renderLibraryTreeNode = (node: KnowledgeLibraryTreeNode, depth = 0): JSX.Element => (
+    <Stack key={node.id || '__root__'} sx={{ gap: 0.25 }}>
+      <Button
+        variant='text'
+        color='inherit'
+        onClick={() => {
+          void onOpenLibraryDirectory(node.path);
+        }}
+        sx={{
+          justifyContent: 'flex-start',
+          textTransform: 'none',
+          pl: 1 + (depth * 1.25),
+          py: 0.6,
+          borderRadius: 2,
+          bgcolor: node.path === libraryPath ? 'action.selected' : 'transparent',
+        }}
+        startIcon={node.path === libraryPath ? <IconFolderOpen size={16} /> : <IconFolder size={16} />}
+      >
+        {node.name}
+      </Button>
+      {node.children.map((child) => renderLibraryTreeNode(child, depth + 1))}
+    </Stack>
+  );
+
+  const renderLibrarySection = () => {
+    const breadcrumbParts = libraryPath ? libraryPath.split('/').filter(Boolean) : [];
+    let breadcrumbPath = '';
+    const foldersPane = (
+      <Paper variant='outlined' sx={{ p: 1.5, borderRadius: 2.5, bgcolor: 'background.paper', minHeight: { xs: '20rem', lg: '28rem' } }}>
+        <Stack sx={{ gap: 1 }}>
+          <Typography variant='body1' sx={{ fontWeight: 700 }}>
+            Folders
+          </Typography>
+          <Box sx={{ maxHeight: { xs: 'calc(100dvh - 20rem)', lg: '38rem' }, overflowY: 'auto', pr: 0.5 }}>
+            {libraryListing ? (
+              renderLibraryTreeNode(libraryListing.tree)
+            ) : (
+              <Typography variant='body2' color='text.secondary'>
+                {libraryLoading ? 'Loading folders...' : 'No folders loaded yet.'}
+              </Typography>
+            )}
+          </Box>
+        </Stack>
+      </Paper>
+    );
+    const itemsPane = (
+      <Paper variant='outlined' sx={{ p: 1.5, borderRadius: 2.5, bgcolor: 'background.paper', minHeight: { xs: '20rem', lg: '28rem' } }}>
+        <Stack sx={{ gap: 1.25 }}>
+          <Stack direction='row' sx={{ justifyContent: 'space-between', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+            <Stack sx={{ gap: 0.25 }}>
+              <Typography variant='body1' sx={{ fontWeight: 700 }}>
+                Current folder
+              </Typography>
+              <Stack direction='row' sx={{ gap: 0.5, flexWrap: 'wrap', alignItems: 'center' }}>
+                <Button
+                  size='small'
+                  variant='text'
+                  color='inherit'
+                  onClick={() => {
+                    void onOpenLibraryDirectory('');
+                  }}
+                  sx={{ textTransform: 'none', minWidth: 0, px: 0.75 }}
+                >
+                  /
+                </Button>
+                {breadcrumbParts.map((part) => {
+                  breadcrumbPath = breadcrumbPath ? `${breadcrumbPath}/${part}` : part;
+                  const partPath = breadcrumbPath;
+                  return (
+                    <Button
+                      key={partPath}
+                      size='small'
+                      variant='text'
+                      color='inherit'
+                      onClick={() => {
+                        void onOpenLibraryDirectory(partPath);
+                      }}
+                      sx={{ textTransform: 'none', minWidth: 0, px: 0.75 }}
+                    >
+                      {part}
+                    </Button>
+                  );
+                })}
+              </Stack>
+            </Stack>
+            {libraryListing?.parent_path !== null && (
+              <Button
+                size='small'
+                variant='outlined'
+                onClick={() => {
+                  void onOpenLibraryDirectory(String(libraryListing?.parent_path || ''));
+                }}
+              >
+                Up
+              </Button>
+            )}
+          </Stack>
+
+          <Stack sx={{ gap: 0.75, maxHeight: { xs: 'calc(100dvh - 20rem)', lg: '38rem' }, overflowY: 'auto', pr: 0.5 }}>
+            {!libraryListing && (
+              <Typography variant='body2' color='text.secondary'>
+                {libraryLoading ? 'Loading library...' : 'No library listing yet.'}
+              </Typography>
+            )}
+            {libraryListing?.items.length === 0 && (
+              <Typography variant='body2' color='text.secondary'>
+                This folder is empty.
+              </Typography>
+            )}
+            {libraryListing?.items.map((item) => (
+              <Paper key={item.path || `${item.kind}:${item.name}`} variant='outlined' sx={{ p: 1.25, borderRadius: 2 }}>
+                <Stack sx={{ gap: 0.75 }}>
+                  <Stack direction='row' sx={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 1 }}>
+                    <Stack sx={{ gap: 0.2, minWidth: 0, flex: 1 }}>
+                      <Stack direction='row' sx={{ gap: 0.75, alignItems: 'center', minWidth: 0 }}>
+                        {item.kind === 'directory' ? <IconFolder size={16} /> : <IconFile size={16} />}
+                        <Typography variant='body2' sx={{ fontWeight: 700 }} noWrap>
+                          {item.name}
+                        </Typography>
+                      </Stack>
+                      <Typography variant='caption' color='text.secondary'>
+                        {formatLibraryPathLabel(item.path)}
+                      </Typography>
+                    </Stack>
+                    <Stack direction='row' sx={{ gap: 0.5, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                      <Chip
+                        size='small'
+                        label={item.kind === 'directory' ? `${item.child_count ?? 0} items` : (item.extension || item.mime_type || 'file')}
+                      />
+                      {item.kind === 'directory' ? (
+                        <Button
+                          size='small'
+                          variant='text'
+                          onClick={() => {
+                            void onOpenLibraryDirectory(item.path);
+                          }}
+                        >
+                          Open
+                        </Button>
+                      ) : (
+                        <Button
+                          size='small'
+                          variant='text'
+                          onClick={() => {
+                            void onOpenLibraryFile(item.path);
+                          }}
+                          disabled={!item.preview_supported || libraryPreviewLoading}
+                        >
+                          Preview
+                        </Button>
+                      )}
+                      {item.kind === 'file' && (
+                        <Tooltip title={deletingLibraryFilePath === item.path ? 'Deleting file' : 'Remove file'}>
+                          <span>
+                            <IconButton
+                              size='small'
+                              color='error'
+                              disabled={deletingLibraryFilePath === item.path}
+                              onClick={() => {
+                                setPendingDeleteLibraryFile({
+                                  path: item.path,
+                                  label: item.name || item.path,
+                                });
+                              }}
+                            >
+                              <IconTrash size={15} />
+                            </IconButton>
+                          </span>
+                        </Tooltip>
+                      )}
+                      {item.kind === 'file' ? (
+                        <Tooltip title={libraryIngestingPath === item.path ? 'Ingesting file' : 'Ingest file'}>
+                          <span>
+                            <IconButton
+                              size='small'
+                              color='primary'
+                              disabled={!item.ingest_supported || libraryIngestingPath !== ''}
+                              onClick={() => {
+                                void onIngestLibrary(item.path);
+                              }}
+                            >
+                              <IconUpload size={15} />
+                            </IconButton>
+                          </span>
+                        </Tooltip>
+                      ) : (
+                        <Button
+                          size='small'
+                          variant='outlined'
+                          onClick={() => {
+                            void onIngestLibrary(item.path);
+                          }}
+                          disabled={!item.ingest_supported || libraryIngestingPath !== ''}
+                        >
+                          {libraryIngestingPath === (item.path || '__root__') ? 'Ingesting...' : 'Ingest'}
+                        </Button>
+                      )}
+                    </Stack>
+                  </Stack>
+                  <Typography variant='caption' color='text.secondary'>
+                    {item.kind === 'file' && item.size !== null ? `${formatFileSize(item.size)} · ` : ''}
+                    Updated {formatDateTime(item.modified_at)}
+                  </Typography>
+                </Stack>
+              </Paper>
+            ))}
+          </Stack>
+        </Stack>
+      </Paper>
+    );
+    const previewPane = (
+      <Paper variant='outlined' sx={{ p: 1.5, borderRadius: 2.5, bgcolor: 'background.paper', minHeight: { xs: '20rem', lg: '28rem' } }}>
+        <Stack sx={{ gap: 1.25 }}>
+          <Typography variant='body1' sx={{ fontWeight: 700 }}>
+            Preview
+          </Typography>
+          {!libraryPreview && !libraryPreviewLoading && (
+            <Typography variant='body2' color='text.secondary'>
+              Select a previewable file to inspect extracted text and import metadata.
+            </Typography>
+          )}
+          {libraryPreviewLoading && (
+            <Typography variant='body2' color='text.secondary'>
+              Loading preview...
+            </Typography>
+          )}
+          {libraryPreview && (
+            <Stack sx={{ gap: 1 }}>
+              <Stack sx={{ gap: 0.25 }}>
+                <Typography variant='body2' sx={{ fontWeight: 700 }}>
+                  {libraryPreview.item.name}
+                </Typography>
+                <Typography variant='caption' color='text.secondary'>
+                  {formatLibraryPathLabel(libraryPreview.item.path)}
+                </Typography>
+              </Stack>
+              <Stack direction='row' sx={{ gap: 0.75, flexWrap: 'wrap' }}>
+                {libraryPreview.item.mime_type && (
+                  <Chip size='small' label={libraryPreview.item.mime_type} />
+                )}
+                {libraryPreview.item.size !== null && (
+                  <Chip size='small' label={formatFileSize(libraryPreview.item.size)} />
+                )}
+              </Stack>
+              {libraryPreview.metadata && (
+                <Box
+                  component='pre'
+                  sx={{
+                    m: 0,
+                    p: 1,
+                    borderRadius: 2,
+                    bgcolor: 'background.default',
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    fontFamily: 'monospace',
+                    fontSize: '0.78rem',
+                  }}
+                >
+                  {JSON.stringify(libraryPreview.metadata, null, 2)}
+                </Box>
+              )}
+              <Box
+                component='pre'
+                sx={{
+                  m: 0,
+                  p: 1.25,
+                  borderRadius: 2,
+                  bgcolor: 'background.default',
+                  maxHeight: { xs: 'calc(100dvh - 22rem)', lg: '32rem' },
+                  overflow: 'auto',
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                  fontFamily: 'monospace',
+                  fontSize: '0.82rem',
+                }}
+              >
+                {libraryPreview.preview_text || 'No text preview available for this file.'}
+              </Box>
+              {libraryPreview.preview_truncated && (
+                <Typography variant='caption' color='text.secondary'>
+                  Preview truncated for readability.
+                </Typography>
+              )}
+            </Stack>
+          )}
+        </Stack>
+      </Paper>
+    );
+
+    return (
+      <Stack
+        sx={{
+          minHeight: 0,
+          height: '100%',
+          flex: 1,
+          gap: 2,
+        }}
+      >
+        <input
+          ref={libraryUploadInputRef}
+          type='file'
+          multiple
+          hidden
+          accept={KNOWLEDGE_UPLOAD_ACCEPT}
+          onChange={(event) => {
+            void onUploadLibraryFiles(event.target.files);
+          }}
+        />
+        <Stack sx={{ gap: 2 }}>
+          {error && (
+            <Alert severity='warning'>
+              {error}
+            </Alert>
+          )}
+
+          <Stack direction='row' sx={{ gap: 1, justifyContent: 'flex-end', alignItems: 'center', flexWrap: 'wrap' }}>
+            <Tooltip title={libraryLoading ? 'Refreshing...' : 'Refresh'}>
+              <span>
+                <IconButton
+                  onClick={() => {
+                    void loadLibrary(libraryPath);
+                  }}
+                  disabled={libraryLoading}
+                  sx={{ border: '1px solid', borderColor: 'divider' }}
+                >
+                  <IconRefresh size={17} />
+                </IconButton>
+              </span>
+            </Tooltip>
+            <Button
+              variant='contained'
+              startIcon={<IconFilePlus size={16} />}
+              onClick={() => {
+                setLibraryImportModalOpen(true);
+              }}
+            >
+              Add files or URL
+            </Button>
+          </Stack>
+
+          <Box
+            sx={{
+              display: 'grid',
+              gap: 1.5,
+              gridTemplateColumns: { xs: '1fr', lg: '18rem minmax(0, 1.2fr) minmax(0, 1fr)' },
+              alignItems: 'start',
+            }}
+          >
+            {narrowLibraryLayout ? (
+              <Stack sx={{ gap: 1.5 }}>
+                <Tabs
+                  value={libraryPane}
+                  onChange={(_event, value: LibraryPane) => setLibraryPane(value)}
+                  variant='fullWidth'
+                  sx={{ bgcolor: 'background.paper', borderRadius: 2 }}
+                >
+                  <Tab value='folders' label='Folders' />
+                  <Tab value='items' label='Files' />
+                  <Tab value='preview' label='Preview' />
+                </Tabs>
+                {libraryPane === 'folders' && foldersPane}
+                {libraryPane === 'items' && itemsPane}
+                {libraryPane === 'preview' && previewPane}
+              </Stack>
+            ) : (
+              <>
+                {foldersPane}
+                {itemsPane}
+                {previewPane}
+              </>
+            )}
+          </Box>
+        </Stack>
+        <Drawer
+          anchor='right'
+          open={librarySettingsOpen}
+          onClose={() => navigate('/library')}
+          PaperProps={{
+            sx: {
+              width: { xs: '100%', sm: '28rem' },
+              maxWidth: '100%',
+            },
+          }}
+        >
+          <Stack sx={{ gap: 2, p: 2 }}>
+            <Stack direction='row' sx={{ justifyContent: 'space-between', alignItems: 'center', gap: 1 }}>
+              <Stack direction='row' sx={{ gap: 0.75, alignItems: 'center' }}>
+                <Typography variant='h3'>Library settings</Typography>
+                <Tooltip
+                  title='Reserved for backend-level library configuration. Local works now; remote backends such as WebDAV can be plugged into the same browser later.'
+                  placement='bottom'
+                >
+                  <IconButton size='small' sx={{ color: 'text.secondary' }}>
+                    <IconInfoCircle size={16} />
+                  </IconButton>
+                </Tooltip>
+              </Stack>
+              <IconButton
+                onClick={() => navigate('/library')}
+                sx={{ color: 'text.secondary' }}
+              >
+                <IconX size={18} />
+              </IconButton>
+            </Stack>
+
+            <TextField
+              select
+              label='Storage backend'
+              value={libraryBackendMode}
+              onChange={(event) => setLibraryBackendMode(event.target.value as 'local')}
+              fullWidth
+            >
+              <MenuItem value='local'>Local workspace library</MenuItem>
+            </TextField>
+            <TextField
+              label='URL imports folder'
+              value={libraryListing?.imports_path || '_imports/url'}
+              InputProps={{ readOnly: true }}
+              fullWidth
+            />
+            <TextField
+              label='Current folder'
+              value={formatLibraryPathLabel(libraryPath)}
+              InputProps={{ readOnly: true }}
+              fullWidth
+            />
+            <TextField
+              label='WebDAV endpoint'
+              value={libraryWebdavEndpoint}
+              onChange={(event) => setLibraryWebdavEndpoint(event.target.value)}
+              placeholder='https://dav.example.com/remote.php/dav/files/...'
+              disabled
+              fullWidth
+            />
+            <TextField
+              label='WebDAV username'
+              value={libraryWebdavUsername}
+              onChange={(event) => setLibraryWebdavUsername(event.target.value)}
+              placeholder='username'
+              disabled
+              fullWidth
+            />
+          </Stack>
+        </Drawer>
+        <Dialog
+          open={libraryImportModalOpen}
+          onClose={() => {
+            if (libraryUploading || libraryImportingUrl) {
+              return;
+            }
+            setLibraryImportModalOpen(false);
+          }}
+          fullWidth
+          maxWidth='sm'
+        >
+          <DialogTitle>Add files or URL</DialogTitle>
+          <DialogContent dividers>
+            <Stack sx={{ gap: 2 }}>
+              <Button
+                variant='contained'
+                startIcon={<IconUpload size={16} />}
+                onClick={() => {
+                  libraryUploadInputRef.current?.click();
+                }}
+                disabled={libraryUploading}
+                sx={{ alignSelf: 'flex-start' }}
+              >
+                {libraryUploading ? 'Uploading...' : 'Choose files'}
+              </Button>
+              <TextField
+                fullWidth
+                label='Import URL'
+                placeholder='https://example.com/article'
+                value={libraryUrlValue}
+                onChange={(event) => setLibraryUrlValue(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    void onImportLibraryUrl();
+                  }
+                }}
+              />
+              <Stack direction={{ xs: 'column', sm: 'row' }} sx={{ gap: 1, justifyContent: 'space-between', alignItems: { sm: 'center' } }}>
+                <Button
+                  variant='contained'
+                  color='secondary'
+                  startIcon={<IconLink size={16} />}
+                  onClick={() => {
+                    void onImportLibraryUrl();
+                  }}
+                  disabled={libraryImportingUrl || !libraryUrlValue.trim()}
+                >
+                  {libraryImportingUrl ? 'Importing...' : 'Import URL'}
+                </Button>
+              </Stack>
+            </Stack>
+          </DialogContent>
+        </Dialog>
+      </Stack>
+    );
+  };
 
   const renderWikiSection = () => (
     <Paper
@@ -1335,9 +2038,9 @@ export default function PageKnowledge() {
   );
 
   return (
-    <DrawerLayout contentWidth={activeSection === 'wiki' ? 'full' : 'wide'}>
+    <DrawerLayout contentWidth={activeSection === 'wiki' || libraryRouteSelected ? 'full' : 'wide'}>
       <Stack sx={{ minHeight: 0, height: '100%', flex: 1, gap: 2.5 }}>
-        {activeSection !== 'wiki' && (
+        {activeSection !== 'wiki' && !libraryRouteSelected && (
           <Stack direction='row' sx={{ justifyContent: 'flex-end', alignItems: 'flex-start', gap: 2, flexWrap: 'wrap' }}>
             <Button
               variant='outlined'
@@ -1351,7 +2054,9 @@ export default function PageKnowledge() {
           </Stack>
         )}
 
-        {activeSection === 'wiki' ? (
+        {libraryRouteSelected ? (
+          renderLibrarySection()
+        ) : activeSection === 'wiki' ? (
           renderWikiSection()
         ) : (
           <Paper variant='outlined' sx={{ borderRadius: 3, bgcolor: 'background.default', overflow: 'hidden' }}>
@@ -1554,6 +2259,21 @@ export default function PageKnowledge() {
           confirmLabel='Delete'
           autoFocusAction='cancel'
           onConfirm={confirmDeleteSource}
+        />
+        <AlertDialog
+          open={!!pendingDeleteLibraryFile}
+          onClose={() => setPendingDeleteLibraryFile(null)}
+          color='warning'
+          title='Remove file'
+          content={(
+            <Typography variant='body2'>
+              Remove {pendingDeleteLibraryFile ? `"${pendingDeleteLibraryFile.label}"` : 'this file'} from the library?
+            </Typography>
+          )}
+          cancelLabel='Cancel'
+          confirmLabel='Remove'
+          autoFocusAction='cancel'
+          onConfirm={confirmDeleteLibraryFile}
         />
         <AlertDialog
           open={confirmDeleteWikiPages}

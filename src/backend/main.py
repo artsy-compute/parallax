@@ -1143,6 +1143,103 @@ async def knowledge_document_detail(document_id: str) -> JSONResponse:
     )
 
 
+@app.get("/knowledge/library")
+async def knowledge_library(path: str = "") -> JSONResponse:
+    try:
+        payload = await knowledge_client.list_library(path)
+    except KnowledgeServiceError as error:
+        return _knowledge_error_response("knowledge_library", error)
+    return JSONResponse(
+        content={"type": "knowledge_library", "data": payload},
+        status_code=200,
+    )
+
+
+@app.get("/knowledge/library/file")
+async def knowledge_library_file(path: str) -> JSONResponse:
+    try:
+        payload = await knowledge_client.get_library_file(path)
+    except KnowledgeServiceError as error:
+        return _knowledge_error_response("knowledge_library_file", error)
+    return JSONResponse(
+        content={"type": "knowledge_library_file", "data": payload},
+        status_code=200,
+    )
+
+
+@app.delete("/knowledge/library/file")
+async def knowledge_library_file_delete(path: str) -> JSONResponse:
+    try:
+        payload = await knowledge_client.delete_library_file(path)
+    except KnowledgeServiceError as error:
+        return _knowledge_error_response("knowledge_library_file_delete", error)
+    return JSONResponse(
+        content={"type": "knowledge_library_file_delete", "data": payload},
+        status_code=200,
+    )
+
+
+@app.post("/knowledge/library/file/delete")
+async def knowledge_library_file_delete_post(raw_request: Request) -> JSONResponse:
+    request_data = await _read_json_request(raw_request)
+    try:
+        payload = await knowledge_client.delete_library_file(str(request_data.get("path") or ""))
+    except KnowledgeServiceError as error:
+        return _knowledge_error_response("knowledge_library_file_delete", error)
+    return JSONResponse(
+        content={"type": "knowledge_library_file_delete", "data": payload},
+        status_code=200,
+    )
+
+
+@app.post("/knowledge/library/url")
+async def knowledge_library_url(raw_request: Request) -> JSONResponse:
+    request_data = await _read_json_request(raw_request)
+    try:
+        payload = await knowledge_client.import_library_url(str(request_data.get("url") or ""))
+    except KnowledgeServiceError as error:
+        return _knowledge_error_response("knowledge_library_url", error)
+    return JSONResponse(
+        content={"type": "knowledge_library_url", "data": payload},
+        status_code=200,
+    )
+
+
+@app.post("/knowledge/library/ingest")
+async def knowledge_library_ingest(raw_request: Request) -> JSONResponse:
+    request_data = await _read_json_request(raw_request)
+    try:
+        payload = await knowledge_client.ingest_library_path(str(request_data.get("path") or ""))
+    except KnowledgeServiceError as error:
+        return _knowledge_error_response("knowledge_library_ingest", error)
+    return JSONResponse(
+        content={"type": "knowledge_library_ingest", "data": payload},
+        status_code=200,
+    )
+
+
+@app.post("/knowledge/library/upload")
+async def knowledge_library_upload(
+    file: UploadFile = File(...),
+    directory: str = "",
+) -> JSONResponse:
+    try:
+        payload = await knowledge_client.upload_library_file(
+            file.filename or "uploaded-file",
+            await file.read(),
+            directory=directory,
+            content_type=file.content_type,
+        )
+    except KnowledgeServiceError as error:
+        return _knowledge_error_response("knowledge_library_upload", error)
+    finally:
+        await file.close()
+    return JSONResponse(
+        content={"type": "knowledge_library_upload", "data": payload},
+        status_code=200,
+    )
+
+
 @app.get("/knowledge/pages")
 async def knowledge_pages() -> JSONResponse:
     try:
