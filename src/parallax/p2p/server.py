@@ -546,6 +546,13 @@ class GradientServer:
         self._heartbeat_last_force_rejoin_at = now
         logger.warning("Forcing scheduler rejoin after heartbeat failures: %s", reason)
         try:
+            if not self._ensure_scheduler_stub(
+                force_refresh=True,
+                rediscover=True,
+                reason=f"forced rejoin after heartbeat failures: {reason}",
+            ):
+                logger.warning("Forced scheduler rejoin aborted: scheduler stub unavailable")
+                return False
             node_info = self.get_node_info()
             if node_info == {}:
                 logger.warning("Forced scheduler rejoin aborted: empty node info")
@@ -565,6 +572,110 @@ class GradientServer:
             return self._apply_scheduler_allocation(response, source="Forced rejoin")
         except Exception as e:
             logger.warning("Forced scheduler rejoin failed: %s", e, exc_info=True)
+            return False
+
+    def _resolve_scheduler_peer_id(
+        self,
+        *,
+        refresh: bool = False,
+        max_attempts: int = 1,
+        retry_delay_sec: float = 1.0,
+    ) -> bool:
+        if self.scheduler_addr is not None and self.scheduler_addr != "auto":
+            next_peer_id = str(self.scheduler_addr).split("/")[-1]
+            if not next_peer_id:
+                logger.warning("Configured scheduler address did not include a peer id: %s", self.scheduler_addr)
+                return False
+            if next_peer_id != self.scheduler_peer_id:
+                logger.info("Using configured scheduler peer id%s: %s", " (refreshed)" if refresh else "", next_peer_id)
+                self.scheduler_peer_id = next_peer_id
+                self.scheduler_stub = None
+            return True
+
+        if self.lattica is None:
+            logger.warning("Cannot resolve scheduler peer id without a lattica instance")
+            return False
+
+        for attempt in range(max(1, int(max_attempts or 1))):
+            try:
+                peer_record = self.lattica.get("scheduler_peer_id")
+                next_peer_id = peer_record.value if peer_record is not None else None
+                if next_peer_id:
+                    if next_peer_id != self.scheduler_peer_id:
+                        logger.info(
+                            "Discovered scheduler peer id%s: %s",
+                            " (refreshed)" if refresh else "",
+                            next_peer_id,
+                        )
+                        self.scheduler_peer_id = str(next_peer_id)
+                        self.scheduler_stub = None
+                    return True
+                logger.info(
+                    "Scheduler peer id not available yet%s (attempt %d/%d)",
+                    " during refresh" if refresh else "",
+                    attempt + 1,
+                    max(1, int(max_attempts or 1)),
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to resolve scheduler peer id%s (attempt %d/%d): %s",
+                    " during refresh" if refresh else "",
+                    attempt + 1,
+                    max(1, int(max_attempts or 1)),
+                    e,
+                )
+            if attempt + 1 < max(1, int(max_attempts or 1)):
+                time.sleep(max(0.0, float(retry_delay_sec or 0.0)))
+
+        logger.warning("Failed to resolve scheduler peer id%s", " during refresh" if refresh else "")
+        return False
+
+    def _ensure_scheduler_stub(
+        self,
+        *,
+        force_refresh: bool = False,
+        rediscover: bool = False,
+        reason: str = "",
+    ) -> bool:
+        if self.lattica is None:
+            logger.warning("Cannot ensure scheduler stub without a lattica instance")
+            return False
+
+        if rediscover:
+            if not self._resolve_scheduler_peer_id(refresh=True, max_attempts=5, retry_delay_sec=1.0):
+                return False
+        elif not self.scheduler_peer_id:
+            if not self._resolve_scheduler_peer_id(refresh=False, max_attempts=1, retry_delay_sec=0.0):
+                return False
+
+        if not self.scheduler_peer_id:
+            logger.warning("Cannot ensure scheduler stub without a scheduler peer id")
+            return False
+
+        if self.scheduler_stub is not None and not force_refresh:
+            return True
+
+        try:
+            self.scheduler_stub = RPCConnectionHandler(self.lattica, None, None).get_stub(
+                self.scheduler_peer_id
+            )
+            logger.info(
+                "%s scheduler RPC stub for peer %s%s",
+                "Refreshed" if force_refresh else "Initialized",
+                self.scheduler_peer_id,
+                f" ({reason})" if reason else "",
+            )
+            return True
+        except Exception as e:
+            self.scheduler_stub = None
+            logger.warning(
+                "Failed to %s scheduler RPC stub for peer %s%s: %s",
+                "refresh" if force_refresh else "initialize",
+                self.scheduler_peer_id,
+                f" ({reason})" if reason else "",
+                e,
+                exc_info=True,
+            )
             return False
 
     def check_and_release_disk_weight(self):
@@ -622,20 +733,7 @@ class GradientServer:
 
         if self.scheduler_addr == "auto":
             self.scheduler_peer_id = None
-            for _ in range(20):
-                try:
-                    time.sleep(3)
-                    self.scheduler_peer_id = self.lattica.get("scheduler_peer_id")
-                    if self.scheduler_peer_id is not None:
-                        self.scheduler_peer_id = self.scheduler_peer_id.value
-                        logger.info(f"Found scheduler peer id: {self.scheduler_peer_id}")
-                        break
-                    logger.info(
-                        f"Discovering scheduler peer id, {_ + 1} times, you can specify scheduler peer id by -s"
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to get scheduler addr: {e}, waiting for 3 seconds.")
-            if self.scheduler_peer_id is None:
+            if not self._resolve_scheduler_peer_id(refresh=False, max_attempts=20, retry_delay_sec=3.0):
                 logger.error("Failed to get scheduler peer id")
                 return False
 
@@ -651,9 +749,12 @@ class GradientServer:
 
             if self.scheduler_addr is not None:  # central scheduler mode
                 try:
-                    self.scheduler_stub = RPCConnectionHandler(self.lattica, None, None).get_stub(
-                        self.scheduler_peer_id
-                    )
+                    if not self._ensure_scheduler_stub(
+                        force_refresh=True,
+                        rediscover=self.scheduler_addr == "auto",
+                        reason="initial scheduler join",
+                    ):
+                        raise RuntimeError("Failed to initialize scheduler RPC stub")
                     logger.info(
                         "Building node info before scheduler join (peer_id=%s)",
                         self.scheduler_peer_id,
@@ -996,14 +1097,16 @@ class GradientServer:
                             self._heartbeat_error_count,
                             exc_info=True,
                         )
-                        if (
-                            self.scheduler_addr is not None
-                            and self.scheduler_stub is not None
-                            and self._heartbeat_error_count >= self._heartbeat_force_rejoin_threshold
-                        ):
-                            self._force_scheduler_rejoin(
-                                f"{self._heartbeat_error_count} consecutive heartbeat errors"
+                        if self.scheduler_addr is not None:
+                            self._ensure_scheduler_stub(
+                                force_refresh=True,
+                                rediscover=True,
+                                reason="heartbeat transport error",
                             )
+                            if self._heartbeat_error_count >= self._heartbeat_force_rejoin_threshold:
+                                self._force_scheduler_rejoin(
+                                    f"{self._heartbeat_error_count} consecutive heartbeat errors"
+                                )
 
                     time.sleep(self.heartbeat_interval_sec)
             except Exception as e:
